@@ -810,14 +810,21 @@ async function generateFeedback() {
   if (!payload) return
 
   const formData = new FormData()
-  formData.append('payload', JSON.stringify(payload))
 
   const file = els.coursewareInput.files && els.coursewareInput.files[0]
-  if (file) formData.append('courseware', file)
 
   setGenerating(true)
 
   try {
+    if (file && isPdfFile(file)) {
+      els.generateBtn.textContent = '正在读取 PDF...'
+      await appendPdfPreviewData(formData, file, payload)
+      els.generateBtn.textContent = 'AI 生成中...'
+    }
+
+    formData.append('payload', JSON.stringify(payload))
+    if (file) formData.append('courseware', file)
+
     const response = await fetch('/api/generate-feedback', {
       method: 'POST',
       body: formData
@@ -925,6 +932,71 @@ function buildGeneratePayload() {
 function setGenerating(isGenerating) {
   els.generateBtn.disabled = isGenerating
   els.generateBtn.textContent = isGenerating ? 'AI 生成中...' : 'AI 生成反馈'
+}
+
+function isPdfFile(file) {
+  return file && (
+    file.type === 'application/pdf'
+    || String(file.name || '').toLowerCase().endsWith('.pdf')
+  )
+}
+
+async function appendPdfPreviewData(formData, file, payload) {
+  if (!window.pdfjsLib) {
+    showToast('PDF 解析组件加载失败，将按普通 PDF 上传')
+    return
+  }
+
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+
+  const arrayBuffer = await file.arrayBuffer()
+  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise
+  const maxPages = Math.min(pdf.numPages, 3)
+  const textParts = []
+
+  for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber)
+    const textContent = await page.getTextContent().catch(() => null)
+    if (textContent && Array.isArray(textContent.items)) {
+      textParts.push(textContent.items.map((item) => item.str || '').join(' '))
+    }
+
+    const imageBlob = await renderPdfPageToImageBlob(page)
+    if (imageBlob) {
+      formData.append('pdfPageImage', imageBlob, `${file.name}-page-${pageNumber}.jpg`)
+    }
+  }
+
+  const extractedText = textParts
+    .join('\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (extractedText) {
+    payload.clientPdfText = extractedText.slice(0, 12000)
+  }
+}
+
+async function renderPdfPageToImageBlob(page) {
+  const baseViewport = page.getViewport({ scale: 1 })
+  const scale = Math.min(1.8, 1400 / Math.max(baseViewport.width, 1))
+  const viewport = page.getViewport({ scale })
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+
+  canvas.width = Math.floor(viewport.width)
+  canvas.height = Math.floor(viewport.height)
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+
+  await page.render({
+    canvasContext: context,
+    viewport
+  }).promise
+
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.82)
+  })
 }
 
 function copyAllFeedbacks() {
@@ -1035,6 +1107,10 @@ function getCoursewareStatus(debug) {
   if (!debug.coursewareName) return '未上传课件'
 
   if (!debug.coursewareIsImage) {
+    if (debug.coursewareVisionImageCount && debug.coursewareSentAsImage) {
+      return `${debug.coursewareName}（PDF 前 ${debug.coursewareVisionImageCount} 页已转图片发送，提取 ${debug.coursewareTextLength || 0} 个文字）`
+    }
+
     if (debug.coursewareExtractionSource === 'pdf-ocr') {
       return `${debug.coursewareName}（图片版 PDF 已 OCR 识别 ${debug.coursewareOcrPageCount || 0} 页，${debug.coursewareTextLength || 0} 个文字）`
     }

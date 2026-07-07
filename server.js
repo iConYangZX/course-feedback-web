@@ -173,9 +173,14 @@ app.post('/api/config', (req, res) => {
   })
 })
 
-app.post('/api/generate-feedback', requireAccessMiddleware, upload.single('courseware'), async (req, res) => {
+app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
+  { name: 'courseware', maxCount: 1 },
+  { name: 'pdfPageImage', maxCount: 3 }
+]), async (req, res) => {
   try {
     const session = req.accessSession
+    const coursewareFile = getUploadedFile(req, 'courseware')
+    const pdfPageImages = getUploadedFiles(req, 'pdfPageImage')
 
     const usageClientId = getUsageClientId(session)
     const usageInfo = getUsageInfo(usageClientId)
@@ -188,10 +193,13 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.single('cours
     }
 
     const payload = parsePayload(req.body.payload)
-    validatePayload(payload, Boolean(req.file))
+    validatePayload(payload, Boolean(coursewareFile))
 
     const aiConfig = getAIConfig()
-    const courseware = req.file ? await normalizeCourseware(req.file) : null
+    const courseware = coursewareFile ? await normalizeCourseware(coursewareFile, {
+      clientPdfText: payload.clientPdfText,
+      pdfPageImages
+    }) : null
 
     if (!aiConfig.apiKey) {
       const nextUsage = incrementUsage(usageClientId)
@@ -235,6 +243,16 @@ function parsePayload(rawPayload) {
   } catch (error) {
     throw new Error('提交数据格式错误')
   }
+}
+
+function getUploadedFile(req, fieldName) {
+  const files = req.files && req.files[fieldName]
+  return Array.isArray(files) ? files[0] : null
+}
+
+function getUploadedFiles(req, fieldName) {
+  const files = req.files && req.files[fieldName]
+  return Array.isArray(files) ? files : []
 }
 
 function validatePayload(payload, hasCourseware = false) {
@@ -574,27 +592,59 @@ function safeEqual(left, right) {
   return crypto.timingSafeEqual(leftBuffer, rightBuffer)
 }
 
-async function normalizeCourseware(file) {
+async function normalizeCourseware(file, options = {}) {
   const originalName = file.originalname || 'courseware'
   const mime = getMimeType(originalName, file.mimetype)
   const isImage = mime.startsWith('image/')
+  const pdfPageImages = Array.isArray(options.pdfPageImages) ? options.pdfPageImages : []
   const extraction = isImage
     ? { text: await extractImageText(file.buffer, originalName), source: 'image-ocr', pageCount: 1 }
     : await extractCoursewareText(file.buffer, originalName)
+  const clientPdfText = trim(options.clientPdfText)
+  const extractedText = extraction.text || clientPdfText
+  const extractionSource = extraction.text
+    ? extraction.source
+    : (clientPdfText ? 'browser-pdf-text' : extraction.source)
 
   return {
     name: originalName,
     mime,
     buffer: file.buffer,
-    extractedText: extraction.text,
-    extractionSource: extraction.source,
-    ocrPageCount: extraction.pageCount || 0,
+    extractedText,
+    extractionSource,
+    ocrPageCount: extraction.pageCount || pdfPageImages.length || 0,
     isImage,
     dataUrl: isImage ? `data:${mime};base64,${file.buffer.toString('base64')}` : '',
+    visionImages: pdfPageImages.map((imageFile) => ({
+      name: imageFile.originalname || 'pdf-page.jpg',
+      mime: getMimeType(imageFile.originalname || 'pdf-page.jpg', imageFile.mimetype || 'image/jpeg'),
+      dataUrl: `data:${getMimeType(imageFile.originalname || 'pdf-page.jpg', imageFile.mimetype || 'image/jpeg')};base64,${imageFile.buffer.toString('base64')}`
+    })),
     imageSendAttempted: false,
     imageSendSucceeded: false,
     imageFallbackUsed: false
   }
+}
+
+function hasCoursewareVisionImages(courseware) {
+  return Boolean(courseware && getCoursewareVisionImages(courseware).length)
+}
+
+function getCoursewareVisionImages(courseware) {
+  if (!courseware) return []
+
+  const images = []
+  if (courseware.isImage && courseware.dataUrl) {
+    images.push({ dataUrl: courseware.dataUrl })
+  }
+
+  if (Array.isArray(courseware.visionImages)) {
+    courseware.visionImages.forEach((image) => {
+      if (image && image.dataUrl) images.push(image)
+    })
+  }
+
+  return images
 }
 
 async function requestAI(payload, courseware, aiConfig) {
@@ -610,7 +660,7 @@ async function requestAI(payload, courseware, aiConfig) {
 }
 
 async function requestOpenAI(payload, courseware, aiConfig) {
-  if (courseware && courseware.isImage) {
+  if (hasCoursewareVisionImages(courseware)) {
     courseware.imageSendAttempted = true
   }
 
@@ -693,7 +743,7 @@ async function requestOpenAI(payload, courseware, aiConfig) {
     throw new Error(`AI 请求失败：${message}`)
   }
 
-  if (courseware && courseware.isImage) {
+  if (hasCoursewareVisionImages(courseware)) {
     courseware.imageSendSucceeded = true
   }
 
@@ -713,7 +763,7 @@ async function requestChatCompatible(payload, courseware, aiConfig, options = {}
     throw new Error('请先在 .env 里填写 CUSTOM_BASE_URL，也就是对方提供的 API 端点 URL。')
   }
 
-  const includeImage = Boolean(courseware && courseware.isImage && courseware.dataUrl)
+  const includeImage = hasCoursewareVisionImages(courseware)
 
   try {
     if (includeImage) {
@@ -882,6 +932,16 @@ function buildUserContent(payload, courseware) {
     })
   }
 
+  if (Array.isArray(courseware.visionImages)) {
+    courseware.visionImages.forEach((image) => {
+      content.push({
+        type: 'input_image',
+        image_url: image.dataUrl,
+        detail: 'auto'
+      })
+    })
+  }
+
   return content
 }
 
@@ -895,10 +955,17 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     if (courseware.isImage && includeImage) {
       coursewareLines.push('图片本体也已作为视觉输入附在本消息中，请结合图片排版、题目和可见内容。')
     }
+    if (!courseware.isImage && Array.isArray(courseware.visionImages) && courseware.visionImages.length && includeImage) {
+      coursewareLines.push(`PDF 前 ${courseware.visionImages.length} 页也已转成图片作为视觉输入附在本消息中，请结合图片页面里的题目和可见内容。`)
+    }
   } else if (courseware && courseware.isImage) {
     coursewareLines.push(includeImage
       ? `老师上传了一张图片课件：${courseware.name}。图片已作为视觉输入附在本消息中，请直接阅读图片里的文字、题目、板书或页面内容。`
       : `老师上传了一张图片课件：${courseware.name}。当前没有识别到可用文字，请结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
+  } else if (courseware && Array.isArray(courseware.visionImages) && courseware.visionImages.length) {
+    coursewareLines.push(includeImage
+      ? `老师上传了 PDF 课件：${courseware.name}。系统已把前 ${courseware.visionImages.length} 页转成图片并作为视觉输入附在本消息中，请直接阅读图片里的文字、题目、板书或页面内容。`
+      : `老师上传了 PDF 课件：${courseware.name}。当前没有提取到可用文字，请结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
   } else if (courseware) {
     coursewareLines.push(`老师上传了课件文件：${courseware.name}。当前接口没有提取到可用文字，请只结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
   } else {
@@ -963,8 +1030,9 @@ function getCoursewareTextLabel(courseware) {
 function buildChatCompatibleUserContent(payload, courseware, options = {}) {
   const includeImage = options.includeImage !== false
   const text = buildPlainPrompt(payload, courseware, { includeImage })
+  const images = getCoursewareVisionImages(courseware)
 
-  if (!includeImage || !courseware || !courseware.isImage || !courseware.dataUrl) {
+  if (!includeImage || !images.length) {
     return text
   }
 
@@ -973,12 +1041,12 @@ function buildChatCompatibleUserContent(payload, courseware, options = {}) {
       type: 'text',
       text
     },
-    {
+    ...images.map((image) => ({
       type: 'image_url',
       image_url: {
-        url: courseware.dataUrl
+        url: image.dataUrl
       }
-    }
+    }))
   ]
 }
 
@@ -999,6 +1067,7 @@ function buildDebugSummary(payload, courseware) {
     coursewareImageAttempted: Boolean(courseware && courseware.imageSendAttempted),
     coursewareSentAsImage: Boolean(courseware && courseware.imageSendSucceeded),
     coursewareImageFallbackUsed: Boolean(courseware && courseware.imageFallbackUsed),
+    coursewareVisionImageCount: courseware && Array.isArray(courseware.visionImages) ? courseware.visionImages.length : 0,
     coursewareExtractionSource: courseware ? courseware.extractionSource : '',
     coursewareOcrPageCount: courseware ? courseware.ocrPageCount : 0,
     coursewareTextLength: courseware && courseware.extractedText ? courseware.extractedText.length : 0,
