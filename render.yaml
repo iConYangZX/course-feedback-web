@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: course-feedback-web
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: PUBLIC_MODE
+        value: "true"
+      - key: ACCESS_CODE
+        value: SXB22660147
+      - key: DAILY_LIMIT
+        value: "10"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: AI_PROVIDER
+        value: custom
+      - key: CUSTOM_API_KEY
+        sync: false
+      - key: CUSTOM_MODEL
+        value: gpt-5.4-mini
+      - key: CUSTOM_BASE_URL
+        value: https://api.tokenskingdom.com/v1

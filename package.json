@@ -1,0 +1,22 @@
+{
+  "name": "course-feedback-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-powered course feedback web app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "pdf-parse": "^1.1.1",
+    "undici": "^8.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

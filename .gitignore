@@ -1,0 +1,6 @@
+node_modules/
+node_modules.broken-*/
+.env
+.DS_Store
+data/
+scripts/ocr_image

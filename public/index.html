@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 课程反馈</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <section id="accessGate" class="access-gate hidden" aria-live="polite">
+      <div class="access-panel">
+        <div class="brand-mark">课</div>
+        <p class="eyebrow">Access</p>
+        <h1>输入邀请码</h1>
+        <p class="access-copy">请输入老师提供的邀请码后进入课程反馈系统。</p>
+        <label class="field">
+          <span>邀请码</span>
+          <input id="accessCodeInput" type="password" placeholder="请输入邀请码" autocomplete="off" />
+        </label>
+        <button class="primary-button" id="accessLoginBtn" type="button">进入系统</button>
+        <div id="accessMessage" class="access-message"></div>
+      </div>
+    </section>
+
+    <div id="app" class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">课</div>
+          <div>
+            <div class="brand-name">AI 课程反馈</div>
+            <div class="brand-subtitle">Course Feedback</div>
+          </div>
+        </div>
+
+        <div class="mode-switch" role="tablist" aria-label="课程类型">
+          <button class="mode-button active" data-mode="class" type="button">班课</button>
+          <button class="mode-button" data-mode="oneOnOne" type="button">一对一</button>
+        </div>
+
+        <section class="sidebar-section class-only">
+          <div class="section-title-row">
+            <h2>班级</h2>
+            <button class="icon-action" id="newClassBtn" type="button" title="新建班级">+</button>
+          </div>
+          <div id="classList" class="class-list"></div>
+        </section>
+
+        <section class="sidebar-section one-only hidden">
+          <div class="section-title-row">
+            <h2>学生档案</h2>
+            <button class="icon-action" id="newOneProfileBtn" type="button" title="新建学生档案">+</button>
+          </div>
+          <div id="oneProfileList" class="class-list"></div>
+        </section>
+
+        <div class="status-stack">
+          <div class="usage-status hidden" id="usageStatus"></div>
+          <div class="server-status" id="serverStatus">正在连接后端...</div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="config-panel" id="configPanel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">AI Config</p>
+              <h1>模型配置</h1>
+            </div>
+            <span class="config-state" id="configState">未检测</span>
+          </div>
+
+          <div class="form-grid two">
+            <label class="field">
+              <span>接入方式</span>
+              <select id="configProviderSelect">
+                <option value="custom">自定义兼容接口</option>
+                <option value="openai">OpenAI 官方</option>
+                <option value="deepseek">DeepSeek</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>模型/渠道名</span>
+              <input id="configModelInput" type="text" placeholder="例如：gpt-4o-mini 或平台里的渠道名" />
+            </label>
+          </div>
+
+          <label class="field">
+            <span>API 端点 URL</span>
+            <input id="configBaseUrlInput" type="text" placeholder="例如：https://example.com/v1" />
+          </label>
+
+          <div class="form-grid two">
+            <label class="field">
+              <span>API 密钥</span>
+              <input id="configApiKeyInput" type="password" placeholder="留空则保留当前密钥" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>代理地址</span>
+              <input id="configProxyInput" type="text" placeholder="例如：http://127.0.0.1:7897" />
+            </label>
+          </div>
+
+          <div class="panel-actions">
+            <button class="secondary-button" id="reloadConfigBtn" type="button">重新读取</button>
+            <button class="primary-button" id="saveConfigBtn" type="button">保存配置</button>
+          </div>
+        </section>
+
+        <section class="setup-panel class-only" id="classSetupPanel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Class Setup</p>
+              <h1>建立班级</h1>
+            </div>
+            <button class="secondary-button" id="resetClassFormBtn" type="button">清空</button>
+          </div>
+
+          <div class="form-grid two">
+            <label class="field">
+              <span>班级名称</span>
+              <input id="classNameInput" type="text" placeholder="例如：高一数学A班" />
+            </label>
+            <label class="field">
+              <span>年级</span>
+              <select id="gradeSelect">
+                <option>初三</option>
+                <option selected>高一</option>
+                <option>高二</option>
+                <option>高三</option>
+              </select>
+            </label>
+          </div>
+
+          <label class="field">
+            <span>导入学生名单</span>
+            <textarea id="studentListInput" rows="5" placeholder="每行一个学生，也可以用逗号、顿号分隔&#10;例如：张三、李四、王五"></textarea>
+          </label>
+
+          <label class="field">
+            <span>反馈模板</span>
+            <textarea id="templateInput" rows="7"></textarea>
+          </label>
+
+          <div class="panel-actions">
+            <button class="primary-button" id="saveClassBtn" type="button">保存班级</button>
+          </div>
+        </section>
+
+        <section class="setup-panel one-only hidden" id="oneProfileSetupPanel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Student Profile</p>
+              <h1>学生档案</h1>
+            </div>
+            <button class="secondary-button" id="resetOneProfileFormBtn" type="button">清空</button>
+          </div>
+
+          <div class="form-grid two">
+            <label class="field">
+              <span>学生姓名</span>
+              <input id="oneProfileNameInput" type="text" placeholder="请输入学生姓名" />
+            </label>
+            <label class="field">
+              <span>年级</span>
+              <select id="oneProfileGradeSelect">
+                <option>初三</option>
+                <option selected>高一</option>
+                <option>高二</option>
+                <option>高三</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="form-grid two">
+            <label class="field">
+              <span>平时性格</span>
+              <textarea id="onePersonalityInput" rows="4" placeholder="例如：比较谨慎，回答前会反复确认；需要鼓励后更愿意表达"></textarea>
+            </label>
+            <label class="field">
+              <span>做题习惯备注</span>
+              <textarea id="oneHabitInput" rows="4" placeholder="例如：步骤意识较好，但容易漏写条件；计算速度偏慢"></textarea>
+            </label>
+          </div>
+
+          <label class="field">
+            <span>反馈模板</span>
+            <textarea id="oneProfileTemplateInput" rows="7"></textarea>
+          </label>
+
+          <div class="panel-actions">
+            <button class="secondary-button danger-button" id="deleteOneProfileBtn" type="button">删除档案</button>
+            <button class="primary-button" id="saveOneProfileBtn" type="button">保存档案</button>
+          </div>
+        </section>
+
+        <section class="feedback-panel" id="feedbackPanel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow" id="workspaceEyebrow">Class Feedback</p>
+              <h1 id="workspaceTitle">开始反馈</h1>
+            </div>
+            <button class="secondary-button class-only" id="deleteClassBtn" type="button">删除班级</button>
+          </div>
+
+          <div class="profile-summary one-only hidden" id="oneProfileSummary"></div>
+
+          <div class="form-grid two">
+            <label class="field">
+              <span>课程主题</span>
+              <input id="lessonTitleInput" type="text" placeholder="例如：导数单调性与极值" />
+            </label>
+            <label class="field file-field">
+              <span>导入当节课课件</span>
+              <input id="coursewareInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" />
+            </label>
+          </div>
+
+          <label class="field">
+            <span>补充课程内容</span>
+            <textarea id="courseNoteInput" rows="4" placeholder="可选：写下本节课重点、作业、错题或老师补充要求"></textarea>
+          </label>
+
+          <div class="student-toolbar">
+            <h2>学生表现</h2>
+            <span id="studentCount">0 人</span>
+          </div>
+
+          <div id="studentTable" class="student-table"></div>
+
+          <div class="panel-actions">
+            <button class="primary-button" id="generateBtn" type="button">AI 生成反馈</button>
+            <button class="secondary-button" id="copyAllBtn" type="button">复制全部</button>
+          </div>
+        </section>
+
+        <section class="results-panel" id="resultsPanel" aria-live="polite">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">Results</p>
+              <h1>反馈结果</h1>
+            </div>
+            <span class="result-note" id="resultNote">生成后会显示在这里</span>
+          </div>
+          <div id="debugSummary" class="debug-summary hidden"></div>
+          <div id="resultList" class="result-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
