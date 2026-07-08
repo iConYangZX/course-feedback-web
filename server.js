@@ -1316,6 +1316,8 @@ function buildSystemPrompt() {
   return [
     '你是一名严谨、温和、具体的课程反馈助手。',
     '你要根据老师提供的反馈模板、课程内容、课件和学生表现，为每个学生生成中文课后反馈。',
+    '必须严格按学生数据里的 studentId 和 name 一一对应生成反馈，不能把一个学生的姓名、表现或备注写到另一个学生的反馈里。',
+    '每条反馈正文只能出现当前这一个学生的姓名；不要提到其他学生姓名。',
     '老师提供的反馈模板是最高优先级的输出格式；除非模板为空，否则必须按模板的段落、顺序、称呼方式和固定句生成。',
     '模板优先于默认字数限制；如果模板较长，可以适当超过 220 个汉字。',
     '反馈要像老师写给家长的文字，具体、自然、可直接复制发送。',
@@ -1349,8 +1351,10 @@ function buildUserContent(payload, courseware) {
         JSON.stringify(payload.students, null, 2),
         '',
         '请严格返回 JSON，字段为 feedbacks，每项包含 studentId、name、feedback、templateFields。',
+        'studentId 必须原样使用学生表现数据 JSON 中对应学生的 id，name 必须原样使用对应学生的 name。',
         'templateFields 必须包含 courseContent、courseKnowledgePoint、performanceText、personalizedRemark、learningSuggestion，用于程序填入老师模板。',
         'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
+        '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
         '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须写入该学生 remark 的核心信息。',
         '一对一学生数据里若 personality 或 habit 非空，必须结合这些长期档案信息给出更贴合该学生的表达和建议。',
         '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
@@ -1452,8 +1456,10 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     '',
     '请严格返回 JSON，且只能返回 JSON，不要解释，不要使用 Markdown。',
     'JSON 格式必须是：{"feedbacks":[{"studentId":"...","name":"...","feedback":"...","templateFields":{"courseContent":"...","courseKnowledgePoint":"...","performanceText":"...","personalizedRemark":"...","learningSuggestion":"..."}}]}',
+    'studentId 必须原样使用学生表现数据 JSON 中对应学生的 id，name 必须原样使用对应学生的 name。',
     'templateFields 会被程序填入老师模板，所以每个字段都必须针对该学生具体填写，不能空泛。',
     'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
+    '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
     '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须写入该学生 remark 的核心信息。',
     '一对一学生数据里若 personality 或 habit 非空，必须结合这些长期档案信息给出更贴合该学生的表达和建议。',
     '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
@@ -1624,19 +1630,79 @@ function parseJsonText(text) {
 
 function normalizeFeedbacks(feedbacks, students, payload = {}) {
   const list = Array.isArray(feedbacks) ? feedbacks : []
+  const matchedByStudentId = matchFeedbacksByStudent(students, list)
 
   return students.map((student) => {
-    const matched = list.find((item) => item.studentId === student.id || item.name === student.name)
+    const matched = matchedByStudentId.get(student.id)
     const fallback = buildFallbackFeedback(student, payload)
     const modelFeedback = trim(matched && matched.feedback) || fallback
     const templatedFeedback = applyFeedbackTemplate(payload.template, student, payload, matched, modelFeedback)
+    const feedback = sanitizeFeedbackStudentNames(templatedFeedback || modelFeedback, student, students)
 
     return {
       studentId: student.id,
       name: student.name,
-      feedback: templatedFeedback || modelFeedback
+      feedback
     }
   })
+}
+
+function matchFeedbacksByStudent(students, feedbacks) {
+  const matches = new Map()
+  const usedItems = new Set()
+  const studentIds = new Set(students.map((student) => student.id).filter(Boolean))
+
+  students.forEach((student) => {
+    const itemIndex = feedbacks.findIndex((feedback, index) => {
+      return !usedItems.has(index) && trim(feedback && feedback.studentId) === student.id
+    })
+
+    if (itemIndex < 0) return
+    matches.set(student.id, feedbacks[itemIndex])
+    usedItems.add(itemIndex)
+  })
+
+  students.forEach((student) => {
+    if (matches.has(student.id)) return
+
+    const itemIndex = feedbacks.findIndex((feedback, index) => {
+      if (usedItems.has(index)) return false
+
+      const feedbackStudentId = trim(feedback && feedback.studentId)
+      if (feedbackStudentId && studentIds.has(feedbackStudentId)) return false
+
+      return trim(feedback && feedback.name) === student.name
+    })
+
+    if (itemIndex < 0) return
+
+    matches.set(student.id, feedbacks[itemIndex])
+    usedItems.add(itemIndex)
+  })
+
+  return matches
+}
+
+function sanitizeFeedbackStudentNames(feedback, currentStudent, students) {
+  let text = trim(feedback)
+  if (!text) return text
+
+  const currentName = trim(currentStudent && currentStudent.name)
+  if (!currentName) return text
+
+  students
+    .map((student) => trim(student && student.name))
+    .filter((name) => name && name !== currentName && name.length >= 2)
+    .sort((left, right) => right.length - left.length)
+    .forEach((name) => {
+      text = text.replace(new RegExp(escapeRegExp(name), 'g'), currentName)
+    })
+
+  return text
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function buildDemoFeedbacks(payload) {
