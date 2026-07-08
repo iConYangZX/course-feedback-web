@@ -742,7 +742,7 @@ textarea:focus {
 
 .question-editor-head {
   display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
+  grid-template-columns: 92px minmax(0, 1fr) 118px;
   gap: 10px;
 }
 
@@ -772,6 +772,7 @@ textarea:focus {
   background: #ffffff;
   box-shadow: var(--shadow);
   color: #242742;
+  font-family: SimSun, "Songti SC", "Times New Roman", serif;
 }
 
 .empty-paper {
@@ -791,20 +792,39 @@ textarea:focus {
 
 .preview-question {
   break-inside: avoid;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
   font-size: 14px;
-  line-height: 1.7;
+  line-height: 1.55;
 }
 
 .preview-question-title {
-  font-weight: 850;
+  font-weight: 500;
+  white-space: pre-wrap;
 }
 
 .preview-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 16px;
+  gap: 3px 18px;
   margin-top: 6px;
+}
+
+.preview-options.layout-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+}
+
+.preview-options.layout-two-column {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.preview-options.layout-one-column {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.preview-options > div {
+  white-space: pre-wrap;
 }
 
 .preview-note {
@@ -1123,6 +1143,7 @@ textarea:focus {
   .form-grid.three,
   .form-grid.four,
   .rearrange-workbench,
+  .question-editor-head,
   .student-row {
     grid-template-columns: 1fr;
   }

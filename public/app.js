@@ -988,6 +988,12 @@ function renderQuestionEditor() {
           <span>图形说明</span>
           <input data-question-field="figureNote" type="text" value="${escapeHtml(question.figureNote || '')}" placeholder="可选：例如函数图像、几何图形等" />
         </label>
+        <label class="field">
+          <span>选项排版</span>
+          <select data-question-field="optionLayout">
+            ${renderOptionLayoutOptions(question.optionLayout)}
+          </select>
+        </label>
       </div>
       <label class="field">
         <span>题干</span>
@@ -1019,7 +1025,7 @@ function renderQuestionPreview() {
       <article class="preview-question">
         <div class="preview-question-title">${escapeHtml(question.number || String(index + 1))}. ${escapeHtml(question.stemMarkdown || '')}</div>
         ${Array.isArray(question.options) && question.options.length ? `
-          <div class="preview-options">
+          <div class="preview-options ${getOptionLayoutClass(question.optionLayout, question.options)}">
             ${question.options.map((option) => `<div>${escapeHtml(option)}</div>`).join('')}
           </div>
         ` : ''}
@@ -1036,6 +1042,44 @@ function renderSafeQuestionSvg(svgText) {
   const svg = sanitizeQuestionSvg(svgText)
   if (!svg) return ''
   return `<div class="question-figure">${svg}</div>`
+}
+
+function renderOptionLayoutOptions(value) {
+  const selectedValue = normalizeOptionLayout(value)
+  const options = [
+    ['inline', '一行'],
+    ['two-column', '两列'],
+    ['one-column', '单列']
+  ]
+
+  return options.map(([optionValue, label]) => (
+    `<option value="${optionValue}" ${optionValue === selectedValue ? 'selected' : ''}>${label}</option>`
+  )).join('')
+}
+
+function getOptionLayoutClass(value, options = []) {
+  return `layout-${normalizeOptionLayout(value || inferOptionLayout(options))}`
+}
+
+function normalizeOptionLayout(value) {
+  const raw = String(value || '').trim()
+  if (['inline', 'two-column', 'one-column'].includes(raw)) return raw
+  if (['一行', '横排'].includes(raw)) return 'inline'
+  if (['两列', '双列'].includes(raw)) return 'two-column'
+  if (['单列', '逐行'].includes(raw)) return 'one-column'
+  return ''
+}
+
+function inferOptionLayout(options = []) {
+  const list = Array.isArray(options) ? options.filter(Boolean) : []
+  if (!list.length) return 'one-column'
+
+  const maxLength = Math.max(...list.map((option) => String(option || '').length))
+  const totalLength = list.reduce((sum, option) => sum + String(option || '').length, 0)
+
+  if (list.length <= 4 && maxLength <= 16 && totalLength <= 72) return 'inline'
+  if (maxLength <= 32) return 'two-column'
+  return 'one-column'
 }
 
 function sanitizeQuestionSvg(svgText) {
@@ -1329,15 +1373,19 @@ function downloadBlob(blob, fileName) {
 
 function normalizeQuestion(question, index = 0) {
   const item = question && typeof question === 'object' ? question : {}
+  const options = Array.isArray(item.options)
+    ? item.options.map((option) => String(option || '').trim()).filter(Boolean)
+    : []
+
   return {
     id: item.id || createId('question'),
     number: String(item.number || index + 1),
     stemMarkdown: String(item.stemMarkdown || item.stem || '').trim(),
-    options: Array.isArray(item.options)
-      ? item.options.map((option) => String(option || '').trim()).filter(Boolean)
-      : [],
+    options,
     figureNote: String(item.figureNote || item.figureDescription || '').trim(),
     figureSvg: String(item.figureSvg || item.svg || item.figure || '').trim(),
+    optionLayout: normalizeOptionLayout(item.optionLayout || item.optionsLayout || item.layout)
+      || inferOptionLayout(options),
     answer: String(item.answer || '').trim(),
     analysis: String(item.analysis || '').trim()
   }

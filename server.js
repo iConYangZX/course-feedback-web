@@ -1644,6 +1644,9 @@ function buildQuestionRecognitionSystemPrompt() {
     '如果页面中有图形、表格、函数图像、几何图或统计图，请在 figureNote 中用简短中文描述，并在 figureSvg 中生成一个安全、简洁的 SVG 草图。',
     'figureSvg 只允许使用 svg、g、path、line、polyline、polygon、rect、circle、ellipse、text 这些基础元素；不要使用 script、foreignObject、image、style、外链或事件属性。',
     'figureSvg 的 viewBox 建议使用 0 0 320 200，线条用黑色或灰色，必要时标注坐标轴、点、角、长度、函数趋势。',
+    '必须保留原卷的分段和换行：题干里原本换行、分小问、条件列表、证明/解答步骤开头，都要在 stemMarkdown 中用换行保留。',
+    '必须判断选择题选项的原始排版，optionLayout 只能填 inline、two-column、one-column：原卷四个选项在同一行填 inline，两行两列填 two-column，每个选项独立成行填 one-column。',
+    '不要把所有文字压成一整段；不要为了整齐改写原题语序。',
     '如果无法确定答案或解析，可以留空。',
     '只返回 JSON，不要使用 Markdown，不要解释。'
   ].join('\n')
@@ -1658,12 +1661,13 @@ function buildQuestionRecognitionContent(payload, pages, docTexts, target) {
     '',
     '识别要求：',
     '1. 将试卷拆分成独立题目。',
-    '2. 每道题返回 number、stemMarkdown、options、figureNote、figureSvg、answer、analysis。',
+    '2. 每道题返回 number、stemMarkdown、options、optionLayout、figureNote、figureSvg、answer、analysis。',
     '3. 选择题选项放入 options 数组，每个选项保留 A. / B. / C. / D. 等标记。',
-    '4. 非选择题 options 为空数组。',
+    '4. optionLayout 根据原卷选项排版填写 inline、two-column 或 one-column；非选择题 options 为空数组，optionLayout 填 one-column。',
     '5. stemMarkdown 和 options 中的数学内容必须用 LaTeX，例如 $\\frac{x^2-1}{x-1}$、$\\sqrt{3}$、$a_n$、$x^2$。',
-    '6. 如果题目跨页，请合并成一道题。',
-    '7. 如果原题有图，figureSvg 必须画出可理解的简化图；如果没有图，figureSvg 为空字符串。',
+    '6. stemMarkdown 必须保留原卷换行：条件、分小问（1）（2）、表格前后、解答空行不要合并成一段。',
+    '7. 如果题目跨页，请合并成一道题。',
+    '8. 如果原题有图，figureSvg 必须画出可理解的简化图；如果没有图，figureSvg 为空字符串。',
     '',
     'Word 文本内容：',
     docTexts.length
@@ -1671,7 +1675,7 @@ function buildQuestionRecognitionContent(payload, pages, docTexts, target) {
       : '无',
     '',
     '请严格返回 JSON，格式为：',
-    '{"questions":[{"id":"q1","number":"1","stemMarkdown":"题干，公式写作 $x^2+1$","options":["A. $x=1$","B. $x=2$"],"figureNote":"","figureSvg":"","answer":"","analysis":""}],"warnings":[]}'
+    '{"questions":[{"id":"q1","number":"1","stemMarkdown":"题干第一行，公式写作 $x^2+1$\\n（1）第一小问\\n（2）第二小问","options":["A. $x=1$","B. $x=2$"],"optionLayout":"inline","figureNote":"","figureSvg":"","answer":"","analysis":""}],"warnings":[]}'
   ].join('\n')
 
   if (target === 'responses') {
@@ -1717,12 +1721,16 @@ function getQuestionRecognitionJsonSchema() {
               type: 'array',
               items: { type: 'string' }
             },
+            optionLayout: {
+              type: 'string',
+              enum: ['inline', 'two-column', 'one-column']
+            },
             figureNote: { type: 'string' },
             figureSvg: { type: 'string' },
             answer: { type: 'string' },
             analysis: { type: 'string' }
           },
-          required: ['id', 'number', 'stemMarkdown', 'options', 'figureNote', 'figureSvg', 'answer', 'analysis']
+          required: ['id', 'number', 'stemMarkdown', 'options', 'optionLayout', 'figureNote', 'figureSvg', 'answer', 'analysis']
         }
       },
       warnings: {
@@ -1816,19 +1824,81 @@ function normalizeSvgMarkup(value) {
   return svg
 }
 
+function normalizeQuestionLayoutText(value) {
+  let text = trim(value)
+  if (!text) return ''
+
+  text = text
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+
+  if (!text.includes('\n')) {
+    text = text
+      .replace(/\s*(?=（[一二三四五六七八九十\d]+）)/g, '\n')
+      .replace(/\s*(?=\([一二三四五六七八九十\d]+\))/g, '\n')
+      .replace(/\s*(?=[①②③④⑤⑥⑦⑧⑨⑩])/g, '\n')
+      .replace(/\s*(?=(?:解|证明|求证|分析)[:：])/g, '\n')
+  }
+
+  return text
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\n+|\n+$/g, '')
+}
+
+function normalizeOptionLayout(value, options = []) {
+  const raw = trim(value).toLowerCase()
+  const aliases = {
+    inline: 'inline',
+    row: 'inline',
+    horizontal: 'inline',
+    'one-line': 'inline',
+    'one row': 'inline',
+    一行: 'inline',
+    two: 'two-column',
+    columns: 'two-column',
+    'two-column': 'two-column',
+    'two columns': 'two-column',
+    两列: 'two-column',
+    双列: 'two-column',
+    column: 'one-column',
+    vertical: 'one-column',
+    'one-column': 'one-column',
+    'one column': 'one-column',
+    单列: 'one-column',
+    逐行: 'one-column'
+  }
+
+  return aliases[raw] || inferOptionLayout(options)
+}
+
+function inferOptionLayout(options = []) {
+  const list = Array.isArray(options) ? options.map((option) => cleanQuestionDocText(option)).filter(Boolean) : []
+  if (!list.length) return 'one-column'
+
+  const maxLength = Math.max(...list.map((option) => option.length))
+  const totalLength = list.reduce((sum, option) => sum + option.length, 0)
+
+  if (list.length <= 4 && maxLength <= 16 && totalLength <= 72) return 'inline'
+  if (maxLength <= 32) return 'two-column'
+  return 'one-column'
+}
+
 function normalizeQuestions(questions) {
   const list = Array.isArray(questions) ? questions : []
   return list.map((question, index) => {
     const item = question && typeof question === 'object' ? question : {}
     const options = Array.isArray(item.options)
-      ? item.options.map((option) => trim(option)).filter(Boolean)
+      ? item.options.map((option) => normalizeQuestionLayoutText(option)).filter(Boolean)
       : []
+    const optionLayout = normalizeOptionLayout(item.optionLayout || item.optionsLayout || item.layout, options)
 
     return {
       id: trim(item.id) || `q-${index + 1}`,
       number: trim(item.number) || String(index + 1),
-      stemMarkdown: trim(item.stemMarkdown || item.stem),
+      stemMarkdown: normalizeQuestionLayoutText(item.stemMarkdown || item.stem),
       options,
+      optionLayout,
       figureNote: trim(item.figureNote || item.figureDescription),
       figureSvg: normalizeSvgMarkup(item.figureSvg || item.svg || item.figure),
       answer: trim(item.answer),
@@ -1845,6 +1915,7 @@ function buildDemoQuestions(payload, docTexts) {
       number: '1',
       stemMarkdown: text.slice(0, 180),
       options: [],
+      optionLayout: 'one-column',
       figureNote: '',
       figureSvg: '',
       answer: '',
@@ -1855,8 +1926,9 @@ function buildDemoQuestions(payload, docTexts) {
   return [{
     id: 'demo-q1',
     number: '1',
-    stemMarkdown: `${payload.title || '本试卷'}示例题：请根据上传页面识别题干内容。`,
+    stemMarkdown: `${payload.title || '本试卷'}示例题：请根据上传页面识别题干内容。\n（1）保留原题换行和分段。\n（2）公式用 $x^2+1$ 这样的 LaTeX。`,
     options: ['A. $x=1$', 'B. $x=2$', 'C. $x=3$', 'D. $x=4$'],
+    optionLayout: 'inline',
     figureNote: '演示模式未调用 AI，以下为示例坐标图。',
     figureSvg: '<svg viewBox="0 0 320 200" xmlns="http://www.w3.org/2000/svg"><line x1="35" y1="165" x2="285" y2="165" stroke="#111" stroke-width="2"/><line x1="55" y1="180" x2="55" y2="25" stroke="#111" stroke-width="2"/><path d="M65 145 C110 95 155 72 210 48" fill="none" stroke="#111" stroke-width="3"/><text x="286" y="160" font-size="16">x</text><text x="62" y="28" font-size="16">y</text></svg>',
     answer: '',
@@ -1911,23 +1983,17 @@ function buildQuestionDocumentXml(title, questions, figures = []) {
 
     paragraphs.push(buildDocxParagraph(`${number}. ${firstStemLine}`.trim(), {
       style: 'Question',
-      bold: true,
-      after: stemLines.length ? 80 : 120
+      after: stemLines.length ? 36 : 72
     }))
 
     stemLines.forEach((line) => {
       paragraphs.push(buildDocxParagraph(line, {
         indent: 420,
-        after: 80
+        after: 36
       }))
     })
 
-    ;(question.options || []).forEach((option) => {
-      paragraphs.push(buildDocxParagraph(cleanQuestionDocText(option), {
-        indent: 420,
-        after: 80
-      }))
-    })
+    paragraphs.push(...buildDocxOptionParagraphs(question))
 
     if (question.figureNote) {
       paragraphs.push(buildDocxParagraph(`图形说明：${cleanQuestionDocText(question.figureNote)}`, {
@@ -2047,6 +2113,34 @@ function buildDocxSvgFigure(figure, options = {}) {
   </w:drawing></w:r></w:p>`
 }
 
+function buildDocxOptionParagraphs(question) {
+  const options = Array.isArray(question.options) ? question.options : []
+  if (!options.length) return []
+
+  const layout = normalizeOptionLayout(question.optionLayout, options)
+  const paragraphOptions = {
+    indent: 420,
+    after: 36
+  }
+
+  if (layout === 'inline') {
+    return [buildDocxParagraph(options.map(cleanQuestionDocText).join('    '), paragraphOptions)]
+  }
+
+  if (layout === 'two-column') {
+    const rows = []
+    for (let index = 0; index < options.length; index += 2) {
+      rows.push(buildDocxParagraph(
+        [options[index], options[index + 1]].filter(Boolean).map(cleanQuestionDocText).join('        '),
+        paragraphOptions
+      ))
+    }
+    return rows
+  }
+
+  return options.map((option) => buildDocxParagraph(cleanQuestionDocText(option), paragraphOptions))
+}
+
 function buildDocxParagraphProperties(options = {}) {
   const props = []
 
@@ -2055,16 +2149,18 @@ function buildDocxParagraphProperties(options = {}) {
   if (options.indent) props.push(`<w:ind w:left="${Math.max(0, Number(options.indent) || 0)}"/>`)
 
   const after = Number.isFinite(Number(options.after)) ? Number(options.after) : 120
-  props.push(`<w:spacing w:after="${Math.max(0, after)}" w:line="312" w:lineRule="auto"/>`)
+  const before = Number.isFinite(Number(options.before)) ? Number(options.before) : 0
+  const line = Number.isFinite(Number(options.line)) ? Number(options.line) : 276
+  props.push(`<w:spacing w:before="${Math.max(0, before)}" w:after="${Math.max(0, after)}" w:line="${Math.max(240, line)}" w:lineRule="auto"/>`)
 
   return props.length ? `<w:pPr>${props.join('')}</w:pPr>` : ''
 }
 
 function buildDocxRunProperties(options = {}) {
   const props = [
-    '<w:rFonts w:ascii="Arial" w:eastAsia="Microsoft YaHei" w:hAnsi="Arial" w:cs="Arial"/>'
+    '<w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>'
   ]
-  const size = Math.max(18, Number(options.size) || 22)
+  const size = Math.max(18, Number(options.size) || 21)
 
   props.push(`<w:sz w:val="${size}"/>`)
   props.push(`<w:szCs w:val="${size}"/>`)
@@ -2289,16 +2385,16 @@ function buildQuestionStylesXml() {
   <w:docDefaults>
     <w:rPrDefault>
       <w:rPr>
-        <w:rFonts w:ascii="Arial" w:eastAsia="Microsoft YaHei" w:hAnsi="Arial" w:cs="Arial"/>
-        <w:sz w:val="22"/>
-        <w:szCs w:val="22"/>
+        <w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>
+        <w:sz w:val="21"/>
+        <w:szCs w:val="21"/>
       </w:rPr>
     </w:rPrDefault>
   </w:docDefaults>
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
     <w:name w:val="Normal"/>
     <w:pPr>
-      <w:spacing w:after="120" w:line="312" w:lineRule="auto"/>
+      <w:spacing w:after="36" w:line="276" w:lineRule="auto"/>
     </w:pPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Title">
@@ -2307,23 +2403,20 @@ function buildQuestionStylesXml() {
     <w:qFormat/>
     <w:pPr>
       <w:jc w:val="center"/>
-      <w:spacing w:after="260"/>
+      <w:spacing w:after="220"/>
     </w:pPr>
     <w:rPr>
+      <w:rFonts w:ascii="Times New Roman" w:eastAsia="SimHei" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>
       <w:b/>
       <w:bCs/>
-      <w:sz w:val="32"/>
-      <w:szCs w:val="32"/>
+      <w:sz w:val="30"/>
+      <w:szCs w:val="30"/>
     </w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Question">
     <w:name w:val="Question"/>
     <w:basedOn w:val="Normal"/>
     <w:qFormat/>
-    <w:rPr>
-      <w:b/>
-      <w:bCs/>
-    </w:rPr>
   </w:style>
 </w:styles>`
 }
