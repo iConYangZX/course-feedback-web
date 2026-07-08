@@ -2,12 +2,13 @@ const STORAGE_KEY = 'courseFeedback.web.classes'
 const ONE_PROFILE_STORAGE_KEY = 'courseFeedback.web.oneProfiles'
 
 const DEFAULT_TEMPLATE = [
-  '亲爱的家长您好：',
-  '{{学生姓名}}同学本节课主要学习了{{课程内容}}。',
-  '课堂表现：{{课堂表现}}。',
-  '个性化情况：{{个性化备注}}。',
-  '后续建议：{{学习建议}}。',
-  '整体来看，本节课反馈如下：'
+  '家长您好，本次课程反馈如下：',
+  '【课堂内容】',
+  '（根据课件一句话总结）',
+  '【学习重点】',
+  '（根据课件内容简短，列1、2、3点）',
+  '【课堂表现】',
+  '（根据课件内容以及学生表现和备注写，300字左右）'
 ].join('\n')
 
 const performanceOptions = ['表现优秀', '表现良好', '表现较差']
