@@ -47,6 +47,8 @@ const state = {
     fileName: '',
     pageCount: 0,
     selectedPages: [],
+    lectures: [],
+    selectedLectureIndex: '',
     loading: false,
     isOpen: false,
     error: ''
@@ -134,6 +136,8 @@ function bindElements() {
     pdfPageModalTitle: document.querySelector('#pdfPageModalTitle'),
     pdfPageModalMeta: document.querySelector('#pdfPageModalMeta'),
     pdfPageGrid: document.querySelector('#pdfPageGrid'),
+    pdfLecturePicker: document.querySelector('#pdfLecturePicker'),
+    pdfLectureSelect: document.querySelector('#pdfLectureSelect'),
     pdfPageSelectAllBtn: document.querySelector('#pdfPageSelectAllBtn'),
     pdfPageSelectNoneBtn: document.querySelector('#pdfPageSelectNoneBtn'),
     pdfPageCancelBtn: document.querySelector('#pdfPageCancelBtn'),
@@ -221,6 +225,7 @@ function bindEvents() {
     if (event.target === els.pdfPageModal) closePdfPageModal()
   })
   els.pdfPageGrid.addEventListener('change', updatePdfPageSelectionFromGrid)
+  els.pdfLectureSelect.addEventListener('change', applySelectedPdfLecture)
   els.rearrangeUploadBtn.addEventListener('click', () => els.rearrangeFileInput.click())
   els.rearrangeTitleInput.addEventListener('input', renderQuestionPreview)
   els.rearrangeFileInput.addEventListener('change', (event) => {
@@ -1631,6 +1636,8 @@ function resetPdfPageSelection() {
     fileName: '',
     pageCount: 0,
     selectedPages: [],
+    lectures: [],
+    selectedLectureIndex: '',
     loading: false,
     isOpen: false,
     error: ''
@@ -1649,6 +1656,8 @@ async function loadPdfPageSelection(file, openWhenReady = false) {
     fileName: file.name,
     pageCount: 0,
     selectedPages: [],
+    lectures: [],
+    selectedLectureIndex: '',
     loading: true,
     isOpen: true,
     error: ''
@@ -1659,12 +1668,26 @@ async function loadPdfPageSelection(file, openWhenReady = false) {
     window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
     const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
     const pageCount = pdf.numPages
+    const lectures = await detectPdfLectures(pdf)
+    const firstLecture = lectures[0]
 
     state.pdfSelection.pageCount = pageCount
-    state.pdfSelection.selectedPages = Array.from({ length: pageCount }, (item, index) => index + 1)
+    state.pdfSelection.lectures = lectures
+    state.pdfSelection.selectedLectureIndex = firstLecture ? '0' : ''
+    state.pdfSelection.selectedPages = firstLecture
+      ? buildPageRange(firstLecture.startPage, firstLecture.endPage)
+      : Array.from({ length: pageCount }, (item, index) => index + 1)
     state.pdfSelection.loading = false
-    state.pdfSelection.isOpen = openWhenReady
+    state.pdfSelection.isOpen = openWhenReady && (lectures.length > 1 || pageCount > 40)
     renderPdfPageSelection()
+
+    if (openWhenReady && lectures.length > 1) {
+      showToast(`检测到 ${lectures.length} 个讲次，请选择要读取的讲次`)
+    } else if (openWhenReady && pageCount > 40) {
+      showToast('未检测到多讲，已默认读取全文；页数较多时可手动改页码')
+    } else if (openWhenReady) {
+      showToast('未检测到多讲，默认读取整个 PDF')
+    }
   } catch (error) {
     state.pdfSelection.loading = false
     state.pdfSelection.error = error.message || 'PDF 页面读取失败'
@@ -1712,11 +1735,13 @@ function confirmPdfPageSelection() {
 function selectAllPdfPages() {
   const pageCount = state.pdfSelection.pageCount
   state.pdfSelection.selectedPages = Array.from({ length: pageCount }, (item, index) => index + 1)
+  state.pdfSelection.selectedLectureIndex = ''
   renderPdfPageSelection()
 }
 
 function clearPdfPages() {
   state.pdfSelection.selectedPages = state.pdfSelection.pageCount ? [1] : []
+  state.pdfSelection.selectedLectureIndex = ''
   renderPdfPageSelection()
 }
 
@@ -1739,6 +1764,7 @@ function syncPdfPageRangeInputs() {
   const right = Math.max(startPage, endPage)
 
   state.pdfSelection.selectedPages = buildPageRange(left, right)
+  state.pdfSelection.selectedLectureIndex = ''
 }
 
 function renderPdfPageSelection() {
@@ -1750,11 +1776,9 @@ function renderPdfPageSelection() {
   els.pdfPageSelectionBar.classList.toggle('hidden', !hasPdf)
 
   if (hasPdf) {
-    const selectedCount = state.pdfSelection.selectedPages.length
-    const totalCount = state.pdfSelection.pageCount
     const summary = state.pdfSelection.loading
-      ? `${file.name}：正在读取页面...`
-      : `${file.name}：${selectedCount ? `读取第 ${formatPageRanges(state.pdfSelection.selectedPages)} 页（${selectedCount}/${totalCount || '?'} 页）` : '未选择页面'}`
+      ? `${file.name}：正在读取页面并检测讲次...`
+      : `${file.name}：${getPdfReadSummary(state.pdfSelection)}`
 
     els.pdfPageSelectionText.textContent = summary
     els.pdfPageSelectBtn.disabled = state.pdfSelection.loading
@@ -1770,16 +1794,15 @@ function renderPdfPageModal() {
   if (!selection.isOpen) return
 
   els.pdfPageModalTitle.textContent = selection.fileName || '选择 PDF 页面'
-  els.pdfPageModalMeta.textContent = selection.loading
-    ? '正在读取 PDF...'
-    : (selection.error || `共 ${selection.pageCount} 页，当前读取第 ${formatPageRanges(selection.selectedPages)} 页（${selection.selectedPages.length} 页）`)
+  els.pdfPageModalMeta.textContent = getPdfModalMeta(selection)
 
   els.pdfPageSelectAllBtn.disabled = selection.loading || !selection.pageCount
   els.pdfPageSelectNoneBtn.disabled = selection.loading || !selection.pageCount
   els.pdfPageConfirmBtn.disabled = selection.loading || !selection.selectedPages.length
+  renderPdfLecturePicker(selection)
 
   if (selection.loading) {
-    els.pdfPageGrid.innerHTML = '<div class="student-empty">正在读取 PDF 页面...</div>'
+    els.pdfPageGrid.innerHTML = '<div class="student-empty">正在读取 PDF 页面并检测讲次...</div>'
     return
   }
 
@@ -1802,6 +1825,293 @@ function renderPdfPageModal() {
       </label>
     </div>
   `
+}
+
+function renderPdfLecturePicker(selection) {
+  if (!els.pdfLecturePicker || !els.pdfLectureSelect) return
+
+  const shouldShow = !selection.loading && !selection.error && selection.lectures.length > 1
+  els.pdfLecturePicker.classList.toggle('hidden', !shouldShow)
+
+  if (!shouldShow) {
+    els.pdfLectureSelect.innerHTML = ''
+    return
+  }
+
+  els.pdfLectureSelect.innerHTML = [
+    '<option value="">手动选择页码范围</option>',
+    ...selection.lectures.map((lecture, index) => {
+      const selected = String(index) === selection.selectedLectureIndex ? ' selected' : ''
+      return `<option value="${index}"${selected}>${escapeHtml(getPdfLectureOptionLabel(lecture))}</option>`
+    })
+  ].join('')
+}
+
+function applySelectedPdfLecture() {
+  const index = Number(els.pdfLectureSelect.value)
+  const lecture = state.pdfSelection.lectures[index]
+
+  if (!lecture) {
+    state.pdfSelection.selectedLectureIndex = ''
+    renderPdfPageSelection()
+    return
+  }
+
+  state.pdfSelection.selectedLectureIndex = String(index)
+  state.pdfSelection.selectedPages = buildPageRange(lecture.startPage, lecture.endPage)
+  renderPdfPageSelection()
+}
+
+function getSelectedPdfLecture(selection = state.pdfSelection) {
+  const index = Number(selection.selectedLectureIndex)
+  return Number.isInteger(index) ? selection.lectures[index] : null
+}
+
+function getPdfReadSummary(selection) {
+  const selectedCount = selection.selectedPages.length
+  const totalCount = selection.pageCount
+
+  if (selection.error) return selection.error
+  if (!selectedCount) return '未选择页面'
+
+  const lecture = getSelectedPdfLecture(selection)
+  if (lecture) {
+    return `读取 ${lecture.title}（第 ${formatPageRanges(selection.selectedPages)} 页，${selectedCount}/${totalCount || '?'} 页）`
+  }
+
+  if (totalCount && selectedCount === totalCount) {
+    return `读取全文（共 ${totalCount} 页）`
+  }
+
+  return `读取第 ${formatPageRanges(selection.selectedPages)} 页（${selectedCount}/${totalCount || '?'} 页）`
+}
+
+function getPdfModalMeta(selection) {
+  if (selection.loading) return '正在读取 PDF，并检测是否包含“第一讲、第二讲”等多讲结构...'
+  if (selection.error) return selection.error
+  if (selection.lectures.length > 1) {
+    return `共 ${selection.pageCount} 页，检测到 ${selection.lectures.length} 个讲次；可选择讲次，也可以手动输入开始页和结束页。`
+  }
+  if (selection.pageCount > 40) {
+    return `共 ${selection.pageCount} 页，未检测到多讲，已默认读取全文；页数较多时建议确认页码范围。`
+  }
+  return `共 ${selection.pageCount} 页，未检测到多讲，默认读取整个 PDF。`
+}
+
+async function detectPdfLectures(pdf) {
+  const headings = []
+  const pageCount = pdf.numPages || 0
+
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    try {
+      const page = await pdf.getPage(pageNumber)
+      const textContent = await page.getTextContent().catch(() => null)
+      const heading = detectLectureHeading(extractPdfPageLines(textContent), pageNumber)
+      if (heading) headings.push(heading)
+    } catch (error) {
+      // A single unreadable page should not block feedback generation.
+    }
+  }
+
+  return buildLecturePageRanges(headings, pageCount)
+}
+
+function extractPdfPageLines(textContent) {
+  const items = Array.isArray(textContent && textContent.items) ? textContent.items : []
+  const positionedItems = items
+    .map((item) => {
+      const transform = Array.isArray(item.transform) ? item.transform : []
+      return {
+        text: String(item.str || '').trim(),
+        x: Number(transform[4]) || 0,
+        y: Number(transform[5]) || 0
+      }
+    })
+    .filter((item) => item.text)
+
+  positionedItems.sort((left, right) => {
+    const yDelta = right.y - left.y
+    return Math.abs(yDelta) > 3 ? yDelta : left.x - right.x
+  })
+
+  const lines = []
+
+  positionedItems.forEach((item) => {
+    const lastLine = lines[lines.length - 1]
+    if (!lastLine || Math.abs(lastLine.y - item.y) > 3) {
+      lines.push({
+        y: item.y,
+        items: [item]
+      })
+      return
+    }
+
+    lastLine.items.push(item)
+  })
+
+  return lines.map((line) => line.items
+    .sort((left, right) => left.x - right.x)
+    .map((item) => item.text)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim())
+    .filter(Boolean)
+}
+
+function detectLectureHeading(pageLines, pageNumber) {
+  const lines = pageLines
+    .map((line) => String(line || '').replace(/　/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+  const topLines = lines.slice(0, 40)
+  const candidates = topLines
+    .map((line) => matchLectureHeadingLine(line, pageNumber))
+    .filter(Boolean)
+
+  if (!candidates.length) return null
+
+  const uniqueKeys = new Set(candidates.map((candidate) => candidate.key))
+  const looksLikeContents = topLines.slice(0, 12).some((line) => /目录|contents/i.test(line))
+    || uniqueKeys.size > 1
+
+  if (looksLikeContents) return null
+
+  return candidates[0]
+}
+
+function matchLectureHeadingLine(line, pageNumber) {
+  if (!line || line.length > 140) return null
+
+  const chineseMatch = line.match(/第\s*([零〇一二两三四五六七八九十百\d]{1,8})\s*(讲|课)\s*[:：、，.．\-—_ ]*\s*(.{0,70})$/)
+  if (chineseMatch) {
+    return buildLectureHeading({
+      pageNumber,
+      rawNumber: chineseMatch[1],
+      unit: chineseMatch[2],
+      marker: `第${chineseMatch[1]}${chineseMatch[2]}`,
+      title: chineseMatch[3]
+    })
+  }
+
+  const lessonMatch = line.match(/\b(Lesson|Lecture)\s*([0-9]{1,3})\s*[:：.．\-—_ ]*\s*(.{0,70})$/i)
+  if (lessonMatch) {
+    return buildLectureHeading({
+      pageNumber,
+      rawNumber: lessonMatch[2],
+      unit: lessonMatch[1],
+      marker: `${lessonMatch[1]} ${lessonMatch[2]}`,
+      title: lessonMatch[3]
+    })
+  }
+
+  const topicMatch = line.match(/专题\s*([零〇一二两三四五六七八九十百\d]{1,8})\s*[:：、，.．\-—_ ]*\s*(.{0,70})$/)
+  if (topicMatch) {
+    return buildLectureHeading({
+      pageNumber,
+      rawNumber: topicMatch[1],
+      unit: '专题',
+      marker: `专题${topicMatch[1]}`,
+      title: topicMatch[2]
+    })
+  }
+
+  return null
+}
+
+function buildLectureHeading({ pageNumber, rawNumber, unit, marker, title }) {
+  const normalizedNumber = normalizeLectureNumber(rawNumber)
+  const cleanTitle = cleanLectureHeadingTitle(title)
+  const headingTitle = cleanTitle ? `${marker} ${cleanTitle}` : marker
+
+  return {
+    pageNumber,
+    number: normalizedNumber,
+    unit,
+    key: normalizedNumber ? `${unit}-${normalizedNumber}` : `${unit}-${marker}`,
+    title: headingTitle
+  }
+}
+
+function cleanLectureHeadingTitle(value) {
+  let title = String(value || '').replace(/\s+/g, ' ').trim()
+  const nextHeadingIndex = title.search(/\s第\s*[零〇一二两三四五六七八九十百\d]{1,8}\s*(讲|课)/)
+  if (nextHeadingIndex > 0) title = title.slice(0, nextHeadingIndex)
+
+  return title
+    .replace(/\.{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/[·•∙]{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/\s+(?:P\.?\s*)?\d{1,4}\s*$/i, '')
+    .replace(/^[：:、，,.\-—_]+/, '')
+    .trim()
+    .slice(0, 52)
+}
+
+function normalizeLectureNumber(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return 0
+  if (/^\d+$/.test(raw)) return Number(raw)
+
+  return chineseNumberToNumber(raw)
+}
+
+function chineseNumberToNumber(value) {
+  const map = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9
+  }
+  const text = String(value || '').replace(/[零〇]/g, '')
+  if (!text) return 0
+  if (text.includes('百')) {
+    const [hundredsText, restText = ''] = text.split('百')
+    const hundreds = hundredsText ? map[hundredsText] || 0 : 1
+    return hundreds * 100 + chineseNumberToNumber(restText)
+  }
+  if (text.includes('十')) {
+    const [tensText, onesText = ''] = text.split('十')
+    const tens = tensText ? map[tensText] || 0 : 1
+    const ones = onesText ? map[onesText] || 0 : 0
+    return tens * 10 + ones
+  }
+  return map[text] || 0
+}
+
+function buildLecturePageRanges(headings, pageCount) {
+  const lectures = []
+
+  headings
+    .sort((left, right) => left.pageNumber - right.pageNumber)
+    .forEach((heading) => {
+      const previous = lectures[lectures.length - 1]
+      if (previous && previous.key === heading.key) return
+      if (lectures.some((lecture) => lecture.key === heading.key)) return
+
+      lectures.push({
+        key: heading.key,
+        title: heading.title,
+        startPage: heading.pageNumber,
+        endPage: pageCount
+      })
+    })
+
+  if (lectures.length <= 1) return []
+
+  return lectures.map((lecture, index) => ({
+    ...lecture,
+    endPage: lectures[index + 1] ? Math.max(lecture.startPage, lectures[index + 1].startPage - 1) : pageCount
+  }))
+}
+
+function getPdfLectureOptionLabel(lecture) {
+  return `${lecture.title}（第 ${lecture.startPage}-${lecture.endPage} 页）`
 }
 
 function getSelectedPdfPages(file, pageCount) {
