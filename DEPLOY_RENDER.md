@@ -27,12 +27,6 @@ Build Command: npm install
 Start Command: npm start
 ```
 
-如果需要在网页里创建账号、保存每日使用次数，请给服务添加一个 Persistent Disk：
-
-```text
-Mount Path: /var/data
-```
-
 ## 3. 填环境变量
 
 在 Render 的 Environment 里填写：
@@ -46,7 +40,7 @@ CUSTOM_MODEL=gpt-5.4-mini
 CUSTOM_BASE_URL=https://api.tokenskingdom.com/v1
 CUSTOM_API_KEY=你的 AI API Key
 SESSION_SECRET=任意一串长密码
-DATA_DIR=/var/data
+DATABASE_URL=你的 Neon 数据库连接地址
 ```
 
 不要填写本机代理地址，也不要上传 `.env`。
@@ -71,4 +65,6 @@ SXB22660147
 
 Render 免费服务可能会休眠，第一次打开可能需要等待一会儿。AI 调用费用由你的 AI 平台产生，网站的 10 次/天限制用于控制消耗。
 
-管理员在网页中创建的账号和每日次数记录会写入 `DATA_DIR`。如果没有配置 Persistent Disk 和 `DATA_DIR=/var/data`，Render 重启或重新部署后这些数据可能会丢失。
+管理员在网页中创建的账号和每日次数记录会写入 Neon 数据库。Render 免费版本地文件会随重启或重新部署丢失，所以公开使用时请务必配置 `DATABASE_URL`。
+
+如果以后升级 Render 并使用 Persistent Disk，也可以改用 `DATA_DIR=/var/data` 作为文件存储方案。

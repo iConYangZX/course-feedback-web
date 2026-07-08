@@ -38,6 +38,7 @@ const PDFTOPPM_PATHS = [
   '/opt/homebrew/bin/pdftoppm',
   '/usr/local/bin/pdftoppm'
 ]
+const DATABASE_URL = trim(process.env.DATABASE_URL)
 const proxyUrl = trim(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.ALL_PROXY)
 const proxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null
 const PUBLIC_MODE = parseBoolean(process.env.PUBLIC_MODE)
@@ -65,8 +66,9 @@ const DEFAULT_ACCOUNTS = [
     passwordHash: '3766097707db5944e26b203f98e804fa47b36fd27cfc7b66c0e12ea7282b4847'
   }
 ]
-const usageState = readUsageState()
-const accountState = readAccountState()
+let databasePool = null
+let usageState = {}
+let accountState = { users: [] }
 
 app.use(express.json({ limit: '1mb' }))
 app.use(express.static(path.join(__dirname, 'public')))
@@ -85,10 +87,7 @@ app.get('/api/health', (req, res) => {
     accessRequired: isAccessRequired(),
     authenticated: Boolean(session),
     dailyLimit: getSessionDailyLimit(session),
-    storage: {
-      dataDir: DATA_DIR,
-      persistent: DATA_DIR !== LEGACY_DATA_DIR
-    },
+    storage: getStorageStatus(),
     user: session ? getSafeSessionUser(session) : null,
     usage: session ? getUsageInfoForSession(session) : null
   })
@@ -165,10 +164,10 @@ app.get('/api/admin/users', requireAdminMiddleware, (req, res) => {
   })
 })
 
-app.post('/api/admin/users', requireAdminMiddleware, (req, res) => {
+app.post('/api/admin/users', requireAdminMiddleware, async (req, res) => {
   try {
     const account = createAccount(req.body || {})
-    writeAccountState()
+    await writeAccountState()
     res.json({
       ok: true,
       user: getAccountForAdmin(account)
@@ -178,10 +177,10 @@ app.post('/api/admin/users', requireAdminMiddleware, (req, res) => {
   }
 })
 
-app.patch('/api/admin/users/:userId', requireAdminMiddleware, (req, res) => {
+app.patch('/api/admin/users/:userId', requireAdminMiddleware, async (req, res) => {
   try {
     const account = updateAccount(req.params.userId, req.body || {})
-    writeAccountState()
+    await writeAccountState()
     res.json({
       ok: true,
       user: getAccountForAdmin(account)
@@ -191,12 +190,12 @@ app.patch('/api/admin/users/:userId', requireAdminMiddleware, (req, res) => {
   }
 })
 
-app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, (req, res) => {
+app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, async (req, res) => {
   try {
     const account = findAccountById(req.params.userId)
     if (!account) throw new Error('账号不存在')
 
-    resetUsage(getUsageClientIdForAccount(account))
+    await resetUsage(getUsageClientIdForAccount(account))
     res.json({
       ok: true,
       user: getAccountForAdmin(account)
@@ -283,7 +282,7 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     }) : null
 
     if (!aiConfig.apiKey) {
-      const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+      const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
       res.json({
         demo: true,
         message: `当前未配置 ${aiConfig.keyName}，已返回演示反馈。`,
@@ -294,7 +293,7 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     }
 
     const aiResponse = await requestAI(payload, courseware, aiConfig)
-    const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
     const parsed = parseFeedbackResponse(aiResponse, aiConfig.provider)
 
     res.json({
@@ -312,9 +311,16 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
   }
 })
 
-app.listen(PORT, () => {
-  console.log(`Course feedback web app running at http://localhost:${PORT}`)
-})
+initializeStorage()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Course feedback web app running at http://localhost:${PORT}`)
+    })
+  })
+  .catch((error) => {
+    console.error('Failed to initialize storage', error)
+    process.exit(1)
+  })
 
 function parsePayload(rawPayload) {
   if (!rawPayload) return {}
@@ -452,6 +458,7 @@ function writeEnvMap(envMap) {
     'DAILY_LIMIT',
     'SESSION_SECRET',
     'DATA_DIR',
+    'DATABASE_URL',
     'AI_PROVIDER',
     'CUSTOM_API_KEY',
     'CUSTOM_MODEL',
@@ -500,6 +507,87 @@ function isWritableDirectory(dirPath) {
     return true
   } catch (error) {
     return false
+  }
+}
+
+async function initializeStorage() {
+  usageState = readUsageState()
+  accountState = readAccountState()
+
+  if (!DATABASE_URL) return
+
+  databasePool = createDatabasePool()
+  await ensureDatabaseSchema()
+
+  const databaseAccounts = await readDatabaseState('accounts')
+  if (databaseAccounts && Array.isArray(databaseAccounts.users)) {
+    accountState = databaseAccounts
+    if (mergeDefaultAccounts(accountState)) {
+      await writeDatabaseState('accounts', accountState)
+    }
+  } else {
+    await writeDatabaseState('accounts', accountState)
+  }
+
+  const databaseUsage = await readDatabaseState('usage')
+  if (databaseUsage && typeof databaseUsage === 'object' && !Array.isArray(databaseUsage)) {
+    usageState = databaseUsage
+  } else {
+    await writeDatabaseState('usage', usageState)
+  }
+}
+
+function createDatabasePool() {
+  let Pool
+
+  try {
+    ;({ Pool } = require('pg'))
+  } catch (error) {
+    throw new Error('已配置 DATABASE_URL，但缺少 pg 依赖。请重新部署以安装数据库依赖。')
+  }
+
+  return new Pool({
+    connectionString: DATABASE_URL,
+    ssl: {
+      rejectUnauthorized: false
+    }
+  })
+}
+
+async function ensureDatabaseSchema() {
+  await databasePool.query(`
+    create table if not exists app_state (
+      key text primary key,
+      value jsonb not null,
+      updated_at timestamptz not null default now()
+    )
+  `)
+}
+
+async function readDatabaseState(key) {
+  const result = await databasePool.query('select value from app_state where key = $1', [key])
+  if (!result.rows.length) return null
+  return result.rows[0].value
+}
+
+async function writeDatabaseState(key, value) {
+  if (!databasePool) return
+
+  await databasePool.query(`
+    insert into app_state (key, value, updated_at)
+    values ($1, $2::jsonb, now())
+    on conflict (key)
+    do update set value = excluded.value, updated_at = now()
+  `, [key, JSON.stringify(value)])
+}
+
+function getStorageStatus() {
+  return {
+    mode: databasePool ? 'database' : 'file',
+    databaseConfigured: Boolean(DATABASE_URL),
+    databaseConnected: Boolean(databasePool),
+    dataDir: DATA_DIR,
+    persistent: databasePool ? true : DATA_DIR !== LEGACY_DATA_DIR
   }
 }
 
@@ -706,8 +794,9 @@ function mergeDefaultAccounts(state) {
   return changed
 }
 
-function writeAccountState() {
+async function writeAccountState() {
   writeJsonState(ACCOUNTS_PATH, accountState)
+  await writeDatabaseState('accounts', accountState)
 }
 
 function findAccountByUsername(username) {
@@ -863,20 +952,20 @@ function getUsageInfo(clientId, limit = DAILY_LIMIT, unlimited = false) {
   }
 }
 
-function incrementUsage(clientId, limit = DAILY_LIMIT, unlimited = false) {
+async function incrementUsage(clientId, limit = DAILY_LIMIT, unlimited = false) {
   const today = getTodayKey()
   cleanupUsageState(today)
   if (!usageState[today]) usageState[today] = {}
   usageState[today][clientId] = Number(usageState[today][clientId] || 0) + 1
-  writeUsageState()
+  await writeUsageState()
   return getUsageInfo(clientId, limit, unlimited)
 }
 
-function resetUsage(clientId) {
+async function resetUsage(clientId) {
   const today = getTodayKey()
   if (usageState[today]) {
     usageState[today][clientId] = 0
-    writeUsageState()
+    await writeUsageState()
   }
 }
 
@@ -901,8 +990,9 @@ function readUsageState() {
   }
 }
 
-function writeUsageState() {
+async function writeUsageState() {
   writeJsonState(USAGE_PATH, usageState)
+  await writeDatabaseState('usage', usageState)
 }
 
 function readStateFile(primaryPath, legacyPath, emptyValue = '') {
