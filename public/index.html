@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>教学系统</title>
     <link rel="stylesheet" href="/styles.css" />
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: {
+          fontCache: 'global'
+        },
+        options: {
+          skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+        }
+      }
+    </script>
   </head>
   <body>
     <section id="accessGate" class="access-gate hidden" aria-live="polite">
@@ -36,27 +50,35 @@
           </div>
         </div>
 
-        <div class="mode-switch" role="tablist" aria-label="课程类型">
-          <button class="mode-button active" data-mode="class" type="button">班课</button>
-          <button class="mode-button" data-mode="oneOnOne" type="button">一对一</button>
-          <button class="mode-button admin-entry hidden" data-mode="admin" type="button">账户</button>
-        </div>
-
-        <section class="sidebar-section class-only">
-          <div class="section-title-row">
-            <h2>班级</h2>
-            <button class="icon-action" id="newClassBtn" type="button" title="新建班级">+</button>
-          </div>
-          <div id="classList" class="class-list"></div>
-        </section>
-
-        <section class="sidebar-section one-only hidden">
-          <div class="section-title-row">
-            <h2>学生档案</h2>
-            <button class="icon-action" id="newOneProfileBtn" type="button" title="新建学生档案">+</button>
-          </div>
-          <div id="oneProfileList" class="class-list"></div>
-        </section>
+        <nav class="mode-switch" aria-label="主导航">
+          <section class="nav-group">
+            <div class="nav-group-title">反馈</div>
+            <div class="nav-group-list" role="tablist" aria-label="反馈">
+              <button class="mode-button active" data-mode="class" type="button">班课</button>
+              <section class="sidebar-section nested-sidebar-section class-only">
+                <div class="section-title-row">
+                  <h2>班级</h2>
+                  <button class="icon-action" id="newClassBtn" type="button" title="新建班级">+</button>
+                </div>
+                <div id="classList" class="class-list"></div>
+              </section>
+              <button class="mode-button" data-mode="oneOnOne" type="button">一对一</button>
+              <section class="sidebar-section nested-sidebar-section one-only hidden">
+                <div class="section-title-row">
+                  <h2>学生档案</h2>
+                  <button class="icon-action" id="newOneProfileBtn" type="button" title="新建学生档案">+</button>
+                </div>
+                <div id="oneProfileList" class="class-list"></div>
+              </section>
+            </div>
+          </section>
+          <section class="nav-group admin-entry hidden">
+            <div class="nav-group-title">账户设置</div>
+            <div class="nav-group-list" role="tablist" aria-label="账户设置">
+              <button class="mode-button" data-mode="admin" type="button">账户管理</button>
+            </div>
+          </section>
+        </nav>
 
         <div class="status-stack">
           <div class="account-status hidden" id="accountStatus"></div>
@@ -95,6 +117,32 @@
           </div>
 
           <div class="admin-user-list" id="adminUserList"></div>
+        </section>
+
+        <section class="teaching-panel hidden" id="teachingPanel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Teaching Data</p>
+              <h1>教学数据工作台</h1>
+            </div>
+            <div class="panel-actions compact-actions">
+              <button class="secondary-button compact-button" id="teachingRefreshBtn" type="button">刷新</button>
+              <button class="secondary-button compact-button" id="teachingPrintBtn" type="button">打印 / 另存 PDF</button>
+              <button class="secondary-button compact-button" id="teachingScreenshotBtn" type="button">截图导出</button>
+            </div>
+          </div>
+
+          <div class="teaching-tabs" role="tablist" aria-label="教学数据功能">
+            <button class="teaching-tab active" data-teaching-tab="roster" type="button">花名册</button>
+            <button class="teaching-tab" data-teaching-tab="courses" type="button">课程库</button>
+            <button class="teaching-tab" data-teaching-tab="scores" type="button">成绩</button>
+            <button class="teaching-tab" data-teaching-tab="history" type="button">历史反馈</button>
+            <button class="teaching-tab" data-teaching-tab="one" type="button">一对一档案</button>
+            <button class="teaching-tab" data-teaching-tab="backup" type="button">备份恢复</button>
+          </div>
+
+          <div class="teaching-content" id="teachingContent"></div>
+          <input class="hidden" id="teachingRestoreInput" type="file" accept=".json,application/json" />
         </section>
 
         <section class="config-panel" id="configPanel">
@@ -168,14 +216,28 @@
             </label>
           </div>
 
+          <div class="form-grid two">
+            <label class="field">
+              <span>教材/讲义方式</span>
+              <select id="classMaterialModeSelect">
+                <option value="lesson" selected>每节课单独上传讲义</option>
+                <option value="book">上传整本教材，反馈时选择讲次</option>
+              </select>
+            </label>
+            <label class="field file-field class-textbook-field hidden" id="classTextbookField">
+              <span>上传整本教材</span>
+              <div class="file-picker">
+                <input id="classTextbookInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md" />
+                <span class="file-picker-button">选择文件</span>
+                <span class="file-picker-name" id="classTextbookFileName">未选择任何文件</span>
+              </div>
+            </label>
+          </div>
+          <div class="upload-hint hidden" id="classTextbookStatus">选择 PDF 后会自动检测第几讲；其他文档会作为整本教材保存。</div>
+
           <label class="field">
             <span>导入学生名单</span>
             <textarea id="studentListInput" rows="5" placeholder="每行一个学生，也可以用逗号、顿号分隔&#10;例如：张三、李四、王五"></textarea>
-          </label>
-
-          <label class="field">
-            <span>反馈模板</span>
-            <textarea id="templateInput" rows="7"></textarea>
           </label>
 
           <div class="panel-actions">
@@ -246,9 +308,92 @@
               <span>课程主题</span>
               <input id="lessonTitleInput" type="text" placeholder="例如：导数单调性与极值" />
             </label>
-            <label class="field file-field">
+            <label class="field file-field" id="coursewareField">
               <span>导入当节课课件</span>
-              <input id="coursewareInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" />
+              <div class="file-picker">
+                <input id="coursewareInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" />
+                <span class="file-picker-button">选择文件</span>
+                <span class="file-picker-name" id="coursewareFileName">未选择任何文件</span>
+              </div>
+            </label>
+            <label class="field hidden" id="classLectureField">
+              <span>选择章节/讲次</span>
+              <select id="classLectureSelect"></select>
+            </label>
+          </div>
+
+          <section class="class-schedule-panel class-only" id="classSchedulePanel">
+            <div class="field class-date-field">
+              <span>上课日期</span>
+              <button class="date-picker-trigger" id="classDateToggleBtn" type="button" aria-expanded="false" aria-controls="classCalendarPopup">
+                <span id="classDateSelectedText">今天</span>
+                <strong>选择日期</strong>
+              </button>
+            </div>
+            <label class="field class-time-field">
+              <span>上课时段</span>
+              <select id="classTimeSlotSelect">
+                <option value="" selected>暂不填写</option>
+                <option value="8-10">8-10</option>
+                <option value="10-12">10-12</option>
+                <option value="14-16">14-16</option>
+                <option value="16-18">16-18</option>
+              </select>
+            </label>
+            <div class="class-calendar hidden" id="classCalendarPopup">
+              <div class="calendar-head">
+                <button class="calendar-nav-button" id="classCalendarPrevBtn" type="button" aria-label="上个月">‹</button>
+                <strong id="classCalendarTitle">本月</strong>
+                <button class="calendar-nav-button" id="classCalendarNextBtn" type="button" aria-label="下个月">›</button>
+              </div>
+              <div class="calendar-weekdays" aria-hidden="true">
+                <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+              </div>
+              <div class="calendar-grid" id="classCalendarGrid"></div>
+            </div>
+          </section>
+
+          <div class="form-grid two class-only">
+            <label class="field">
+              <span>反馈呈现形式</span>
+              <select id="feedbackFormatSelect">
+                <option value="text" selected>文字反馈</option>
+                <option value="image">图片反馈报告</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="form-grid two class-only">
+            <label class="field">
+              <span>反馈类型</span>
+              <select id="feedbackScopeSelect">
+                <option value="individual" selected>个性化反馈</option>
+                <option value="class">班级反馈</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>课后作业</span>
+              <input id="homeworkInput" type="text" placeholder="例如：完成第3讲易优精练，预习下一节内容" />
+            </label>
+          </div>
+
+          <label class="field class-only" id="classFeedbackTemplateField">
+            <span>反馈模板</span>
+            <textarea id="templateInput" rows="7"></textarea>
+          </label>
+
+          <div class="class-feedback-options class-only" id="classFeedbackOptions">
+            <div class="keyword-group">
+              <div class="field-label">班级亮点关键词</div>
+              <div class="keyword-chip-list" id="classPositiveKeywordList"></div>
+            </div>
+            <div class="keyword-group">
+              <div class="field-label">班级需改进关键词</div>
+              <div class="keyword-chip-list" id="classKeywordList"></div>
+            </div>
+            <label class="field">
+              <span>班级/共性备注</span>
+              <textarea id="classRemarkInput" rows="3" placeholder="例如：整体配合度较高，但不等式证明步骤仍需加强"></textarea>
             </label>
           </div>
 
@@ -261,6 +406,40 @@
             <span>补充课程内容</span>
             <textarea id="courseNoteInput" rows="4" placeholder="可选：写下本节课重点、作业、错题或老师补充要求"></textarea>
           </label>
+
+          <section class="exit-test-panel class-only" id="exitTestPanel">
+            <div class="student-toolbar compact-toolbar">
+              <h2>出门测</h2>
+              <span id="exitTestCount">0 人</span>
+            </div>
+            <div class="form-grid three">
+              <label class="field file-field">
+                <span>上传出门测文件</span>
+                <div class="file-picker">
+                  <input id="exitTestInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" />
+                  <span class="file-picker-button">选择文件</span>
+                  <span class="file-picker-name" id="exitTestFileName">未选择任何文件</span>
+                </div>
+              </label>
+              <label class="field">
+                <span>成绩制度</span>
+                <select id="exitTestModeSelect">
+                  <option value="percent" selected>分数制（填写分数）</option>
+                  <option value="grade">等级制（选择 A/B/C/D）</option>
+                </select>
+              </label>
+              <label class="field" id="exitTestTotalField">
+                <span>满分（分数制）</span>
+                <input id="exitTestTotalInput" type="number" min="1" value="100" />
+              </label>
+            </div>
+            <label class="field exit-test-lecture-field hidden" id="exitTestLectureField">
+              <span>选择出门测讲次</span>
+              <select id="exitTestLectureSelect"></select>
+            </label>
+            <div class="upload-hint">可上传整本或单独一讲，AI 会结合文件内容和成绩生成反馈。</div>
+            <div id="exitTestTable" class="exit-test-table"></div>
+          </section>
 
           <div class="student-toolbar">
             <h2>学生表现</h2>
@@ -285,6 +464,57 @@
           </div>
           <div id="debugSummary" class="debug-summary hidden"></div>
           <div id="resultList" class="result-list"></div>
+          <section class="image-report-panel hidden" id="imageReportPanel">
+            <div class="result-head">
+              <div class="result-name-group">
+                <span class="result-index">图</span>
+                <div class="result-name">图片反馈报告</div>
+              </div>
+              <button class="secondary-button compact-button" id="downloadImageReportBtn" type="button">导出图片</button>
+            </div>
+            <div id="imageReportPreview" class="image-report-preview"></div>
+          </section>
+        </section>
+
+        <section class="rearrange-panel hidden" id="rearrangePanel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Question Word Tool</p>
+              <h1>题卷重排</h1>
+            </div>
+            <span class="result-note" id="rearrangeStatus">等待上传文件</span>
+          </div>
+
+          <div class="rearrange-workbench">
+            <div class="rearrange-controls">
+              <label class="field">
+                <span>试卷标题</span>
+                <input id="rearrangeTitleInput" type="text" placeholder="例如：高一数学函数单元练习" />
+              </label>
+
+              <button class="upload-zone compact" id="rearrangeUploadBtn" type="button">
+                <span>上传 PDF / DOCX / PNG / JPG</span>
+              </button>
+              <input class="hidden" id="rearrangeFileInput" type="file" multiple accept=".pdf,.docx,.png,.jpg,.jpeg,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg" />
+              <div class="upload-hint">一次最多 3 个文件；每次先识别前 8 页，测试稳定后可以继续扩展。</div>
+              <div class="file-chip-list" id="rearrangeFileList"></div>
+
+              <div class="panel-actions stretch">
+                <button class="primary-button" id="recognizeQuestionsBtn" type="button">AI 识别题目</button>
+                <button class="secondary-button" id="exportQuestionsBtn" type="button">导出 Word</button>
+              </div>
+
+              <div class="student-empty" id="rearrangeEmpty">上传试卷后，AI 会识别题干、选项和图形说明。</div>
+              <div class="question-editor-list" id="questionEditorList"></div>
+            </div>
+
+            <div class="a4-preview-wrap">
+              <div class="a4-title">A4 预览</div>
+              <div class="a4-paper" id="questionPreviewPaper">
+                <div class="empty-paper">识别完成后在这里预览排版</div>
+              </div>
+            </div>
+          </div>
         </section>
       </main>
     </div>
@@ -316,6 +546,8 @@
       </div>
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

@@ -1,22 +1,60 @@
 const STORAGE_KEY = 'courseFeedback.web.classes'
 const ONE_PROFILE_STORAGE_KEY = 'courseFeedback.web.oneProfiles'
+const TEACHING_CACHE_KEY = 'courseFeedback.web.teachingData.cache'
 
 const DEFAULT_TEMPLATE = [
   '家长您好，本次课程反馈如下：',
   '【课堂内容】',
-  '{根据课件一句话总结}',
+  '（根据课件一句话总结）',
   '【学习重点】',
-  '{根据课件内容简短，列1、2、3点，每一行分段}',
+  '（根据课件内容简短，列1、2、3点）',
   '【课堂表现】',
-  '{根据课件内容以及学生表现和备注写，300字左右}'
+  '（根据课件内容以及学生表现和备注写，300字左右）'
 ].join('\n')
 
 const performanceOptions = ['表现优秀', '表现良好', '表现较差']
+const classKeywordPositiveOptions = [
+  '互动积极',
+  '回答问题踊跃',
+  '小组讨论热烈',
+  '笔记整理认真',
+  '思维活跃有深度',
+  '课前预习充分',
+  '课堂练习完成度高'
+]
+const classKeywordNegativeOptions = [
+  '个别学生走神',
+  '部分学生反应较慢',
+  '互动参与度有待提高',
+  '课前预习不充分',
+  '纪律偶有松散',
+  '作业完成质量参差不齐'
+]
+const classKeywordOptions = [...classKeywordPositiveOptions, ...classKeywordNegativeOptions]
+const studentKeywordPositiveOptions = [
+  '主动发言',
+  '回答质量高',
+  '笔记认真',
+  '思路清晰',
+  '步骤规范',
+  '课堂练习完成度高'
+]
+const studentKeywordNegativeOptions = [
+  '注意力波动',
+  '反应较慢',
+  '参与度待提高',
+  '预习不充分',
+  '作业质量不稳定',
+  '计算细节易错'
+]
+const studentKeywordOptions = [...studentKeywordPositiveOptions, ...studentKeywordNegativeOptions]
 const performanceClasses = {
   表现优秀: 'performance-excellent',
   表现良好: 'performance-good',
   表现较差: 'performance-poor'
 }
+const REARRANGE_MAX_FILES = 3
+const REARRANGE_MAX_PAGE_IMAGES = 8
 
 const state = {
   mode: 'class',
@@ -31,6 +69,21 @@ const state = {
   oneLesson: {
     performance: '表现良好',
     remark: ''
+  },
+  classSchedule: {
+    selectedDate: getLocalDateKey(new Date()),
+    calendarMonth: getMonthKey(new Date()),
+    timeSlot: '',
+    calendarOpen: false
+  },
+  exitTest: {
+    mode: 'percent',
+    totalScore: 100,
+    scores: {},
+    fileKey: '',
+    lectures: [],
+    selectedLectureIndex: '',
+    detectingLectures: false
   },
   access: {
     publicMode: false,
@@ -51,10 +104,51 @@ const state = {
     loading: false,
     isOpen: false,
     error: ''
+  },
+  rearrange: {
+    files: [],
+    questions: [],
+    busy: false,
+    status: '等待上传文件'
+  },
+  teaching: {
+    loading: false,
+    saving: false,
+    tab: 'roster',
+    data: createEmptyTeachingData(),
+    selectedClassId: '',
+    selectedModuleId: '',
+    selectedScoreClassId: '',
+    selectedScoreStudent: '',
+    selectedOneProfileId: '',
+    scoreMode: 'percent',
+    aiResult: '',
+    aiBusy: false
   }
 }
 
 const els = {}
+
+function createEmptyTeachingData() {
+  return {
+    classes: [],
+    courseModules: [],
+    scoreRecords: [],
+    feedbackHistory: [],
+    oneProfiles: [],
+    quickOptions: {
+      performance: studentKeywordOptions,
+      performancePositive: studentKeywordPositiveOptions,
+      performanceNegative: studentKeywordNegativeOptions,
+      classPerformance: classKeywordOptions,
+      classPerformancePositive: classKeywordPositiveOptions,
+      classPerformanceNegative: classKeywordNegativeOptions,
+      homework: ['完成课本对应章节习题', '预习下一节内容', '整理课堂笔记', '完成同步练习对应章节', '重点复习课堂难点', '完成预习导学案'],
+      teaching: ['下次课先做错题回顾', '加强计算规范训练', '增加同类型题变式练习', '用口述方式检查知识理解']
+    },
+    updatedAt: Date.now()
+  }
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
   bindElements()
@@ -62,6 +156,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadOneProfiles()
   bindEvents()
   await checkAccessStatus()
+  if (state.access.authenticated) await loadFeedbackDataFromServer()
   if (state.access.user && state.access.user.isAdmin) loadAdminUsers()
   checkServer()
   if (!state.access.publicMode) loadAIConfig()
@@ -83,6 +178,13 @@ function bindElements() {
     modeButtons: document.querySelectorAll('.mode-button'),
     adminEntry: document.querySelector('.admin-entry'),
     adminPanel: document.querySelector('#adminPanel'),
+    teachingPanel: document.querySelector('#teachingPanel'),
+    teachingTabs: document.querySelectorAll('.teaching-tab'),
+    teachingContent: document.querySelector('#teachingContent'),
+    teachingRefreshBtn: document.querySelector('#teachingRefreshBtn'),
+    teachingPrintBtn: document.querySelector('#teachingPrintBtn'),
+    teachingScreenshotBtn: document.querySelector('#teachingScreenshotBtn'),
+    teachingRestoreInput: document.querySelector('#teachingRestoreInput'),
     refreshUsersBtn: document.querySelector('#refreshUsersBtn'),
     createUserBtn: document.querySelector('#createUserBtn'),
     newAccountUsernameInput: document.querySelector('#newAccountUsernameInput'),
@@ -112,6 +214,11 @@ function bindElements() {
     gradeSelect: document.querySelector('#gradeSelect'),
     studentListInput: document.querySelector('#studentListInput'),
     templateInput: document.querySelector('#templateInput'),
+    classMaterialModeSelect: document.querySelector('#classMaterialModeSelect'),
+    classTextbookField: document.querySelector('#classTextbookField'),
+    classTextbookInput: document.querySelector('#classTextbookInput'),
+    classTextbookFileName: document.querySelector('#classTextbookFileName'),
+    classTextbookStatus: document.querySelector('#classTextbookStatus'),
     oneProfileNameInput: document.querySelector('#oneProfileNameInput'),
     oneProfileGradeSelect: document.querySelector('#oneProfileGradeSelect'),
     onePersonalityInput: document.querySelector('#onePersonalityInput'),
@@ -121,7 +228,28 @@ function bindElements() {
     workspaceEyebrow: document.querySelector('#workspaceEyebrow'),
     workspaceTitle: document.querySelector('#workspaceTitle'),
     lessonTitleInput: document.querySelector('#lessonTitleInput'),
+    coursewareField: document.querySelector('#coursewareField'),
     coursewareInput: document.querySelector('#coursewareInput'),
+    coursewareFileName: document.querySelector('#coursewareFileName'),
+    classSchedulePanel: document.querySelector('#classSchedulePanel'),
+    classDateToggleBtn: document.querySelector('#classDateToggleBtn'),
+    classDateSelectedText: document.querySelector('#classDateSelectedText'),
+    classCalendarPopup: document.querySelector('#classCalendarPopup'),
+    classCalendarPrevBtn: document.querySelector('#classCalendarPrevBtn'),
+    classCalendarNextBtn: document.querySelector('#classCalendarNextBtn'),
+    classCalendarTitle: document.querySelector('#classCalendarTitle'),
+    classCalendarGrid: document.querySelector('#classCalendarGrid'),
+    classTimeSlotSelect: document.querySelector('#classTimeSlotSelect'),
+    classLectureField: document.querySelector('#classLectureField'),
+    classLectureSelect: document.querySelector('#classLectureSelect'),
+    feedbackFormatSelect: document.querySelector('#feedbackFormatSelect'),
+    feedbackScopeSelect: document.querySelector('#feedbackScopeSelect'),
+    classFeedbackTemplateField: document.querySelector('#classFeedbackTemplateField'),
+    classFeedbackOptions: document.querySelector('#classFeedbackOptions'),
+    classPositiveKeywordList: document.querySelector('#classPositiveKeywordList'),
+    classKeywordList: document.querySelector('#classKeywordList'),
+    classRemarkInput: document.querySelector('#classRemarkInput'),
+    homeworkInput: document.querySelector('#homeworkInput'),
     pdfPageSelectionBar: document.querySelector('#pdfPageSelectionBar'),
     pdfPageSelectionText: document.querySelector('#pdfPageSelectionText'),
     pdfPageSelectBtn: document.querySelector('#pdfPageSelectBtn'),
@@ -137,6 +265,17 @@ function bindElements() {
     pdfPageConfirmBtn: document.querySelector('#pdfPageConfirmBtn'),
     pdfPageModalCloseBtn: document.querySelector('#pdfPageModalCloseBtn'),
     courseNoteInput: document.querySelector('#courseNoteInput'),
+    exitTestPanel: document.querySelector('#exitTestPanel'),
+    exitTestInput: document.querySelector('#exitTestInput'),
+    exitTestFileName: document.querySelector('#exitTestFileName'),
+    exitTestLectureField: document.querySelector('#exitTestLectureField'),
+    exitTestLectureSelect: document.querySelector('#exitTestLectureSelect'),
+    exitTestModeSelect: document.querySelector('#exitTestModeSelect'),
+    exitTestTotalField: document.querySelector('#exitTestTotalField'),
+    exitTestTotalInput: document.querySelector('#exitTestTotalInput'),
+    exitTestCount: document.querySelector('#exitTestCount'),
+    exitTestTable: document.querySelector('#exitTestTable'),
+    studentToolbar: document.querySelector('.student-toolbar'),
     studentCount: document.querySelector('#studentCount'),
     studentTable: document.querySelector('#studentTable'),
     generateBtn: document.querySelector('#generateBtn'),
@@ -144,6 +283,20 @@ function bindElements() {
     resultNote: document.querySelector('#resultNote'),
     debugSummary: document.querySelector('#debugSummary'),
     resultList: document.querySelector('#resultList'),
+    imageReportPanel: document.querySelector('#imageReportPanel'),
+    imageReportPreview: document.querySelector('#imageReportPreview'),
+    downloadImageReportBtn: document.querySelector('#downloadImageReportBtn'),
+    rearrangePanel: document.querySelector('#rearrangePanel'),
+    rearrangeStatus: document.querySelector('#rearrangeStatus'),
+    rearrangeTitleInput: document.querySelector('#rearrangeTitleInput'),
+    rearrangeUploadBtn: document.querySelector('#rearrangeUploadBtn'),
+    rearrangeFileInput: document.querySelector('#rearrangeFileInput'),
+    rearrangeFileList: document.querySelector('#rearrangeFileList'),
+    recognizeQuestionsBtn: document.querySelector('#recognizeQuestionsBtn'),
+    exportQuestionsBtn: document.querySelector('#exportQuestionsBtn'),
+    rearrangeEmpty: document.querySelector('#rearrangeEmpty'),
+    questionEditorList: document.querySelector('#questionEditorList'),
+    questionPreviewPaper: document.querySelector('#questionPreviewPaper'),
     accountStatus: document.querySelector('#accountStatus'),
     usageStatus: document.querySelector('#usageStatus'),
     serverStatus: document.querySelector('#serverStatus'),
@@ -164,6 +317,21 @@ function bindEvents() {
   els.refreshUsersBtn.addEventListener('click', loadAdminUsers)
   els.createUserBtn.addEventListener('click', createAdminUser)
   els.adminUserList.addEventListener('click', handleAdminUserAction)
+  if (els.teachingRefreshBtn) els.teachingRefreshBtn.addEventListener('click', loadTeachingData)
+  if (els.teachingPrintBtn) els.teachingPrintBtn.addEventListener('click', () => window.print())
+  if (els.teachingScreenshotBtn) els.teachingScreenshotBtn.addEventListener('click', captureTeachingPanel)
+  if (els.teachingRestoreInput) els.teachingRestoreInput.addEventListener('change', restoreTeachingBackup)
+  els.teachingTabs.forEach((button) => {
+    button.addEventListener('click', () => {
+      state.teaching.tab = button.dataset.teachingTab
+      renderTeachingPanel()
+    })
+  })
+  if (els.teachingContent) {
+    els.teachingContent.addEventListener('click', handleTeachingClick)
+    els.teachingContent.addEventListener('input', handleTeachingInput)
+    els.teachingContent.addEventListener('change', handleTeachingChange)
+  }
 
   els.modeButtons.forEach((button) => {
     button.addEventListener('click', () => {
@@ -197,6 +365,38 @@ function bindEvents() {
   els.generateBtn.addEventListener('click', generateFeedback)
   els.copyAllBtn.addEventListener('click', copyAllFeedbacks)
   els.coursewareInput.addEventListener('change', handleCoursewareChange)
+  if (els.classMaterialModeSelect) els.classMaterialModeSelect.addEventListener('change', renderClassMaterialControls)
+  if (els.classTextbookInput) els.classTextbookInput.addEventListener('change', handleClassTextbookChange)
+  if (els.exitTestInput) els.exitTestInput.addEventListener('change', handleExitTestFileChange)
+  if (els.exitTestLectureSelect) els.exitTestLectureSelect.addEventListener('change', () => {
+    state.exitTest.selectedLectureIndex = els.exitTestLectureSelect.value
+  })
+  if (els.classDateToggleBtn) els.classDateToggleBtn.addEventListener('click', toggleClassCalendar)
+  if (els.classCalendarPrevBtn) els.classCalendarPrevBtn.addEventListener('click', () => shiftClassCalendarMonth(-1))
+  if (els.classCalendarNextBtn) els.classCalendarNextBtn.addEventListener('click', () => shiftClassCalendarMonth(1))
+  if (els.classCalendarGrid) els.classCalendarGrid.addEventListener('click', handleClassCalendarClick)
+  if (els.classTimeSlotSelect) els.classTimeSlotSelect.addEventListener('change', () => {
+    state.classSchedule.timeSlot = els.classTimeSlotSelect.value
+  })
+  if (els.feedbackScopeSelect) els.feedbackScopeSelect.addEventListener('change', () => {
+    renderFeedbackModeControls()
+    renderResults()
+  })
+  if (els.feedbackFormatSelect) els.feedbackFormatSelect.addEventListener('change', () => {
+    renderFeedbackModeControls()
+    renderResults()
+  })
+  if (els.classPositiveKeywordList) els.classPositiveKeywordList.addEventListener('click', handleClassKeywordClick)
+  if (els.classKeywordList) els.classKeywordList.addEventListener('click', handleClassKeywordClick)
+  if (els.downloadImageReportBtn) els.downloadImageReportBtn.addEventListener('click', downloadImageReport)
+  if (els.exitTestModeSelect) els.exitTestModeSelect.addEventListener('change', handleExitTestModeChange)
+  if (els.exitTestTotalInput) els.exitTestTotalInput.addEventListener('input', () => {
+    state.exitTest.totalScore = Number(els.exitTestTotalInput.value || 100)
+  })
+  if (els.exitTestTable) {
+    els.exitTestTable.addEventListener('input', handleExitTestInput)
+    els.exitTestTable.addEventListener('change', handleExitTestInput)
+  }
   els.pdfPageSelectBtn.addEventListener('click', openPdfPageSelection)
   els.pdfPageSelectAllBtn.addEventListener('click', selectAllPdfPages)
   els.pdfPageSelectNoneBtn.addEventListener('click', clearPdfPages)
@@ -208,6 +408,14 @@ function bindEvents() {
   })
   els.pdfPageGrid.addEventListener('change', updatePdfPageSelectionFromGrid)
   els.pdfLectureSelect.addEventListener('change', applySelectedPdfLecture)
+  els.rearrangeUploadBtn.addEventListener('click', () => els.rearrangeFileInput.click())
+  els.rearrangeTitleInput.addEventListener('input', renderQuestionPreview)
+  els.rearrangeFileInput.addEventListener('change', (event) => {
+    setRearrangeFiles(event.target.files)
+  })
+  els.recognizeQuestionsBtn.addEventListener('click', recognizeQuestions)
+  els.exportQuestionsBtn.addEventListener('click', exportQuestionsToWord)
+  els.questionEditorList.addEventListener('input', updateQuestionFromEditor)
 
   els.classList.addEventListener('click', (event) => {
     const deleteButton = event.target.closest('[data-action="delete-class"]')
@@ -247,6 +455,11 @@ function bindEvents() {
   els.studentTable.addEventListener('change', (event) => {
     if (event.target.matches('[data-field="performance"]')) {
       updateWorkingStudentField(Number(event.target.dataset.index), 'performance', event.target.value)
+    }
+    if (event.target.matches('[data-field="keyword"]') && event.target.value) {
+      appendStudentKeyword(Number(event.target.dataset.index), event.target.value)
+      event.target.value = ''
+      renderStudentTable()
     }
   })
 
@@ -399,6 +612,10 @@ async function loginWithAccessCode() {
     els.loginPasswordInput.value = ''
     showAccessMessage('')
     renderAccessState()
+    await loadFeedbackDataFromServer()
+    fillClassForm(getSelectedClass())
+    fillOneProfileForm(getSelectedOneProfile())
+    render()
     if (state.access.user && state.access.user.isAdmin) loadAdminUsers()
     checkServer()
     showToast('已进入系统')
@@ -495,6 +712,10 @@ async function handleAdminUserAction(event) {
   if (action === 'reset-usage') {
     await resetAdminUserUsage(user)
   }
+
+  if (action === 'delete-user') {
+    await deleteAdminUser(user)
+  }
 }
 
 async function saveAdminUser(row, user) {
@@ -549,6 +770,30 @@ async function resetAdminUserUsage(user) {
   }
 }
 
+async function deleteAdminUser(user) {
+  if (state.access.user && state.access.user.id === user.id) {
+    showToast('不能删除当前登录的管理员账号')
+    return
+  }
+
+  const confirmed = window.confirm(`确定删除账号 ${user.username} 吗？删除后该账号将无法登录。`)
+  if (!confirmed) return
+
+  try {
+    const response = await fetch(`/api/admin/users/${encodeURIComponent(user.id)}`, {
+      method: 'DELETE'
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '删除账号失败')
+
+    state.adminUsers = state.adminUsers.filter((item) => item.id !== user.id)
+    renderAdminUsers()
+    showToast('账号已删除')
+  } catch (error) {
+    showToast(error.message || '删除账号失败')
+  }
+}
+
 function renderAdminUsers() {
   if (!els.adminUserList) return
 
@@ -593,10 +838,929 @@ function renderAdminUsers() {
         </div>
         <div class="panel-actions">
           <button class="primary-button" data-admin-action="save-user" data-id="${escapeHtml(user.id)}" type="button">保存账号</button>
+          <button class="secondary-button danger-button" data-admin-action="delete-user" data-id="${escapeHtml(user.id)}" type="button">删除账号</button>
         </div>
       </article>
     `
   }).join('')
+}
+
+function loadTeachingCache() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(TEACHING_CACHE_KEY) || 'null')
+    if (cached && typeof cached === 'object') {
+      state.teaching.data = normalizeTeachingDataClient(cached)
+    }
+  } catch (error) {
+    state.teaching.data = createEmptyTeachingData()
+  }
+}
+
+async function loadTeachingData() {
+  if (!state.access.authenticated || (state.access.accessRequired && !state.access.user)) return
+
+  state.teaching.loading = true
+  renderTeachingPanel()
+
+  try {
+    const response = await fetch('/api/teaching-data')
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '读取教学数据失败')
+
+    state.teaching.data = normalizeTeachingDataClient(data.data)
+    mergePrimaryIntoTeachingData()
+    persistTeachingCache()
+    renderTeachingPanel()
+  } catch (error) {
+    mergePrimaryIntoTeachingData()
+    renderTeachingPanel()
+    showToast(error.message || '读取教学数据失败，已使用本机缓存')
+  } finally {
+    state.teaching.loading = false
+    renderTeachingPanel()
+  }
+}
+
+function persistTeachingCache() {
+  localStorage.setItem(TEACHING_CACHE_KEY, JSON.stringify(state.teaching.data))
+}
+
+async function saveTeachingData(options = {}) {
+  state.teaching.data.updatedAt = Date.now()
+  persistTeachingCache()
+
+  if (options.localOnly) return
+
+  try {
+    state.teaching.saving = true
+    const response = await fetch('/api/teaching-data', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ data: state.teaching.data })
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '保存教学数据失败')
+
+    state.teaching.data = normalizeTeachingDataClient(data.data)
+    persistTeachingCache()
+    if (!options.silent) showToast('教学数据已保存')
+  } catch (error) {
+    showToast(error.message || '教学数据暂存到本机，稍后可重试同步')
+  } finally {
+    state.teaching.saving = false
+    renderTeachingPanel()
+  }
+}
+
+function scheduleTeachingSave() {
+  persistTeachingCache()
+  clearTimeout(scheduleTeachingSave.timer)
+  scheduleTeachingSave.timer = setTimeout(() => saveTeachingData({ silent: true }), 500)
+}
+
+function saveTeachingFromPrimaryData() {
+  mergePrimaryIntoTeachingData()
+  saveTeachingData({ silent: true })
+}
+
+function normalizeTeachingDataClient(input) {
+  const fallback = createEmptyTeachingData()
+  const source = input && typeof input === 'object' ? input : {}
+  const quickOptions = source.quickOptions && typeof source.quickOptions === 'object'
+    ? source.quickOptions
+    : {}
+
+  return {
+    ...fallback,
+    classes: Array.isArray(source.classes) ? source.classes : [],
+    courseModules: Array.isArray(source.courseModules) ? source.courseModules : [],
+    scoreRecords: Array.isArray(source.scoreRecords) ? source.scoreRecords : [],
+    feedbackHistory: Array.isArray(source.feedbackHistory) ? source.feedbackHistory : [],
+    oneProfiles: Array.isArray(source.oneProfiles) ? source.oneProfiles : [],
+    quickOptions: {
+      ...fallback.quickOptions,
+      ...quickOptions
+    },
+    updatedAt: Number(source.updatedAt || Date.now())
+  }
+}
+
+function mergePrimaryIntoTeachingData() {
+  const data = state.teaching.data
+  const classMap = new Map((data.classes || []).map((item) => [item.id, item]))
+  state.classes.forEach((classInfo) => {
+    classMap.set(classInfo.id, {
+      ...(classMap.get(classInfo.id) || {}),
+      id: classInfo.id,
+      name: classInfo.name,
+      grade: classInfo.grade,
+      template: classInfo.template,
+      materialMode: classInfo.materialMode || 'lesson',
+      textbook: classInfo.textbook || null,
+      students: classInfo.students.map((student) => ({
+        id: student.id,
+        name: student.name,
+        note: student.remark || '',
+        performance: student.performance || '表现良好'
+      })),
+      updatedAt: classInfo.updatedAt || Date.now()
+    })
+  })
+  data.classes = Array.from(classMap.values())
+
+  const oneMap = new Map((data.oneProfiles || []).map((item) => [item.id, item]))
+  state.oneProfiles.forEach((profile) => {
+    oneMap.set(profile.id, {
+      ...(oneMap.get(profile.id) || {}),
+      ...profile
+    })
+  })
+  data.oneProfiles = Array.from(oneMap.values())
+}
+
+function renderTeachingPanel() {
+  if (!els.teachingPanel || !els.teachingContent) return
+
+  els.teachingTabs.forEach((button) => {
+    button.classList.toggle('active', button.dataset.teachingTab === state.teaching.tab)
+  })
+
+  if (state.teaching.loading) {
+    els.teachingContent.innerHTML = '<div class="student-empty">正在读取教学数据...</div>'
+    return
+  }
+
+  if (state.teaching.tab === 'roster') renderTeachingRoster()
+  if (state.teaching.tab === 'courses') renderTeachingCourses()
+  if (state.teaching.tab === 'scores') renderTeachingScores()
+  if (state.teaching.tab === 'history') renderTeachingHistory()
+  if (state.teaching.tab === 'one') renderTeachingOneProfiles()
+  if (state.teaching.tab === 'backup') renderTeachingBackup()
+}
+
+function renderTeachingRoster() {
+  const data = state.teaching.data
+  els.teachingContent.innerHTML = `
+    <div class="teaching-grid two">
+      <section class="teaching-card">
+        <div class="result-head">
+          <div>
+            <div class="teaching-title">班级花名册</div>
+            <div class="teaching-meta">${data.classes.length} 个班级</div>
+          </div>
+          <button class="secondary-button compact-button" data-teaching-action="sync-primary" type="button">同步现有档案</button>
+        </div>
+        <div class="form-grid two">
+          <label class="field"><span>班级名称</span><input data-teaching-field="newClassName" type="text" placeholder="例如：清北4班" /></label>
+          <label class="field"><span>年级</span><select data-teaching-field="newClassGrade"><option>初三</option><option selected>高一</option><option>高二</option><option>高三</option></select></label>
+        </div>
+        <label class="field"><span>学生名单</span><textarea data-teaching-field="newClassStudents" rows="5" placeholder="每行一个学生，也可以用逗号分隔"></textarea></label>
+        <div class="panel-actions"><button class="primary-button" data-teaching-action="add-class" type="button">新增花名册</button></div>
+      </section>
+      <section class="teaching-card">
+        <div class="teaching-title">常用课堂关键词</div>
+        <div class="form-grid two">
+          <label class="field"><span>班级亮点关键词</span><textarea data-teaching-quick="classPerformancePositive" rows="4">${escapeHtml((data.quickOptions.classPerformancePositive || classKeywordPositiveOptions).join('\n'))}</textarea></label>
+          <label class="field"><span>班级需改进关键词</span><textarea data-teaching-quick="classPerformanceNegative" rows="4">${escapeHtml((data.quickOptions.classPerformanceNegative || classKeywordNegativeOptions).join('\n'))}</textarea></label>
+        </div>
+        <div class="form-grid two">
+          <label class="field"><span>个性化亮点关键词</span><textarea data-teaching-quick="performancePositive" rows="4">${escapeHtml((data.quickOptions.performancePositive || studentKeywordPositiveOptions).join('\n'))}</textarea></label>
+          <label class="field"><span>个性化需改进关键词</span><textarea data-teaching-quick="performanceNegative" rows="4">${escapeHtml((data.quickOptions.performanceNegative || studentKeywordNegativeOptions).join('\n'))}</textarea></label>
+        </div>
+      </section>
+    </div>
+    <div class="teaching-list">
+      ${data.classes.length ? data.classes.map(renderTeachingClassCard).join('') : '<div class="student-empty">暂无花名册，可以从现有班级同步，或在上方新增。</div>'}
+    </div>
+  `
+}
+
+function renderTeachingClassCard(classInfo) {
+  const students = Array.isArray(classInfo.students) ? classInfo.students : []
+  return `
+    <article class="teaching-card" data-teaching-class-id="${escapeHtml(classInfo.id)}">
+      <div class="result-head">
+        <div>
+          <div class="teaching-title">${escapeHtml(classInfo.name)} · ${escapeHtml(classInfo.grade || '')}</div>
+          <div class="teaching-meta">${students.length} 名学生${classInfo.textbook ? ` · ${escapeHtml(classInfo.textbook.name || '已绑定教材')}` : ''}</div>
+        </div>
+        <button class="list-delete-button" data-teaching-action="delete-class" data-id="${escapeHtml(classInfo.id)}" type="button">删除</button>
+      </div>
+      <label class="field"><span>花名册</span><textarea data-teaching-field="classStudents" data-id="${escapeHtml(classInfo.id)}" rows="4">${escapeHtml(students.map((student) => student.name).join('\n'))}</textarea></label>
+    </article>
+  `
+}
+
+function renderTeachingCourses() {
+  const modules = state.teaching.data.courseModules
+  const selected = modules.find((item) => item.id === state.teaching.selectedModuleId) || modules[0]
+  if (selected && !state.teaching.selectedModuleId) state.teaching.selectedModuleId = selected.id
+
+  els.teachingContent.innerHTML = `
+    <div class="teaching-grid sidebar-layout">
+      <section class="teaching-card">
+        <div class="result-head"><div class="teaching-title">课程模块</div><button class="icon-action" data-teaching-action="add-module" type="button">+</button></div>
+        <div class="teaching-pill-list">
+          ${modules.length ? modules.map((module) => `
+            <button class="teaching-pill ${module.id === state.teaching.selectedModuleId ? 'active' : ''}" data-teaching-action="select-module" data-id="${escapeHtml(module.id)}" type="button">${escapeHtml(module.name)}</button>
+          `).join('') : '<div class="student-empty compact-empty">暂无模块</div>'}
+        </div>
+        <div class="panel-actions stretch">
+          <button class="secondary-button compact-button" data-teaching-action="export-courses" type="button">导出课程</button>
+          <button class="secondary-button compact-button" data-teaching-action="import-courses" type="button">导入课程</button>
+        </div>
+      </section>
+      <section class="teaching-card">
+        ${selected ? renderCourseEditor(selected) : '<div class="student-empty">点击 + 新增课程模块。</div>'}
+      </section>
+    </div>
+  `
+}
+
+function renderCourseEditor(module) {
+  const lecturesText = (module.lectures || [])
+    .map((lecture) => [lecture.title, lecture.content, lecture.keyPoints, lecture.notes].join(' | '))
+    .join('\n')
+  const chaptersText = JSON.stringify(module.chapters || [], null, 2)
+
+  return `
+    <div class="result-head">
+      <div class="teaching-title">编辑课程内容</div>
+      <button class="list-delete-button" data-teaching-action="delete-module" data-id="${escapeHtml(module.id)}" type="button">删除模块</button>
+    </div>
+    <label class="field"><span>模块名称</span><input data-course-field="name" data-id="${escapeHtml(module.id)}" type="text" value="${escapeHtml(module.name)}" /></label>
+    <label class="field"><span>讲次内容（一行一讲：标题 | 知识点 | 重难点 | 注意事项）</span><textarea data-course-field="lectures" data-id="${escapeHtml(module.id)}" rows="8">${escapeHtml(lecturesText)}</textarea></label>
+    <label class="field"><span>章节/节/课时 JSON</span><textarea data-course-field="chapters" data-id="${escapeHtml(module.id)}" rows="8">${escapeHtml(chaptersText)}</textarea></label>
+    <div class="panel-actions">
+      <button class="secondary-button" data-teaching-action="fill-course-note" data-id="${escapeHtml(module.id)}" type="button">填入当前反馈</button>
+      <button class="primary-button" data-teaching-action="save-course" data-id="${escapeHtml(module.id)}" type="button">保存课程</button>
+    </div>
+  `
+}
+
+function renderTeachingScores() {
+  const classes = state.teaching.data.classes || []
+  const selectedClass = classes.find((item) => item.id === state.teaching.selectedScoreClassId) || classes[0]
+  if (selectedClass && !state.teaching.selectedScoreClassId) state.teaching.selectedScoreClassId = selectedClass.id
+
+  const records = getScoreRecordsForClass(selectedClass && selectedClass.id)
+  els.teachingContent.innerHTML = `
+    <div class="teaching-grid two">
+      <section class="teaching-card">
+        <div class="teaching-title">新增成绩记录</div>
+        <div class="form-grid two">
+          <label class="field"><span>班级</span><select data-teaching-field="scoreClass">${classes.map((item) => `<option value="${escapeHtml(item.id)}" ${selectedClass && item.id === selectedClass.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label>
+          <label class="field"><span>成绩模式</span><select data-teaching-field="scoreMode"><option value="percent" ${state.teaching.scoreMode === 'percent' ? 'selected' : ''}>百分制</option><option value="grade" ${state.teaching.scoreMode === 'grade' ? 'selected' : ''}>等级制</option></select></label>
+        </div>
+        <div class="form-grid three">
+          <label class="field"><span>名称</span><input data-teaching-field="scoreTitle" type="text" placeholder="例如：第3讲易优精练" /></label>
+          <label class="field"><span>日期</span><input data-teaching-field="scoreDate" type="date" value="${new Date().toISOString().slice(0, 10)}" /></label>
+          <label class="field"><span>总分</span><input data-teaching-field="scoreTotal" type="number" min="1" value="100" ${state.teaching.scoreMode === 'grade' ? 'disabled' : ''} /></label>
+        </div>
+        <div class="score-entry-list">
+          ${selectedClass ? renderScoreRows(selectedClass) : '<div class="student-empty">请先建立班级花名册。</div>'}
+        </div>
+        <div class="panel-actions"><button class="primary-button" data-teaching-action="save-score" type="button">保存成绩</button></div>
+      </section>
+      <section class="teaching-card">
+        ${renderClassStats(selectedClass, records)}
+      </section>
+    </div>
+  `
+  drawTeachingTrendChart(selectedClass, records)
+}
+
+function renderScoreRows(classInfo) {
+  const students = Array.isArray(classInfo.students) ? classInfo.students : []
+  return students.map((student) => `
+    <div class="score-entry-row" data-score-student="${escapeHtml(student.name)}">
+      <div class="student-name">${escapeHtml(student.name)}</div>
+      ${state.teaching.scoreMode === 'grade'
+        ? '<select data-score-field="grade"><option value="">-</option><option>A</option><option>B</option><option>C</option><option>D</option></select>'
+        : '<input data-score-field="score" type="number" min="0" placeholder="分数" />'}
+      <input data-score-field="note" type="text" placeholder="备注" />
+    </div>
+  `).join('')
+}
+
+function renderClassStats(classInfo, records) {
+  if (!classInfo) return '<div class="student-empty">暂无班级。</div>'
+  if (!records.length) return '<div class="student-empty">该班级暂无成绩记录。</div>'
+
+  const latest = records[records.length - 1]
+  const scores = latest.mode === 'percent'
+    ? latest.students.map((student) => Number(student.score)).filter(Number.isFinite)
+    : []
+  const avg = scores.length ? (scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1) : '-'
+  const max = scores.length ? Math.max(...scores) : '-'
+  const min = scores.length ? Math.min(...scores) : '-'
+
+  return `
+    <div class="result-head">
+      <div>
+        <div class="teaching-title">${escapeHtml(classInfo.name)} 成绩统计</div>
+        <div class="teaching-meta">${records.length} 条记录</div>
+      </div>
+      <button class="secondary-button compact-button" data-teaching-action="analyze-class" data-id="${escapeHtml(classInfo.id)}" type="button">AI 分析</button>
+    </div>
+    <div class="stats-grid">
+      <div><strong>${avg}</strong><span>平均分</span></div>
+      <div><strong>${max}</strong><span>最高分</span></div>
+      <div><strong>${min}</strong><span>最低分</span></div>
+      <div><strong>${records.length}</strong><span>测评次数</span></div>
+    </div>
+    <canvas id="teachingScoreChart" class="score-chart" width="680" height="260"></canvas>
+    <div class="teaching-analysis">${escapeHtml(state.teaching.aiResult || '')}</div>
+  `
+}
+
+function renderTeachingHistory() {
+  const history = state.teaching.data.feedbackHistory || []
+  els.teachingContent.innerHTML = `
+    <section class="teaching-card">
+      <div class="result-head">
+        <div>
+          <div class="teaching-title">反馈历史记录</div>
+          <div class="teaching-meta">${history.length} 条历史</div>
+        </div>
+        <button class="secondary-button compact-button" data-teaching-action="clear-history" type="button">清空历史</button>
+      </div>
+      <div class="teaching-list">
+        ${history.length ? history.slice().reverse().map(renderHistoryCard).join('') : '<div class="student-empty">生成反馈后会自动保存到这里。</div>'}
+      </div>
+    </section>
+  `
+}
+
+function renderHistoryCard(item) {
+  const firstFeedback = item.feedbacks && item.feedbacks[0] ? item.feedbacks[0].feedback : ''
+  return `
+    <article class="teaching-card compact-card">
+      <div class="result-head">
+        <div>
+          <div class="teaching-title">${escapeHtml(item.className || item.studentName || '未命名反馈')}</div>
+          <div class="teaching-meta">${formatDateTime(item.createdAt)} · ${escapeHtml(item.lessonTitle || '未填写主题')}</div>
+        </div>
+        <div class="button-row">
+          <button class="secondary-button compact-button" data-teaching-action="copy-history" data-id="${escapeHtml(item.id)}" type="button">复制</button>
+          <button class="list-delete-button" data-teaching-action="delete-history" data-id="${escapeHtml(item.id)}" type="button">删除</button>
+        </div>
+      </div>
+      <p class="result-text">${escapeHtml(firstFeedback || '暂无正文')}</p>
+    </article>
+  `
+}
+
+function renderTeachingOneProfiles() {
+  const profiles = state.teaching.data.oneProfiles || []
+  const selected = profiles.find((item) => item.id === state.teaching.selectedOneProfileId) || profiles[0]
+  if (selected && !state.teaching.selectedOneProfileId) state.teaching.selectedOneProfileId = selected.id
+  const records = selected ? getScoreRecordsForOneProfile(selected) : []
+
+  els.teachingContent.innerHTML = `
+    <div class="teaching-grid sidebar-layout">
+      <section class="teaching-card">
+        <div class="result-head"><div class="teaching-title">一对一长期档案</div><button class="icon-action" data-teaching-action="add-one-profile" type="button">+</button></div>
+        <div class="teaching-pill-list">
+          ${profiles.length ? profiles.map((profile) => `
+            <button class="teaching-pill ${selected && profile.id === selected.id ? 'active' : ''}" data-teaching-action="select-one-profile" data-id="${escapeHtml(profile.id)}" type="button">${escapeHtml(profile.name)}</button>
+          `).join('') : '<div class="student-empty compact-empty">暂无档案</div>'}
+        </div>
+      </section>
+      <section class="teaching-card">
+        ${selected ? renderOneLongProfile(selected, records) : '<div class="student-empty">点击 + 新增一对一档案。</div>'}
+      </section>
+    </div>
+  `
+  drawOneProfileTrendChart(records)
+}
+
+function renderOneLongProfile(profile, records) {
+  return `
+    <div class="result-head">
+      <div>
+        <div class="teaching-title">${escapeHtml(profile.name)} · ${escapeHtml(profile.grade || '')}</div>
+        <div class="teaching-meta">${records.length} 条成绩记录</div>
+      </div>
+      <button class="secondary-button compact-button" data-teaching-action="analyze-one-profile" data-id="${escapeHtml(profile.id)}" type="button">AI 综合分析</button>
+    </div>
+    <div class="form-grid two">
+      <label class="field"><span>平时性格</span><textarea data-one-field="personality" data-id="${escapeHtml(profile.id)}" rows="4">${escapeHtml(profile.personality || '')}</textarea></label>
+      <label class="field"><span>做题习惯</span><textarea data-one-field="habit" data-id="${escapeHtml(profile.id)}" rows="4">${escapeHtml(profile.habit || '')}</textarea></label>
+    </div>
+    <canvas id="oneProfileTrendChart" class="score-chart" width="680" height="260"></canvas>
+    <div class="teaching-analysis">${escapeHtml(state.teaching.aiResult || '')}</div>
+  `
+}
+
+function renderTeachingBackup() {
+  const data = state.teaching.data
+  els.teachingContent.innerHTML = `
+    <section class="teaching-card">
+      <div class="teaching-title">全部数据备份 / 恢复</div>
+      <div class="stats-grid">
+        <div><strong>${data.classes.length}</strong><span>班级</span></div>
+        <div><strong>${data.courseModules.length}</strong><span>课程模块</span></div>
+        <div><strong>${data.scoreRecords.length}</strong><span>成绩记录</span></div>
+        <div><strong>${data.feedbackHistory.length}</strong><span>反馈历史</span></div>
+      </div>
+      <label class="field"><span>课后作业快捷项</span><textarea data-teaching-quick="homework" rows="4">${escapeHtml((data.quickOptions.homework || []).join('\n'))}</textarea></label>
+      <label class="field"><span>教学建议快捷项</span><textarea data-teaching-quick="teaching" rows="4">${escapeHtml((data.quickOptions.teaching || []).join('\n'))}</textarea></label>
+      <div class="panel-actions">
+        <button class="secondary-button" data-teaching-action="export-backup" type="button">导出全部备份</button>
+        <button class="secondary-button" data-teaching-action="restore-backup" type="button">恢复备份</button>
+        <button class="primary-button" data-teaching-action="save-teaching" type="button">保存到后端</button>
+      </div>
+    </section>
+  `
+}
+
+async function handleTeachingClick(event) {
+  const button = event.target.closest('[data-teaching-action]')
+  if (!button) return
+
+  const action = button.dataset.teachingAction
+  const id = button.dataset.id || ''
+
+  if (action === 'sync-primary') {
+    mergePrimaryIntoTeachingData()
+    await saveTeachingData()
+  }
+  if (action === 'add-class') addTeachingClass()
+  if (action === 'delete-class') deleteTeachingClass(id)
+  if (action === 'add-module') addTeachingModule()
+  if (action === 'select-module') {
+    state.teaching.selectedModuleId = id
+    renderTeachingPanel()
+  }
+  if (action === 'delete-module') deleteTeachingModule(id)
+  if (action === 'save-course') saveTeachingCourse(id)
+  if (action === 'fill-course-note') fillCourseNoteFromModule(id)
+  if (action === 'export-courses') exportTeachingCourses()
+  if (action === 'import-courses') importTeachingCourses()
+  if (action === 'save-score') saveTeachingScore()
+  if (action === 'analyze-class') analyzeTeachingClass(id)
+  if (action === 'clear-history') clearTeachingHistory()
+  if (action === 'copy-history') copyTeachingHistory(id)
+  if (action === 'delete-history') deleteTeachingHistory(id)
+  if (action === 'add-one-profile') addTeachingOneProfile()
+  if (action === 'select-one-profile') {
+    state.teaching.selectedOneProfileId = id
+    renderTeachingPanel()
+  }
+  if (action === 'analyze-one-profile') analyzeOneTeachingProfile(id)
+  if (action === 'export-backup') exportTeachingBackup()
+  if (action === 'restore-backup') els.teachingRestoreInput.click()
+  if (action === 'save-teaching') saveTeachingData()
+}
+
+function handleTeachingInput(event) {
+  if (event.target.matches('[data-teaching-quick]')) {
+    const key = event.target.dataset.teachingQuick
+    state.teaching.data.quickOptions[key] = parseLines(event.target.value)
+    scheduleTeachingSave()
+  }
+  if (event.target.matches('[data-teaching-field="classStudents"]')) {
+    const classInfo = state.teaching.data.classes.find((item) => item.id === event.target.dataset.id)
+    if (classInfo) {
+      classInfo.students = parseLines(event.target.value).map((name) => ({ id: createId('stu'), name }))
+      scheduleTeachingSave()
+    }
+  }
+  if (event.target.matches('[data-one-field]')) {
+    const profile = state.teaching.data.oneProfiles.find((item) => item.id === event.target.dataset.id)
+    if (profile) {
+      profile[event.target.dataset.oneField] = event.target.value
+      scheduleTeachingSave()
+    }
+  }
+}
+
+function handleTeachingChange(event) {
+  if (event.target.matches('[data-teaching-field="scoreClass"]')) {
+    state.teaching.selectedScoreClassId = event.target.value
+    renderTeachingPanel()
+  }
+  if (event.target.matches('[data-teaching-field="scoreMode"]')) {
+    state.teaching.scoreMode = event.target.value
+    renderTeachingPanel()
+  }
+}
+
+function addTeachingClass() {
+  const name = getTeachingInputValue('newClassName')
+  const grade = getTeachingInputValue('newClassGrade') || '高一'
+  const students = parseLines(getTeachingInputValue('newClassStudents')).map((studentName) => ({
+    id: createId('stu'),
+    name: studentName
+  }))
+  if (!name || !students.length) {
+    showToast('请填写班级名称和学生名单')
+    return
+  }
+
+  state.teaching.data.classes.unshift({
+    id: createId('class'),
+    name,
+    grade,
+    students,
+    materialMode: 'lesson',
+    updatedAt: Date.now()
+  })
+  saveTeachingData()
+}
+
+function deleteTeachingClass(id) {
+  const classInfo = state.teaching.data.classes.find((item) => item.id === id)
+  if (!classInfo || !window.confirm(`确定删除“${classInfo.name}”吗？`)) return
+  state.teaching.data.classes = state.teaching.data.classes.filter((item) => item.id !== id)
+  saveTeachingData()
+}
+
+function addTeachingModule() {
+  const name = window.prompt('请输入课程模块名称，例如：高一数学必修一')
+  if (!name || !name.trim()) return
+  const module = {
+    id: createId('module'),
+    name: name.trim(),
+    lectures: [],
+    chapters: [],
+    updatedAt: Date.now()
+  }
+  state.teaching.data.courseModules.unshift(module)
+  state.teaching.selectedModuleId = module.id
+  saveTeachingData()
+}
+
+function deleteTeachingModule(id) {
+  const module = state.teaching.data.courseModules.find((item) => item.id === id)
+  if (!module || !window.confirm(`确定删除“${module.name}”吗？`)) return
+  state.teaching.data.courseModules = state.teaching.data.courseModules.filter((item) => item.id !== id)
+  state.teaching.selectedModuleId = ''
+  saveTeachingData()
+}
+
+function saveTeachingCourse(id) {
+  const module = state.teaching.data.courseModules.find((item) => item.id === id)
+  if (!module) return
+
+  const nameInput = els.teachingContent.querySelector(`[data-course-field="name"][data-id="${cssEscape(id)}"]`)
+  const lecturesInput = els.teachingContent.querySelector(`[data-course-field="lectures"][data-id="${cssEscape(id)}"]`)
+  const chaptersInput = els.teachingContent.querySelector(`[data-course-field="chapters"][data-id="${cssEscape(id)}"]`)
+  module.name = nameInput.value.trim() || module.name
+  module.lectures = parseLectureLines(lecturesInput.value)
+  try {
+    module.chapters = JSON.parse(chaptersInput.value || '[]')
+  } catch (error) {
+    showToast('章节 JSON 格式不正确')
+    return
+  }
+  module.updatedAt = Date.now()
+  saveTeachingData()
+}
+
+function fillCourseNoteFromModule(id) {
+  const module = state.teaching.data.courseModules.find((item) => item.id === id)
+  const lecture = module && module.lectures && module.lectures[0]
+  if (!lecture) {
+    showToast('这个模块还没有讲次内容')
+    return
+  }
+
+  els.courseNoteInput.value = [
+    lecture.content ? `【知识点】\n${lecture.content}` : '',
+    lecture.keyPoints ? `【重难点】\n${lecture.keyPoints}` : '',
+    lecture.notes ? `【注意事项】\n${lecture.notes}` : ''
+  ].filter(Boolean).join('\n')
+  state.mode = 'class'
+  render()
+  showToast('已填入当前反馈内容')
+}
+
+function saveTeachingScore() {
+  const classInfo = state.teaching.data.classes.find((item) => item.id === state.teaching.selectedScoreClassId)
+  if (!classInfo) {
+    showToast('请先选择班级')
+    return
+  }
+
+  const record = {
+    id: createId('score'),
+    scope: 'class',
+    classId: classInfo.id,
+    className: classInfo.name,
+    title: getTeachingInputValue('scoreTitle') || '课堂测评',
+    date: getTeachingInputValue('scoreDate') || new Date().toISOString().slice(0, 10),
+    mode: state.teaching.scoreMode,
+    totalScore: state.teaching.scoreMode === 'grade' ? null : Number(getTeachingInputValue('scoreTotal') || 100),
+    students: Array.from(els.teachingContent.querySelectorAll('[data-score-student]')).map((row) => ({
+      name: row.dataset.scoreStudent,
+      score: state.teaching.scoreMode === 'grade' ? null : Number(row.querySelector('[data-score-field="score"]').value || NaN),
+      grade: state.teaching.scoreMode === 'grade' ? row.querySelector('[data-score-field="grade"]').value : '',
+      note: row.querySelector('[data-score-field="note"]').value.trim()
+    })),
+    createdAt: Date.now()
+  }
+
+  state.teaching.data.scoreRecords.push(record)
+  saveTeachingData()
+}
+
+async function analyzeTeachingClass(classId) {
+  const classInfo = state.teaching.data.classes.find((item) => item.id === classId)
+  const records = getScoreRecordsForClass(classId)
+  if (!classInfo || !records.length) {
+    showToast('暂无可分析的成绩记录')
+    return
+  }
+  await requestTeachingAnalysis({
+    analysisType: 'class',
+    target: classInfo.name,
+    records
+  })
+}
+
+async function analyzeOneTeachingProfile(profileId) {
+  const profile = state.teaching.data.oneProfiles.find((item) => item.id === profileId)
+  if (!profile) return
+  const records = getScoreRecordsForOneProfile(profile)
+  await requestTeachingAnalysis({
+    analysisType: 'student',
+    target: profile.name,
+    profile,
+    records
+  })
+}
+
+async function requestTeachingAnalysis(payload) {
+  try {
+    state.teaching.aiBusy = true
+    state.teaching.aiResult = 'AI 正在分析...'
+    renderTeachingPanel()
+    const response = await fetch('/api/teaching-data/ai-analysis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || 'AI 分析失败')
+    if (data.usage) {
+      updateAccessState({ usage: data.usage })
+      renderAccessState()
+    }
+    state.teaching.aiResult = data.text || ''
+  } catch (error) {
+    state.teaching.aiResult = ''
+    showToast(error.message || 'AI 分析失败')
+  } finally {
+    state.teaching.aiBusy = false
+    renderTeachingPanel()
+  }
+}
+
+function clearTeachingHistory() {
+  if (!window.confirm('确定清空全部反馈历史吗？')) return
+  state.teaching.data.feedbackHistory = []
+  saveTeachingData()
+}
+
+function copyTeachingHistory(id) {
+  const item = state.teaching.data.feedbackHistory.find((history) => history.id === id)
+  if (!item) return
+  const text = (item.feedbacks || []).map((feedback) => `${feedback.name}\n${feedback.feedback}`).join('\n\n')
+  copyText(text, '历史反馈已复制')
+}
+
+function deleteTeachingHistory(id) {
+  state.teaching.data.feedbackHistory = state.teaching.data.feedbackHistory.filter((item) => item.id !== id)
+  saveTeachingData()
+}
+
+function addTeachingOneProfile() {
+  const name = window.prompt('请输入一对一学生姓名')
+  if (!name || !name.trim()) return
+  const profile = {
+    id: createId('one'),
+    name: name.trim(),
+    grade: '高一',
+    personality: '',
+    habit: '',
+    template: DEFAULT_TEMPLATE,
+    updatedAt: Date.now()
+  }
+  state.teaching.data.oneProfiles.unshift(profile)
+  state.teaching.selectedOneProfileId = profile.id
+  saveTeachingData()
+}
+
+function exportTeachingBackup() {
+  downloadJson(state.teaching.data, `教学系统备份-${new Date().toISOString().slice(0, 10)}.json`)
+}
+
+function exportTeachingCourses() {
+  downloadJson(state.teaching.data.courseModules, '课程数据.json')
+}
+
+function importTeachingCourses() {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = '.json,application/json'
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0]
+    if (!file) return
+    try {
+      const parsed = JSON.parse(await file.text())
+      state.teaching.data.courseModules = Array.isArray(parsed) ? parsed : []
+      await saveTeachingData()
+    } catch (error) {
+      showToast('课程数据导入失败')
+    }
+  })
+  input.click()
+}
+
+async function restoreTeachingBackup() {
+  const file = els.teachingRestoreInput.files && els.teachingRestoreInput.files[0]
+  if (!file) return
+  try {
+    const parsed = JSON.parse(await file.text())
+    state.teaching.data = normalizeTeachingDataClient(parsed)
+    await saveTeachingData()
+    showToast('备份已恢复')
+  } catch (error) {
+    showToast('备份文件无法读取')
+  } finally {
+    els.teachingRestoreInput.value = ''
+  }
+}
+
+async function captureTeachingPanel() {
+  if (!window.html2canvas || !els.teachingPanel) {
+    showToast('截图组件未加载，请刷新后重试')
+    return
+  }
+  const canvas = await window.html2canvas(els.teachingPanel, { scale: 2, backgroundColor: '#ffffff' })
+  canvas.toBlob((blob) => {
+    if (blob) downloadBlob(blob, `教学数据-${Date.now()}.png`)
+  }, 'image/png')
+}
+
+function saveFeedbackHistory(payload, feedbacks) {
+  if (!Array.isArray(feedbacks) || !feedbacks.length) return
+
+  state.teaching.data.feedbackHistory.unshift({
+    id: createId('history'),
+    mode: payload.mode,
+    feedbackScope: payload.feedbackScope || 'individual',
+    feedbackFormat: payload.feedbackFormat || 'text',
+    className: payload.className,
+    lessonTitle: payload.lessonTitle,
+    courseNote: payload.courseNote,
+    feedbacks,
+    createdAt: Date.now()
+  })
+  state.teaching.data.feedbackHistory = state.teaching.data.feedbackHistory.slice(0, 200)
+  saveTeachingData({ silent: true })
+}
+
+function getScoreRecordsForClass(classId) {
+  return (state.teaching.data.scoreRecords || [])
+    .filter((record) => record.classId === classId)
+    .sort((left, right) => String(left.date).localeCompare(String(right.date)))
+}
+
+function getScoreRecordsForOneProfile(profile) {
+  return (state.teaching.data.scoreRecords || [])
+    .filter((record) => record.profileId === profile.id
+      || record.studentName === profile.name
+      || (Array.isArray(record.students) && record.students.some((student) => student.name === profile.name)))
+    .sort((left, right) => String(left.date).localeCompare(String(right.date)))
+}
+
+function drawTeachingTrendChart(classInfo, records) {
+  const canvas = document.querySelector('#teachingScoreChart')
+  if (!canvas || !classInfo || !records.length) return
+  drawScoreChart(canvas, records.map((record) => ({
+    label: String(record.date || '').slice(5),
+    value: getRecordAverageRate(record)
+  })).filter((item) => Number.isFinite(item.value)), `${classInfo.name} 平均得分率`)
+}
+
+function drawOneProfileTrendChart(records) {
+  const canvas = document.querySelector('#oneProfileTrendChart')
+  if (!canvas) return
+  drawScoreChart(canvas, records.map((record) => ({
+    label: String(record.date || '').slice(5),
+    value: getRecordAverageRate(record)
+  })).filter((item) => Number.isFinite(item.value)), '一对一成绩趋势')
+}
+
+function drawScoreChart(canvas, points, title) {
+  const context = canvas.getContext('2d')
+  const width = canvas.width
+  const height = canvas.height
+  const pad = 42
+  context.clearRect(0, 0, width, height)
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, width, height)
+  context.fillStyle = '#343854'
+  context.font = 'bold 14px sans-serif'
+  context.fillText(title, pad, 24)
+  context.strokeStyle = '#e0e4f6'
+  context.lineWidth = 1
+  for (let i = 0; i <= 5; i += 1) {
+    const y = pad + ((height - pad * 2) / 5) * i
+    context.beginPath()
+    context.moveTo(pad, y)
+    context.lineTo(width - pad, y)
+    context.stroke()
+    context.fillStyle = '#707690'
+    context.font = '11px sans-serif'
+    context.fillText(`${100 - i * 20}%`, 6, y + 4)
+  }
+  if (points.length < 2) {
+    context.fillStyle = '#707690'
+    context.fillText('至少两条百分制记录后显示趋势', pad, height / 2)
+    return
+  }
+  const step = (width - pad * 2) / Math.max(1, points.length - 1)
+  context.beginPath()
+  context.strokeStyle = '#6860cf'
+  context.lineWidth = 2.5
+  points.forEach((point, index) => {
+    const x = pad + index * step
+    const y = pad + (height - pad * 2) * (1 - point.value / 100)
+    if (index === 0) context.moveTo(x, y)
+    else context.lineTo(x, y)
+  })
+  context.stroke()
+  points.forEach((point, index) => {
+    const x = pad + index * step
+    const y = pad + (height - pad * 2) * (1 - point.value / 100)
+    context.fillStyle = '#6860cf'
+    context.beginPath()
+    context.arc(x, y, 4, 0, Math.PI * 2)
+    context.fill()
+    context.fillStyle = '#343854'
+    context.font = '11px sans-serif'
+    context.fillText(point.label, x - 14, height - 10)
+  })
+}
+
+function getRecordAverageRate(record) {
+  if (!record || record.mode === 'grade') return NaN
+  const total = Number(record.totalScore || 100)
+  const scores = (record.students || []).map((student) => Number(student.score)).filter(Number.isFinite)
+  if (!scores.length || !total) return NaN
+  const avg = scores.reduce((sum, score) => sum + score, 0) / scores.length
+  return Math.max(0, Math.min(100, (avg / total) * 100))
+}
+
+function parseLectureLines(text) {
+  return String(text || '').split(/\n+/).map((line, index) => {
+    const [title = '', content = '', keyPoints = '', notes = ''] = line.split('|').map((part) => part.trim())
+    return {
+      id: createId('lecture'),
+      lecture: index + 1,
+      title: title || `第 ${index + 1} 讲`,
+      content,
+      keyPoints,
+      notes
+    }
+  }).filter((lecture) => lecture.title || lecture.content)
+}
+
+function getTeachingInputValue(field) {
+  const input = els.teachingContent.querySelector(`[data-teaching-field="${field}"]`)
+  return input ? input.value.trim() : ''
+}
+
+function parseLines(text) {
+  return String(text || '')
+    .split(/[\n,，;；、]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function downloadJson(data, fileName) {
+  downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), fileName)
+}
+
+function formatDateTime(timestamp) {
+  const date = timestamp ? new Date(timestamp) : new Date()
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+}
+
+function cssEscape(value) {
+  if (window.CSS && window.CSS.escape) return window.CSS.escape(value)
+  return String(value).replace(/"/g, '\\"')
 }
 
 async function checkServer() {
@@ -708,12 +1872,86 @@ function loadOneProfiles() {
   }
 }
 
-function persistClasses() {
+function persistClasses(options = {}) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.classes))
+  if (!options.localOnly) scheduleFeedbackDataSync()
 }
 
-function persistOneProfiles() {
+function persistOneProfiles(options = {}) {
   localStorage.setItem(ONE_PROFILE_STORAGE_KEY, JSON.stringify(state.oneProfiles))
+  if (!options.localOnly) scheduleFeedbackDataSync()
+}
+
+async function loadFeedbackDataFromServer() {
+  if (!state.access.authenticated) return
+
+  try {
+    const response = await fetch('/api/feedback-data')
+    if (response.status === 404) return
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '读取档案数据失败')
+
+    const remote = data.data || {}
+    const localHadData = state.classes.length || state.oneProfiles.length
+    state.classes = mergeRecordsById(state.classes, Array.isArray(remote.classes) ? remote.classes : [])
+    state.oneProfiles = mergeRecordsById(state.oneProfiles, Array.isArray(remote.oneProfiles) ? remote.oneProfiles : [])
+
+    if (!state.selectedClassId && state.classes.length) state.selectedClassId = state.classes[0].id
+    if (!state.selectedOneProfileId && state.oneProfiles.length) state.selectedOneProfileId = state.oneProfiles[0].id
+
+    persistClasses({ localOnly: true })
+    persistOneProfiles({ localOnly: true })
+    if (localHadData) await saveFeedbackDataToServer({ silent: true })
+  } catch (error) {
+    showToast(error.message || '档案数据暂时使用本机缓存')
+  }
+}
+
+function mergeRecordsById(localRecords, remoteRecords) {
+  const records = new Map()
+
+  remoteRecords.forEach((record) => {
+    if (record && record.id) records.set(record.id, record)
+  })
+
+  localRecords.forEach((record) => {
+    if (!record || !record.id) return
+    const existed = records.get(record.id)
+    if (!existed || Number(record.updatedAt || 0) >= Number(existed.updatedAt || 0)) {
+      records.set(record.id, record)
+    }
+  })
+
+  return Array.from(records.values())
+}
+
+function scheduleFeedbackDataSync() {
+  if (!state.access.authenticated) return
+  clearTimeout(scheduleFeedbackDataSync.timer)
+  scheduleFeedbackDataSync.timer = setTimeout(() => {
+    saveFeedbackDataToServer({ silent: true })
+  }, 500)
+}
+
+async function saveFeedbackDataToServer(options = {}) {
+  if (!state.access.authenticated) return
+
+  try {
+    const response = await fetch('/api/feedback-data', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        classes: state.classes,
+        oneProfiles: state.oneProfiles
+      })
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '保存档案数据失败')
+
+    if (!options.silent) showToast('档案已同步到正式数据库')
+  } catch (error) {
+    if (!options.silent) showToast(error.message || '档案同步失败')
+  }
 }
 
 function render() {
@@ -722,10 +1960,17 @@ function render() {
   renderOneProfileList()
   renderWorkspace()
   renderOneProfileSummary()
+  renderClassSchedule()
+  renderExitTestTable()
   renderStudentTable()
   renderResults()
+  renderRearrange()
   renderPdfPageSelection()
+  renderClassMaterialControls()
+  renderClassLectureSelect()
+  renderFeedbackModeControls()
   renderAccessState()
+  updateAllFilePickers()
 }
 
 function renderMode() {
@@ -741,13 +1986,21 @@ function renderMode() {
     element.classList.toggle('hidden', state.mode !== 'oneOnOne')
   })
 
-  document.querySelector('#feedbackPanel').classList.toggle('hidden', state.mode === 'admin')
-  document.querySelector('#resultsPanel').classList.toggle('hidden', state.mode === 'admin')
+  const isToolMode = state.mode === 'admin' || state.mode === 'rearrange' || state.mode === 'teaching'
+  document.querySelector('#feedbackPanel').classList.toggle('hidden', isToolMode)
+  document.querySelector('#resultsPanel').classList.toggle('hidden', isToolMode)
   els.adminPanel.classList.toggle('hidden', state.mode !== 'admin')
+  els.rearrangePanel.classList.toggle('hidden', state.mode !== 'rearrange')
+  if (els.teachingPanel) els.teachingPanel.classList.toggle('hidden', state.mode !== 'teaching')
 
   if (state.mode === 'admin' && state.access.user && state.access.user.isAdmin) {
     renderAdminUsers()
     if (!state.adminUsers.length) loadAdminUsers()
+  }
+
+  if (state.mode === 'teaching') {
+    renderTeachingPanel()
+    if (!state.teaching.loading && !state.teaching.data.updatedAt) loadTeachingData()
   }
 }
 
@@ -806,6 +2059,114 @@ function renderWorkspace() {
   }
 }
 
+function renderClassSchedule() {
+  if (!els.classSchedulePanel || !els.classCalendarGrid || !els.classCalendarTitle) return
+
+  els.classSchedulePanel.classList.toggle('hidden', state.mode !== 'class')
+  if (state.mode !== 'class') return
+
+  const monthDate = getDateFromMonthKey(state.classSchedule.calendarMonth)
+  const todayKey = getLocalDateKey(new Date())
+  const selectedDate = state.classSchedule.selectedDate
+  const days = buildCalendarDays(monthDate)
+
+  if (els.classDateSelectedText) {
+    els.classDateSelectedText.textContent = selectedDate ? formatChineseDate(selectedDate) : '暂不填写'
+  }
+  if (els.classDateToggleBtn) {
+    els.classDateToggleBtn.setAttribute('aria-expanded', state.classSchedule.calendarOpen ? 'true' : 'false')
+  }
+  if (els.classCalendarPopup) {
+    els.classCalendarPopup.classList.toggle('hidden', !state.classSchedule.calendarOpen)
+  }
+  els.classCalendarTitle.textContent = `${monthDate.getFullYear()}年${monthDate.getMonth() + 1}月`
+  if (els.classTimeSlotSelect) els.classTimeSlotSelect.value = state.classSchedule.timeSlot || ''
+  els.classCalendarGrid.innerHTML = days.map((day) => {
+    const dateKey = getLocalDateKey(day.date)
+    const classes = [
+      'calendar-day',
+      day.inMonth ? '' : 'outside',
+      dateKey === todayKey ? 'today' : '',
+      dateKey === selectedDate ? 'active' : ''
+    ].filter(Boolean).join(' ')
+
+    return `<button class="${classes}" data-date="${dateKey}" type="button">${day.date.getDate()}</button>`
+  }).join('')
+}
+
+function toggleClassCalendar() {
+  state.classSchedule.calendarOpen = !state.classSchedule.calendarOpen
+  renderClassSchedule()
+}
+
+function shiftClassCalendarMonth(delta) {
+  state.classSchedule.calendarMonth = shiftMonthKey(state.classSchedule.calendarMonth, delta)
+  state.classSchedule.calendarOpen = true
+  renderClassSchedule()
+}
+
+function handleClassCalendarClick(event) {
+  const button = event.target.closest('[data-date]')
+  if (!button) return
+
+  state.classSchedule.selectedDate = button.dataset.date
+  state.classSchedule.calendarMonth = getMonthKey(getDateFromKey(button.dataset.date))
+  state.classSchedule.calendarOpen = false
+  renderClassSchedule()
+}
+
+function buildCalendarDays(monthDate) {
+  const firstDay = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1)
+  const mondayOffset = (firstDay.getDay() + 6) % 7
+  const startDate = new Date(firstDay)
+  startDate.setDate(firstDay.getDate() - mondayOffset)
+
+  return Array.from({ length: 42 }, (item, index) => {
+    const date = new Date(startDate)
+    date.setDate(startDate.getDate() + index)
+    return {
+      date,
+      inMonth: date.getMonth() === monthDate.getMonth()
+    }
+  })
+}
+
+function getLocalDateKey(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function getMonthKey(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  return `${year}-${month}`
+}
+
+function getDateFromKey(dateKey) {
+  const [year, month, day] = String(dateKey || '').split('-').map(Number)
+  if (!year || !month || !day) return new Date()
+  return new Date(year, month - 1, day)
+}
+
+function getDateFromMonthKey(monthKey) {
+  const [year, month] = String(monthKey || '').split('-').map(Number)
+  if (!year || !month) return new Date()
+  return new Date(year, month - 1, 1)
+}
+
+function shiftMonthKey(monthKey, delta) {
+  const date = getDateFromMonthKey(monthKey)
+  date.setMonth(date.getMonth() + delta)
+  return getMonthKey(date)
+}
+
+function formatChineseDate(dateKey) {
+  const date = getDateFromKey(dateKey)
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日（${getChineseWeekday(date)}）`
+}
+
 function renderOneProfileSummary() {
   if (!els.oneProfileSummary) return
 
@@ -826,6 +2187,17 @@ function renderOneProfileSummary() {
 }
 
 function renderStudentTable() {
+  const shouldHideClassStudents = state.mode === 'class'
+    && els.feedbackScopeSelect
+    && els.feedbackScopeSelect.value === 'class'
+
+  if (els.studentToolbar) els.studentToolbar.classList.toggle('hidden', shouldHideClassStudents)
+  if (els.studentTable) els.studentTable.classList.toggle('hidden', shouldHideClassStudents)
+  if (shouldHideClassStudents) {
+    els.studentTable.innerHTML = ''
+    return
+  }
+
   const students = getWorkingStudents()
   els.studentCount.textContent = `${students.length} 人`
 
@@ -844,24 +2216,160 @@ function renderStudentTable() {
           <option value="${option}" ${option === student.performance ? 'selected' : ''}>${option}</option>
         `).join('')}
       </select>
+      <select data-index="${index}" data-field="keyword">
+        <option value="">选择关键词</option>
+        <optgroup label="好的关键词">
+          ${getStudentKeywordGroups().positive.map((option) => `
+            <option value="${option}">${option}</option>
+          `).join('')}
+        </optgroup>
+        <optgroup label="需改进关键词">
+          ${getStudentKeywordGroups().negative.map((option) => `
+            <option value="${option}">${option}</option>
+          `).join('')}
+        </optgroup>
+      </select>
       <textarea data-index="${index}" data-field="remark" placeholder="备注特殊情况">${escapeHtml(student.remark || '')}</textarea>
       <span></span>
     </div>
   `).join('')
 }
 
+function renderExitTestTable() {
+  if (!els.exitTestPanel || !els.exitTestTable) return
+
+  const selectedClass = getSelectedClass()
+  const students = state.mode === 'class' && selectedClass ? selectedClass.students : []
+  els.exitTestPanel.classList.toggle('hidden', state.mode !== 'class')
+  renderExitTestLectureSelect()
+  if (els.exitTestCount) els.exitTestCount.textContent = `${students.length} 人`
+  if (els.exitTestTotalField) els.exitTestTotalField.classList.toggle('hidden', state.exitTest.mode === 'grade')
+  if (els.exitTestModeSelect) els.exitTestModeSelect.value = state.exitTest.mode
+  if (els.exitTestTotalInput) els.exitTestTotalInput.value = String(state.exitTest.totalScore || 100)
+
+  if (!students.length) {
+    els.exitTestTable.innerHTML = '<div class="student-empty">保存班级后，可以在这里填写每位学生的出门测成绩。</div>'
+    return
+  }
+
+  els.exitTestTable.innerHTML = students.map((student) => {
+    const score = state.exitTest.scores[student.id] || {}
+    return `
+      <div class="exit-test-row ${state.exitTest.mode === 'grade' ? 'grade-mode' : 'score-mode'}" data-student-id="${escapeHtml(student.id)}">
+        <div class="student-name">${escapeHtml(student.name)}</div>
+        ${state.exitTest.mode === 'grade'
+          ? `<select data-exit-field="grade" aria-label="${escapeHtml(student.name)}出门测等级">
+              <option value="">选择等级</option>
+              ${['A', 'B', 'C', 'D'].map((grade) => `<option value="${grade}" ${score.grade === grade ? 'selected' : ''}>${grade}</option>`).join('')}
+            </select>`
+          : `<input data-exit-field="score" type="number" min="0" max="${state.exitTest.totalScore || 100}" value="${escapeHtml(score.score ?? '')}" placeholder="填写分数" aria-label="${escapeHtml(student.name)}出门测分数" />`}
+        <input data-exit-field="note" type="text" value="${escapeHtml(score.note || '')}" placeholder="可选：错因或特殊情况" />
+      </div>
+    `
+  }).join('')
+}
+
+function handleExitTestModeChange() {
+  if (!els.exitTestModeSelect) return
+  state.exitTest.mode = els.exitTestModeSelect.value === 'grade' ? 'grade' : 'percent'
+  renderExitTestTable()
+}
+
+function renderExitTestLectureSelect() {
+  if (!els.exitTestLectureField || !els.exitTestLectureSelect) return
+
+  const shouldShow = state.mode === 'class'
+    && state.exitTest.lectures.length > 1
+  els.exitTestLectureField.classList.toggle('hidden', !shouldShow)
+
+  if (!shouldShow) {
+    els.exitTestLectureSelect.innerHTML = ''
+    return
+  }
+
+  els.exitTestLectureSelect.innerHTML = [
+    '<option value="">请选择出门测讲次</option>',
+    ...state.exitTest.lectures.map((lecture, index) => (
+      `<option value="${index}" ${String(index) === state.exitTest.selectedLectureIndex ? 'selected' : ''}>${escapeHtml(lecture.title || `第 ${index + 1} 讲`)}（第 ${lecture.startPage}-${lecture.endPage} 页）</option>`
+    ))
+  ].join('')
+}
+
+async function handleExitTestFileChange() {
+  updateFilePicker(els.exitTestInput, els.exitTestFileName)
+  resetExitTestLectureSelection()
+
+  const file = els.exitTestInput && els.exitTestInput.files
+    ? els.exitTestInput.files[0]
+    : null
+
+  if (!file || !isPdfFile(file)) {
+    renderExitTestLectureSelect()
+    return
+  }
+
+  state.exitTest.fileKey = getFileKey(file)
+  state.exitTest.detectingLectures = true
+  renderExitTestLectureSelect()
+
+  try {
+    const lectures = await detectPdfLecturesFromFile(file)
+    state.exitTest.lectures = lectures.length > 1 ? lectures : []
+    state.exitTest.selectedLectureIndex = state.exitTest.lectures.length > 1 ? '0' : ''
+    if (state.exitTest.lectures.length > 1) {
+      showToast(`出门测检测到 ${state.exitTest.lectures.length} 个讲次，请选择本节课对应讲次`)
+    }
+  } catch (error) {
+    state.exitTest.lectures = []
+    state.exitTest.selectedLectureIndex = ''
+  } finally {
+    state.exitTest.detectingLectures = false
+    renderExitTestLectureSelect()
+  }
+}
+
+function resetExitTestLectureSelection() {
+  state.exitTest.fileKey = ''
+  state.exitTest.lectures = []
+  state.exitTest.selectedLectureIndex = ''
+  state.exitTest.detectingLectures = false
+}
+
+function handleExitTestInput(event) {
+  const field = event.target.dataset.exitField
+  if (!field) return
+
+  const row = event.target.closest('[data-student-id]')
+  if (!row) return
+
+  const studentId = row.dataset.studentId
+  if (!state.exitTest.scores[studentId]) state.exitTest.scores[studentId] = {}
+  state.exitTest.scores[studentId][field] = event.target.value
+}
+
 function renderResults() {
+  const imageMode = isImageFeedbackMode()
   els.copyAllBtn.disabled = !state.feedbacks.length
   els.resultNote.textContent = state.feedbacks.length
-    ? `${state.feedbacks.length} 条反馈 · 全部已展开`
+    ? (imageMode ? '图片反馈报告已生成' : `${state.feedbacks.length} 条反馈 · 全部已展开`)
     : '生成后会显示在这里'
   renderDebugSummary()
 
   if (!state.feedbacks.length) {
+    els.resultList.classList.remove('hidden')
     els.resultList.innerHTML = '<div class="result-empty">完成录入后点击“AI 生成反馈”。</div>'
+    if (els.imageReportPanel) els.imageReportPanel.classList.add('hidden')
     return
   }
 
+  els.resultList.classList.toggle('hidden', imageMode)
+  if (imageMode) {
+    els.resultList.innerHTML = ''
+    renderImageReport()
+    return
+  }
+
+  if (els.imageReportPanel) els.imageReportPanel.classList.add('hidden')
   els.resultList.innerHTML = state.feedbacks.map((item, index) => `
     <article class="result-card">
       <div class="result-head">
@@ -874,6 +2382,216 @@ function renderResults() {
       <p class="result-text">${escapeHtml(item.feedback)}</p>
     </article>
   `).join('')
+}
+
+function isImageFeedbackMode() {
+  return state.mode === 'class'
+    && els.feedbackFormatSelect
+    && els.feedbackFormatSelect.value === 'image'
+}
+
+function renderImageReport(payload = null) {
+  if (!els.imageReportPanel || !els.imageReportPreview) return
+
+  const shouldShow = state.mode === 'class'
+    && isImageFeedbackMode()
+    && state.feedbacks.length
+
+  els.imageReportPanel.classList.toggle('hidden', !shouldShow)
+  if (!shouldShow) {
+    els.imageReportPreview.innerHTML = ''
+    return
+  }
+
+  const selectedClass = getSelectedClass()
+  const reportPayload = payload || buildGeneratePayload() || {}
+  const reportDate = reportPayload.lessonDate ? getDateFromKey(reportPayload.lessonDate) : new Date()
+  const feedbackText = state.feedbacks.map((item) => item.feedback).join('\n\n')
+  const lessonTitle = reportPayload.lessonTitle || els.lessonTitleInput.value.trim() || '本节课程'
+  const reportSections = parseFeedbackReportSections(feedbackText)
+  const contentSource = reportSections.courseContent || reportPayload.courseNote || els.courseNoteInput.value || feedbackText
+  const courseLines = extractReportLines(contentSource)
+  const focusText = reportSections.studyFocus || ''
+  const performanceText = reportSections.performance || feedbackText || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
+  const students = selectedClass ? selectedClass.students : []
+  const reportScores = buildReportScoreRows(students, reportPayload.exitTest)
+  const numericScores = reportScores.map((item) => Number(item.score)).filter(Number.isFinite)
+  const avg = numericScores.length
+    ? (numericScores.reduce((sum, score) => sum + score, 0) / numericScores.length).toFixed(1)
+    : '-'
+  const max = numericScores.length ? Math.max(...numericScores) : '-'
+  const min = numericScores.length ? Math.min(...numericScores) : '-'
+  const rate = numericScores.length ? `${(reportScores.reduce((sum, item) => sum + Number(item.rate || 0), 0) / reportScores.length).toFixed(1)}%` : '-'
+
+  els.imageReportPreview.innerHTML = `
+    <article class="report-sheet" id="imageReportSheet">
+      <header class="report-header">
+        <div></div>
+        <h2>数学课程反馈报告</h2>
+        <div class="report-brand">
+          <strong>升学帮</strong>
+          <span>教学有章法 提分有路径</span>
+        </div>
+      </header>
+      <div class="report-meta">
+        <div>日期：${reportDate.getFullYear()}年${reportDate.getMonth() + 1}月${reportDate.getDate()}日（${getChineseWeekday(reportDate)}）</div>
+        ${reportPayload.timeSlot ? `<div>时段：${escapeHtml(reportPayload.timeSlot)}</div>` : ''}
+        <div>班级：${escapeHtml(reportPayload.className || (selectedClass && selectedClass.name) || '')}</div>
+        <div>课程主题：${escapeHtml(lessonTitle)}</div>
+      </div>
+      <section>
+        <h3>【课程内容】</h3>
+        <ol>
+          ${courseLines.slice(0, 4).map((line) => `<li>${escapeHtml(line)}</li>`).join('') || `<li>${escapeHtml(lessonTitle)}</li>`}
+        </ol>
+        <p class="report-paragraph">核心重点：${escapeHtml(focusText || courseLines[0] || lessonTitle)}。</p>
+      </section>
+      <section>
+        <h3>【课堂表现】</h3>
+        <div class="report-paragraph">${formatReportText(performanceText)}</div>
+      </section>
+      <section>
+        <h3>【课后作业】</h3>
+        <div class="report-paragraph">${formatReportText(reportPayload.homework || els.homeworkInput.value.trim() || '完成课后巩固练习，整理课堂笔记并预习下一节内容。')}</div>
+      </section>
+      <section>
+        <h3>【学生成绩记录】</h3>
+        <table class="report-table">
+          <thead><tr><th>姓名</th><th>成绩</th><th>正确率</th></tr></thead>
+          <tbody>
+            ${reportScores.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.displayScore || item.score || '—')}</td><td>${item.rate !== null ? `${Number(item.rate).toFixed(1)}%` : '—'}</td></tr>`).join('')}
+          </tbody>
+        </table>
+        <p>平均分：${avg} 最高分：${max} 最低分：${min} 得分率：${rate}</p>
+      </section>
+      <footer>以上为本次课程反馈，如有疑问欢迎沟通。</footer>
+    </article>
+  `
+}
+
+function parseFeedbackReportSections(text) {
+  const sections = {
+    courseContent: '',
+    studyFocus: '',
+    performance: ''
+  }
+  const source = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/家长您好[，,。]?\s*本次[^：:]*反馈如下[：:]?/g, '')
+    .trim()
+
+  if (!source) return sections
+
+  const matches = Array.from(source.matchAll(/【([^】]+)】/g))
+  if (!matches.length) {
+    sections.performance = source
+    return sections
+  }
+
+  matches.forEach((match, index) => {
+    const title = match[1].trim()
+    const start = match.index + match[0].length
+    const end = matches[index + 1] ? matches[index + 1].index : source.length
+    const content = normalizeReportText(source.slice(start, end))
+
+    if (/课堂内容|课程内容/.test(title)) sections.courseContent = content
+    if (/学习重点|课程重点|核心重点/.test(title)) sections.studyFocus = content
+    if (/课堂表现|学生表现/.test(title)) sections.performance = content
+  })
+
+  if (!sections.performance) {
+    sections.performance = normalizeReportText(source.replace(/【[^】]+】/g, '\n'))
+  }
+
+  return sections
+}
+
+function normalizeReportText(text) {
+  return String(text || '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\s*[：:，,。；;]\s*/, '')
+    .trim()
+}
+
+function formatReportText(text) {
+  const normalized = normalizeReportText(text)
+  if (!normalized) return ''
+
+  return escapeHtml(normalized)
+    .replace(/\n{2,}/g, '<br><br>')
+    .replace(/\n/g, '<br>')
+}
+
+function extractReportLines(text) {
+  return String(text || '')
+    .replace(/\s+([1-9][0-9]*[.、])/g, '\n$1')
+    .split(/[\n。；;]/)
+    .map((line) => line.replace(/[【】]/g, '').trim())
+    .filter((line) => line && !/^课后作业/.test(line) && !/^班级/.test(line))
+    .slice(0, 6)
+}
+
+function buildReportScoreRows(students, exitTest = null) {
+  if (exitTest && Array.isArray(exitTest.students) && exitTest.students.length) {
+    return exitTest.students.map((student) => {
+      if (exitTest.mode === 'grade') {
+        return {
+          name: student.name,
+          score: null,
+          displayScore: student.grade || '—',
+          rate: null
+        }
+      }
+
+      return {
+        name: student.name,
+        score: Number(student.score),
+        displayScore: `${student.score}/${exitTest.totalScore || 100}`,
+        rate: exitTest.totalScore ? (Number(student.score) / Number(exitTest.totalScore)) * 100 : null
+      }
+    })
+  }
+
+  const records = getScoreRecordsForClass(getSelectedClass() && getSelectedClass().id)
+  const latest = records[records.length - 1]
+
+  return (students || []).map((student, index) => {
+    const recordStudent = latest && latest.students
+      ? latest.students.find((item) => item.name === student.name)
+      : null
+    const score = recordStudent && Number.isFinite(Number(recordStudent.score))
+      ? Number(recordStudent.score)
+      : Math.max(0, 60 - (index % 5) * 5)
+    const total = latest && latest.totalScore ? Number(latest.totalScore) : 60
+    return {
+      name: student.name,
+      score: recordStudent && latest && latest.mode === 'grade' ? 0 : score,
+      displayScore: recordStudent && latest && latest.mode === 'grade' ? (recordStudent.grade || '—') : String(score),
+      rate: total ? (score / total) * 100 : 0
+    }
+  })
+}
+
+async function downloadImageReport() {
+  const sheet = document.querySelector('#imageReportSheet')
+  if (!sheet) {
+    showToast('还没有图片反馈报告')
+    return
+  }
+  if (!window.html2canvas) {
+    showToast('截图组件未加载，请刷新后重试')
+    return
+  }
+
+  const canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff' })
+  canvas.toBlob((blob) => {
+    if (blob) downloadBlob(blob, `课程反馈报告-${Date.now()}.png`)
+  }, 'image/png')
+}
+
+function getChineseWeekday(date) {
+  return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][date.getDay()]
 }
 
 function renderDebugSummary() {
@@ -903,12 +2621,663 @@ function renderDebugSummary() {
   ].join('')
 }
 
+function setRearrangeFiles(fileList) {
+  const files = Array.from(fileList || [])
+  if (!files.length) return
+
+  if (files.length > REARRANGE_MAX_FILES) {
+    showToast(`一次最多上传 ${REARRANGE_MAX_FILES} 个文件`)
+    return
+  }
+
+  const unsupported = files.find((file) => !isSupportedQuestionFile(file))
+  if (unsupported) {
+    showToast(`不支持 ${unsupported.name}，请上传 PDF、DOCX、PNG 或 JPG`)
+    return
+  }
+
+  state.rearrange.files = files
+  state.rearrange.questions = []
+  state.rearrange.status = `已选择 ${files.length} 个文件`
+  renderRearrange()
+}
+
+function renderRearrange() {
+  if (!els.rearrangePanel) return
+
+  els.rearrangeStatus.textContent = state.rearrange.status || '等待上传文件'
+  els.recognizeQuestionsBtn.disabled = state.rearrange.busy || !state.rearrange.files.length
+  els.exportQuestionsBtn.disabled = state.rearrange.busy || !state.rearrange.questions.length
+  els.recognizeQuestionsBtn.textContent = state.rearrange.busy ? '处理中...' : 'AI 识别题目'
+
+  els.rearrangeFileList.innerHTML = state.rearrange.files.length
+    ? state.rearrange.files.map((file) => `<span class="file-chip">${escapeHtml(file.name)}</span>`).join('')
+    : '<span class="file-chip">未选择文件</span>'
+
+  renderQuestionEditor()
+  renderQuestionPreview()
+}
+
+function renderQuestionEditor() {
+  if (!state.rearrange.questions.length) {
+    els.rearrangeEmpty.classList.remove('hidden')
+    els.questionEditorList.innerHTML = ''
+    return
+  }
+
+  els.rearrangeEmpty.classList.add('hidden')
+  els.questionEditorList.innerHTML = state.rearrange.questions.map((question, index) => `
+    <article class="question-editor-card" data-question-index="${index}">
+      <div class="question-editor-head">
+        <label class="field">
+          <span>题号</span>
+          <input data-question-field="number" type="text" value="${escapeHtml(question.number || String(index + 1))}" />
+        </label>
+        <label class="field">
+          <span>图形说明</span>
+          <input data-question-field="figureNote" type="text" value="${escapeHtml(question.figureNote || '')}" placeholder="可选：例如函数图像、几何图形等" />
+        </label>
+        <label class="field">
+          <span>选项排版</span>
+          <select data-question-field="optionLayout">
+            ${renderOptionLayoutOptions(question.optionLayout)}
+          </select>
+        </label>
+      </div>
+      <label class="field">
+        <span>题干</span>
+        <textarea data-question-field="stemMarkdown" rows="5">${escapeHtml(question.stemMarkdown || '')}</textarea>
+      </label>
+      <label class="field">
+        <span>选项（每行一个）</span>
+        <textarea data-question-field="options" rows="4">${escapeHtml((question.options || []).join('\n'))}</textarea>
+      </label>
+      <label class="field">
+        <span>图形 SVG（AI生成，可选）</span>
+        <textarea data-question-field="figureSvg" rows="4" placeholder="<svg viewBox=&quot;0 0 320 200&quot;>...</svg>">${escapeHtml(question.figureSvg || '')}</textarea>
+      </label>
+    </article>
+  `).join('')
+}
+
+function renderQuestionPreview() {
+  const title = els.rearrangeTitleInput.value.trim() || '未命名试卷'
+
+  if (!state.rearrange.questions.length) {
+    els.questionPreviewPaper.innerHTML = '<div class="empty-paper">识别完成后在这里预览排版</div>'
+    return
+  }
+
+  els.questionPreviewPaper.innerHTML = [
+    `<h2 class="preview-title">${escapeHtml(title)}</h2>`,
+    ...state.rearrange.questions.map((question, index) => `
+      <article class="preview-question">
+        <div class="preview-question-title">${escapeHtml(question.number || String(index + 1))}. ${escapeHtml(question.stemMarkdown || '')}</div>
+        ${Array.isArray(question.options) && question.options.length ? `
+          <div class="preview-options ${getOptionLayoutClass(question.optionLayout, question.options)}">
+            ${question.options.map((option) => `<div>${escapeHtml(option)}</div>`).join('')}
+          </div>
+        ` : ''}
+        ${question.figureNote ? `<div class="preview-note">图形说明：${escapeHtml(question.figureNote)}</div>` : ''}
+        ${renderSafeQuestionSvg(question.figureSvg)}
+      </article>
+    `)
+  ].join('')
+
+  renderQuestionMath()
+}
+
+function renderSafeQuestionSvg(svgText) {
+  const svg = sanitizeQuestionSvg(svgText)
+  if (!svg) return ''
+  return `<div class="question-figure">${svg}</div>`
+}
+
+function renderOptionLayoutOptions(value) {
+  const selectedValue = normalizeOptionLayout(value)
+  const options = [
+    ['inline', '一行'],
+    ['two-column', '两列'],
+    ['one-column', '单列']
+  ]
+
+  return options.map(([optionValue, label]) => (
+    `<option value="${optionValue}" ${optionValue === selectedValue ? 'selected' : ''}>${label}</option>`
+  )).join('')
+}
+
+function getOptionLayoutClass(value, options = []) {
+  return `layout-${normalizeOptionLayout(value || inferOptionLayout(options))}`
+}
+
+function normalizeOptionLayout(value) {
+  const raw = String(value || '').trim()
+  if (['inline', 'two-column', 'one-column'].includes(raw)) return raw
+  if (['一行', '横排'].includes(raw)) return 'inline'
+  if (['两列', '双列'].includes(raw)) return 'two-column'
+  if (['单列', '逐行'].includes(raw)) return 'one-column'
+  return ''
+}
+
+function inferOptionLayout(options = []) {
+  const list = Array.isArray(options) ? options.filter(Boolean) : []
+  if (!list.length) return 'one-column'
+
+  const maxLength = Math.max(...list.map((option) => String(option || '').length))
+  const totalLength = list.reduce((sum, option) => sum + String(option || '').length, 0)
+
+  if (list.length <= 4 && maxLength <= 16 && totalLength <= 72) return 'inline'
+  if (maxLength <= 32) return 'two-column'
+  return 'one-column'
+}
+
+function sanitizeQuestionSvg(svgText) {
+  const source = String(svgText || '').trim()
+  if (!source || !source.toLowerCase().startsWith('<svg')) return ''
+
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(source, 'image/svg+xml')
+    const svg = doc.querySelector('svg')
+    if (!svg || doc.querySelector('parsererror')) return ''
+
+    const allowedTags = new Set(['svg', 'g', 'path', 'line', 'polyline', 'polygon', 'rect', 'circle', 'ellipse', 'text'])
+    const allowedAttrs = new Set([
+      'xmlns', 'viewBox', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r', 'rx', 'ry',
+      'd', 'points', 'width', 'height', 'fill', 'stroke', 'stroke-width', 'stroke-linecap',
+      'stroke-linejoin', 'font-size', 'font-family', 'text-anchor', 'dominant-baseline',
+      'transform', 'opacity'
+    ])
+
+    Array.from(svg.querySelectorAll('*')).forEach((node) => {
+      if (!allowedTags.has(node.tagName)) {
+        node.remove()
+        return
+      }
+
+      Array.from(node.attributes).forEach((attr) => {
+        if (attr.name.startsWith('on') || !allowedAttrs.has(attr.name)) {
+          node.removeAttribute(attr.name)
+        }
+      })
+    })
+
+    Array.from(svg.attributes).forEach((attr) => {
+      if (attr.name.startsWith('on') || !allowedAttrs.has(attr.name)) {
+        svg.removeAttribute(attr.name)
+      }
+    })
+
+    if (!svg.getAttribute('xmlns')) svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', '0 0 320 200')
+
+    return new XMLSerializer().serializeToString(svg)
+  } catch (error) {
+    return ''
+  }
+}
+
+function renderQuestionMath() {
+  if (!window.MathJax || !window.MathJax.typesetPromise || !els.questionPreviewPaper) return
+
+  window.MathJax.typesetPromise([els.questionPreviewPaper]).catch(() => {})
+}
+
+function updateQuestionFromEditor(event) {
+  const field = event.target.dataset.questionField
+  if (!field) return
+
+  const card = event.target.closest('[data-question-index]')
+  if (!card) return
+
+  const index = Number(card.dataset.questionIndex)
+  const question = state.rearrange.questions[index]
+  if (!question) return
+
+  if (field === 'options') {
+    question.options = event.target.value
+      .split(/\n+/)
+      .map((option) => option.trim())
+      .filter(Boolean)
+  } else {
+    question[field] = event.target.value
+  }
+
+  renderQuestionPreview()
+}
+
+async function recognizeQuestions() {
+  if (!state.rearrange.files.length) {
+    showToast('请先上传试卷文件')
+    return
+  }
+
+  setRearrangeBusy(true, '正在准备文件...')
+
+  try {
+    const formData = await buildQuestionRecognizeFormData()
+    setRearrangeBusy(true, 'AI 正在识别题目...')
+
+    const response = await fetch('/api/rearrange/recognize', {
+      method: 'POST',
+      body: formData
+    })
+    const data = await readJsonResponse(response, '题目识别失败')
+
+    if (response.status === 401) {
+      updateAccessState({ authenticated: false })
+      renderAccessState()
+      throw new Error(data.error || '请先登录账号')
+    }
+
+    if (response.status === 429) {
+      updateAccessState({ usage: data.usage || state.access.usage })
+      renderAccessState()
+      throw new Error(data.error || '今天的生成次数已用完')
+    }
+
+    if (!response.ok || data.error) throw new Error(data.error || '题目识别失败')
+
+    if (data.usage) {
+      updateAccessState({ usage: data.usage })
+      renderAccessState()
+    }
+
+    state.rearrange.questions = Array.isArray(data.questions)
+      ? data.questions.map(normalizeQuestion)
+      : []
+    state.rearrange.status = state.rearrange.questions.length
+      ? `已识别 ${state.rearrange.questions.length} 道题`
+      : '没有识别到题目，请换更清晰的文件试试'
+    renderRearrange()
+    showToast('题目识别完成')
+  } catch (error) {
+    state.rearrange.status = error.message || '题目识别失败'
+    showToast(error.message || '题目识别失败')
+  } finally {
+    setRearrangeBusy(false)
+  }
+}
+
+async function buildQuestionRecognizeFormData() {
+  const formData = new FormData()
+  const payload = {
+    title: els.rearrangeTitleInput.value.trim() || '未命名试卷',
+    files: state.rearrange.files.map((file) => ({
+      name: file.name,
+      type: file.type || getFileTypeFromName(file.name),
+      size: file.size
+    }))
+  }
+  let pageCount = 0
+
+  for (const file of state.rearrange.files) {
+    if (isPdfFile(file)) {
+      const count = await appendPdfQuestionPages(formData, file, pageCount)
+      pageCount += count
+    } else if (pageCount < REARRANGE_MAX_PAGE_IMAGES && (file.type.startsWith('image/') || /\.(png|jpe?g)$/i.test(file.name))) {
+      await appendImageQuestionPage(formData, file, pageCount)
+      pageCount += 1
+    } else {
+      formData.append('sourceFile', file, file.name)
+    }
+  }
+
+  payload.pageCount = pageCount
+  formData.append('payload', JSON.stringify(payload))
+  return formData
+}
+
+async function appendPdfQuestionPages(formData, file, startIndex) {
+  if (!window.pdfjsLib) throw new Error('PDF 解析组件加载失败，请刷新页面重试')
+
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+  const remaining = Math.max(0, REARRANGE_MAX_PAGE_IMAGES - startIndex)
+  const pageTotal = Math.min(pdf.numPages, remaining)
+
+  if (!pageTotal) return 0
+
+  for (let pageNumber = 1; pageNumber <= pageTotal; pageNumber += 1) {
+    state.rearrange.status = `正在读取 PDF 第 ${pageNumber}/${pageTotal} 页`
+    renderRearrange()
+    const page = await pdf.getPage(pageNumber)
+    const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.7 })
+    formData.append('rearrangePageImage', blob, `${file.name}-page-${startIndex + pageNumber}.jpg`)
+  }
+
+  return pageTotal
+}
+
+async function appendImageQuestionPage(formData, file, pageIndex) {
+  state.rearrange.status = `正在压缩图片：${file.name}`
+  renderRearrange()
+  const blob = await imageFileToJpegBlob(file)
+  formData.append('rearrangePageImage', blob, `${file.name}-page-${pageIndex + 1}.jpg`)
+}
+
+async function imageFileToJpegBlob(file) {
+  const image = await loadImageFromUrl(URL.createObjectURL(file))
+  const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight, 1))
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  return canvasToBlob(canvas, 'image/jpeg', 0.72)
+}
+
+async function readJsonResponse(response, fallbackMessage) {
+  const text = await response.text()
+
+  try {
+    return JSON.parse(text)
+  } catch (error) {
+    const isHtml = /^\s*</.test(text)
+    const message = isHtml
+      ? `${fallbackMessage}：测试版后端接口没有返回 JSON，请确认部署已更新为 Node 后端服务。`
+      : `${fallbackMessage}：${text.slice(0, 160) || '接口返回为空'}`
+
+    return { error: message }
+  }
+}
+
+function loadImageFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => {
+      URL.revokeObjectURL(url)
+      resolve(image)
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('图片加载失败'))
+    }
+    image.src = url
+  })
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), type, quality)
+  })
+}
+
+function setRearrangeBusy(isBusy, status) {
+  state.rearrange.busy = isBusy
+  if (status) state.rearrange.status = status
+  renderRearrange()
+}
+
+async function exportQuestionsToWord() {
+  if (!state.rearrange.questions.length) {
+    showToast('还没有可导出的题目')
+    return
+  }
+
+  setRearrangeBusy(true, '正在生成 Word...')
+
+  try {
+    const response = await fetch('/api/rearrange/export-word', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title: els.rearrangeTitleInput.value.trim() || '未命名试卷',
+        questions: state.rearrange.questions
+      })
+    })
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.error || '导出 Word 失败')
+    }
+
+    const blob = await response.blob()
+    downloadBlob(blob, `${els.rearrangeTitleInput.value.trim() || '题卷重排'}.docx`)
+    state.rearrange.status = 'Word 已导出'
+    showToast('Word 已导出')
+  } catch (error) {
+    state.rearrange.status = error.message || '导出 Word 失败'
+    showToast(error.message || '导出 Word 失败')
+  } finally {
+    setRearrangeBusy(false)
+  }
+}
+
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+function normalizeQuestion(question, index = 0) {
+  const item = question && typeof question === 'object' ? question : {}
+  const options = Array.isArray(item.options)
+    ? item.options.map((option) => String(option || '').trim()).filter(Boolean)
+    : []
+
+  return {
+    id: item.id || createId('question'),
+    number: String(item.number || index + 1),
+    stemMarkdown: String(item.stemMarkdown || item.stem || '').trim(),
+    options,
+    figureNote: String(item.figureNote || item.figureDescription || '').trim(),
+    figureSvg: String(item.figureSvg || item.svg || item.figure || '').trim(),
+    optionLayout: normalizeOptionLayout(item.optionLayout || item.optionsLayout || item.layout)
+      || inferOptionLayout(options),
+    answer: String(item.answer || '').trim(),
+    analysis: String(item.analysis || '').trim()
+  }
+}
+
+function isSupportedQuestionFile(file) {
+  const lowerName = String(file.name || '').toLowerCase()
+  return file.type.startsWith('image/')
+    || lowerName.endsWith('.pdf')
+    || lowerName.endsWith('.docx')
+    || lowerName.endsWith('.png')
+    || lowerName.endsWith('.jpg')
+    || lowerName.endsWith('.jpeg')
+}
+
+function getFileTypeFromName(name) {
+  const lowerName = String(name || '').toLowerCase()
+  if (lowerName.endsWith('.pdf')) return 'application/pdf'
+  if (lowerName.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  if (lowerName.endsWith('.png')) return 'image/png'
+  if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg'
+  return 'application/octet-stream'
+}
+
+function renderClassMaterialControls() {
+  if (!els.classMaterialModeSelect) return
+
+  const selectedClass = getSelectedClass()
+  const isBookSetup = els.classMaterialModeSelect.value === 'book'
+  const isBookFeedback = state.mode === 'class'
+    && selectedClass
+    && selectedClass.materialMode === 'book'
+    && selectedClass.textbook
+
+  if (els.classTextbookField) els.classTextbookField.classList.toggle('hidden', !isBookSetup)
+  if (els.classTextbookStatus) els.classTextbookStatus.classList.toggle('hidden', !isBookSetup)
+  if (els.coursewareField) els.coursewareField.classList.toggle('hidden', Boolean(isBookFeedback))
+  if (els.coursewareInput) {
+    els.coursewareInput.disabled = Boolean(isBookFeedback)
+  }
+  renderClassLectureSelect()
+}
+
+function renderClassLectureSelect() {
+  if (!els.classLectureField || !els.classLectureSelect) return
+
+  const selectedClass = getSelectedClass()
+  const textbook = selectedClass && selectedClass.materialMode === 'book' ? selectedClass.textbook : null
+  const lectures = textbook && Array.isArray(textbook.lectures) ? textbook.lectures : []
+  const shouldShow = state.mode === 'class' && selectedClass && selectedClass.materialMode === 'book' && lectures.length
+
+  els.classLectureField.classList.toggle('hidden', !shouldShow)
+  if (!shouldShow) {
+    els.classLectureSelect.innerHTML = ''
+    return
+  }
+
+  els.classLectureSelect.innerHTML = [
+    '<option value="">请选择讲次</option>',
+    ...lectures.map((lecture, index) => (
+      `<option value="${index}">${escapeHtml(lecture.title || `第 ${index + 1} 讲`)}（第 ${lecture.startPage}-${lecture.endPage} 页）</option>`
+    ))
+  ].join('')
+}
+
+async function handleClassTextbookChange() {
+  const file = els.classTextbookInput && els.classTextbookInput.files
+    ? els.classTextbookInput.files[0]
+    : null
+  updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
+  if (!file || !els.classTextbookStatus) return
+
+  if (!isPdfFile(file)) {
+    els.classTextbookStatus.textContent = `已选择：${file.name}。保存班级时会上传为整本教材。`
+    return
+  }
+
+  els.classTextbookStatus.textContent = '正在检测教材讲次...'
+
+  try {
+    const lectures = await detectPdfLecturesFromFile(file)
+    els.classTextbookStatus.textContent = lectures.length
+      ? `已选择：${file.name}，检测到 ${lectures.length} 个讲次，保存班级后可直接选择。`
+      : `已选择：${file.name}，未检测到明显讲次，保存后默认读取整本教材。`
+  } catch (error) {
+    els.classTextbookStatus.textContent = `已选择：${file.name}，讲次检测失败，保存后仍可作为整本教材使用。`
+  }
+}
+
+async function uploadClassTextbook(file) {
+  const formData = new FormData()
+  const lectures = isPdfFile(file) ? await detectPdfLecturesFromFile(file).catch(() => []) : []
+  formData.append('material', file, file.name)
+  formData.append('lectures', JSON.stringify(lectures))
+
+  const response = await fetch('/api/materials', {
+    method: 'POST',
+    body: formData
+  })
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok || data.error) throw new Error(data.error || '教材上传失败')
+  return data.material
+}
+
+async function detectPdfLecturesFromFile(file) {
+  if (!window.pdfjsLib) return []
+
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+  const lectures = await detectPdfLectures(pdf)
+
+  if (lectures.length) return lectures
+
+  return [{
+    key: 'full-book',
+    title: '整本教材',
+    startPage: 1,
+    endPage: pdf.numPages || 1
+  }]
+}
+
+function renderFeedbackModeControls() {
+  if (!els.feedbackScopeSelect) return
+
+  const isClassScope = state.mode === 'class' && els.feedbackScopeSelect.value === 'class'
+  const isImageFormat = state.mode === 'class' && els.feedbackFormatSelect && els.feedbackFormatSelect.value === 'image'
+
+  const studentTable = els.studentTable
+  if (els.studentToolbar) els.studentToolbar.classList.toggle('hidden', isClassScope)
+  if (studentTable) studentTable.classList.toggle('hidden', isClassScope)
+  if (els.classFeedbackTemplateField) els.classFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'class' || isImageFormat)
+  if (els.classFeedbackOptions) els.classFeedbackOptions.classList.toggle('hidden', !isClassScope)
+  if (els.classPositiveKeywordList) {
+    els.classPositiveKeywordList.innerHTML = getClassKeywordGroups().positive.map((keyword) => (
+      `<button class="keyword-chip positive" data-keyword="${escapeHtml(keyword)}" type="button">${escapeHtml(keyword)}</button>`
+    )).join('')
+  }
+  if (els.classKeywordList) {
+    els.classKeywordList.innerHTML = getClassKeywordGroups().negative.map((keyword) => (
+      `<button class="keyword-chip negative" data-keyword="${escapeHtml(keyword)}" type="button">${escapeHtml(keyword)}</button>`
+    )).join('')
+  }
+  if (els.imageReportPanel) {
+    els.imageReportPanel.classList.toggle('hidden', !isImageFormat || !state.feedbacks.length)
+  }
+  if (isImageFormat && state.feedbacks.length) renderImageReport()
+}
+
+function getClassKeywordGroups() {
+  const quickOptions = state.teaching.data.quickOptions || {}
+  return {
+    positive: getKeywordList(quickOptions.classPerformancePositive, classKeywordPositiveOptions),
+    negative: getKeywordList(quickOptions.classPerformanceNegative, classKeywordNegativeOptions)
+  }
+}
+
+function getStudentKeywordGroups() {
+  const quickOptions = state.teaching.data.quickOptions || {}
+  return {
+    positive: getKeywordList(quickOptions.performancePositive, studentKeywordPositiveOptions),
+    negative: getKeywordList(quickOptions.performanceNegative, studentKeywordNegativeOptions)
+  }
+}
+
+function getKeywordList(list, fallback) {
+  return Array.isArray(list) && list.length ? list : fallback
+}
+
+function handleClassKeywordClick(event) {
+  const button = event.target.closest('[data-keyword]')
+  if (!button || !els.classRemarkInput) return
+
+  const keyword = button.dataset.keyword
+  button.classList.toggle('active')
+
+  const current = new Set(els.classRemarkInput.value
+    .split(/[、,，；;\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean))
+
+  if (button.classList.contains('active')) {
+    current.add(keyword)
+  } else {
+    current.delete(keyword)
+  }
+
+  els.classRemarkInput.value = Array.from(current).join('、')
+}
+
 function resetClassForm() {
   state.editingClassId = ''
   els.classNameInput.value = ''
   els.gradeSelect.value = '高一'
   els.studentListInput.value = ''
   els.templateInput.value = DEFAULT_TEMPLATE
+  if (els.classMaterialModeSelect) els.classMaterialModeSelect.value = 'lesson'
+  if (els.classTextbookInput) els.classTextbookInput.value = ''
+  updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
+  if (els.classTextbookStatus) {
+    els.classTextbookStatus.textContent = '选择 PDF 后会自动检测第几讲；其他文档会作为整本教材保存。'
+  }
+  renderClassMaterialControls()
 }
 
 function resetOneProfileForm() {
@@ -938,6 +3307,18 @@ function fillClassForm(classInfo) {
   els.gradeSelect.value = classInfo.grade
   els.studentListInput.value = classInfo.students.map((student) => student.name).join('\n')
   els.templateInput.value = classInfo.template || DEFAULT_TEMPLATE
+  if (els.classMaterialModeSelect) els.classMaterialModeSelect.value = classInfo.materialMode || 'lesson'
+  if (els.classTextbookInput) els.classTextbookInput.value = ''
+  updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
+  if (els.classTextbookStatus) {
+    const lectureCount = classInfo.textbook && Array.isArray(classInfo.textbook.lectures)
+      ? classInfo.textbook.lectures.length
+      : 0
+    els.classTextbookStatus.textContent = classInfo.textbook
+      ? `已保存教材：${classInfo.textbook.name || '整本教材'}${lectureCount ? `，检测到 ${lectureCount} 个讲次` : ''}`
+      : '选择 PDF 后会自动检测第几讲；其他文档会作为整本教材保存。'
+  }
+  renderClassMaterialControls()
 }
 
 function fillOneProfileForm(profile) {
@@ -954,11 +3335,12 @@ function fillOneProfileForm(profile) {
   els.oneProfileTemplateInput.value = profile.template || DEFAULT_TEMPLATE
 }
 
-function saveClass() {
+async function saveClass() {
   const name = els.classNameInput.value.trim()
   const grade = els.gradeSelect.value
   const studentNames = parseStudentText(els.studentListInput.value)
   const template = els.templateInput.value.trim()
+  const materialMode = els.classMaterialModeSelect ? els.classMaterialModeSelect.value : 'lesson'
 
   if (!name) {
     showToast('请输入班级名称')
@@ -967,11 +3349,6 @@ function saveClass() {
 
   if (!studentNames.length) {
     showToast('请导入学生名单')
-    return
-  }
-
-  if (!template) {
-    showToast('请输入反馈模板')
     return
   }
 
@@ -989,12 +3366,39 @@ function saveClass() {
     }
   })
 
+  let textbook = oldClass && oldClass.textbook ? oldClass.textbook : null
+  const textbookFile = els.classTextbookInput && els.classTextbookInput.files
+    ? els.classTextbookInput.files[0]
+    : null
+
+  if (materialMode === 'book' && textbookFile) {
+    try {
+      els.saveClassBtn.disabled = true
+      els.saveClassBtn.textContent = '正在保存教材...'
+      textbook = await uploadClassTextbook(textbookFile)
+    } catch (error) {
+      showToast(error.message || '教材上传失败')
+      els.saveClassBtn.disabled = false
+      els.saveClassBtn.textContent = '保存班级'
+      return
+    }
+  }
+
+  if (materialMode === 'book' && !textbook) {
+    showToast('请选择并上传整本教材，或改为每节课单独上传讲义')
+    els.saveClassBtn.disabled = false
+    els.saveClassBtn.textContent = '保存班级'
+    return
+  }
+
   const classInfo = {
     id: oldClass ? oldClass.id : createId('class'),
     name,
     grade,
     students,
-    template,
+    template: template || (oldClass && oldClass.template) || DEFAULT_TEMPLATE,
+    materialMode,
+    textbook: materialMode === 'book' ? textbook : null,
     updatedAt: Date.now()
   }
 
@@ -1010,6 +3414,8 @@ function saveClass() {
   persistClasses()
   render()
   showToast('班级已保存')
+  els.saveClassBtn.disabled = false
+  els.saveClassBtn.textContent = '保存班级'
 }
 
 function saveOneProfile() {
@@ -1115,7 +3521,10 @@ async function generateFeedback() {
 
   const formData = new FormData()
 
-  const file = els.coursewareInput.files && els.coursewareInput.files[0]
+  const file = payload.materialId ? null : (els.coursewareInput.files && els.coursewareInput.files[0])
+  const exitTestFile = els.exitTestInput && els.exitTestInput.files
+    ? els.exitTestInput.files[0]
+    : null
 
   setGenerating(true)
 
@@ -1128,6 +3537,7 @@ async function generateFeedback() {
 
     formData.append('payload', JSON.stringify(payload))
     if (file) formData.append('courseware', file)
+    if (exitTestFile) formData.append('exitTest', exitTestFile)
 
     const response = await fetch('/api/generate-feedback', {
       method: 'POST',
@@ -1159,7 +3569,9 @@ async function generateFeedback() {
 
     state.feedbacks = Array.isArray(data.feedbacks) ? data.feedbacks : []
     state.debug = data.debug || null
+    saveFeedbackHistory(payload, state.feedbacks)
     renderResults()
+    renderImageReport(payload)
     showToast(data.demo ? (data.message || '已生成演示反馈，配置 API Key 后会调用 AI') : '反馈已生成')
     document.querySelector('#resultsPanel').scrollIntoView({ behavior: 'smooth', block: 'start' })
   } catch (error) {
@@ -1181,21 +3593,68 @@ function buildGeneratePayload() {
       return null
     }
 
-    if (!lessonTitle && !courseNote && !els.coursewareInput.files.length) {
+    const selectedLecture = getSelectedTextbookLecture(selectedClass)
+    const hasStoredMaterial = Boolean(selectedClass && selectedClass.materialMode === 'book' && selectedClass.textbook)
+    if (!lessonTitle && !courseNote && !els.coursewareInput.files.length && !hasStoredMaterial) {
       showToast('请填写课程主题、补充内容或导入课件')
       return null
     }
 
+    if (hasStoredMaterial && !selectedLecture && Array.isArray(selectedClass.textbook.lectures) && selectedClass.textbook.lectures.length) {
+      showToast('请选择整本教材中的讲次')
+      return null
+    }
+
     const currentTemplate = els.templateInput.value.trim() || selectedClass.template
+    const feedbackScope = els.feedbackScopeSelect ? els.feedbackScopeSelect.value : 'individual'
+    const feedbackFormat = els.feedbackFormatSelect ? els.feedbackFormatSelect.value : 'text'
+    const classRemark = els.classRemarkInput ? els.classRemarkInput.value.trim() : ''
+    const homework = els.homeworkInput ? els.homeworkInput.value.trim() : ''
+    const schedule = buildClassSchedulePayload()
+    const exitTest = buildExitTestPayload(selectedClass)
+    if (!exitTest) return null
+    const lectureNote = selectedLecture
+      ? `教材讲次：${selectedLecture.title || '所选讲次'}（第 ${selectedLecture.startPage}-${selectedLecture.endPage} 页）`
+      : ''
+    const classStudents = feedbackScope === 'class'
+      ? [{
+          id: `${selectedClass.id}-class-summary`,
+          name: selectedClass.name,
+          performance: '班级整体反馈',
+          remark: classRemark || '请根据班级关键词和课程内容生成整班反馈'
+        }]
+      : selectedClass.students.map((student) => ({
+          ...student,
+          exitTestScore: getExitTestScoreText(exitTest, student.name)
+        }))
 
     return {
       mode: 'class',
+      feedbackScope,
+      feedbackFormat,
       className: selectedClass.name,
       grade: selectedClass.grade,
       template: currentTemplate,
       lessonTitle,
-      courseNote,
-      students: selectedClass.students
+      lessonDate: schedule.date,
+      lessonDateText: schedule.dateText,
+      timeSlot: schedule.timeSlot,
+      courseNote: [
+        schedule.dateText ? `上课日期：${schedule.dateText}` : '',
+        schedule.timeSlot ? `上课时段：${schedule.timeSlot}` : '',
+        lectureNote,
+        courseNote,
+        homework ? `课后作业：${homework}` : '',
+        classRemark ? `班级/共性备注：${classRemark}` : ''
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      classRemark,
+      homework,
+      exitTest,
+      materialId: hasStoredMaterial ? selectedClass.textbook.id : '',
+      selectedPdfPages: selectedLecture ? buildPageRange(selectedLecture.startPage, selectedLecture.endPage) : [],
+      students: classStudents
     }
   }
 
@@ -1247,6 +3706,7 @@ function isPdfFile(file) {
 
 async function handleCoursewareChange() {
   const file = getCoursewareFile()
+  updateFilePicker(els.coursewareInput, els.coursewareFileName)
   resetPdfPageSelection()
 
   if (file && isPdfFile(file)) {
@@ -1352,6 +3812,7 @@ function closePdfPageModal() {
 
 function cancelPdfPageSelection() {
   els.coursewareInput.value = ''
+  updateFilePicker(els.coursewareInput, els.coursewareFileName)
   resetPdfPageSelection()
   renderPdfPageSelection()
   showToast('已取消上传 PDF')
@@ -1842,9 +4303,12 @@ async function appendPdfPreviewData(formData, file, payload) {
   }
 }
 
-async function renderPdfPageToImageBlob(page) {
+async function renderPdfPageToImageBlob(page, options = {}) {
   const baseViewport = page.getViewport({ scale: 1 })
-  const scale = Math.min(1.8, 1400 / Math.max(baseViewport.width, 1))
+  const maxScale = options.maxScale || 1.8
+  const maxEdge = options.maxEdge || 1400
+  const quality = options.quality || 0.82
+  const scale = Math.min(maxScale, maxEdge / Math.max(baseViewport.width, 1))
   const viewport = page.getViewport({ scale })
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
@@ -1859,9 +4323,7 @@ async function renderPdfPageToImageBlob(page) {
     viewport
   }).promise
 
-  return new Promise((resolve) => {
-    canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.82)
-  })
+  return canvasToBlob(canvas, 'image/jpeg', quality)
 }
 
 function copyAllFeedbacks() {
@@ -1894,6 +4356,123 @@ async function copyText(text, message) {
 
 function getSelectedClass() {
   return state.classes.find((item) => item.id === state.selectedClassId)
+}
+
+function getSelectedTextbookLecture(classInfo = getSelectedClass()) {
+  if (!classInfo || !classInfo.textbook || !Array.isArray(classInfo.textbook.lectures)) return null
+  const index = Number(els.classLectureSelect && els.classLectureSelect.value)
+  if (!Number.isInteger(index)) return null
+  return classInfo.textbook.lectures[index] || null
+}
+
+function buildClassSchedulePayload() {
+  const date = state.classSchedule.selectedDate || getLocalDateKey(new Date())
+  const timeSlot = els.classTimeSlotSelect ? els.classTimeSlotSelect.value : state.classSchedule.timeSlot
+  state.classSchedule.timeSlot = timeSlot || ''
+
+  return {
+    date,
+    dateText: formatChineseDate(date),
+    timeSlot: timeSlot || ''
+  }
+}
+
+function buildExitTestPayload(classInfo) {
+  const students = classInfo && Array.isArray(classInfo.students) ? classInfo.students : []
+  const mode = state.exitTest.mode === 'grade' ? 'grade' : 'percent'
+  const totalScore = Math.max(1, Number(els.exitTestTotalInput && els.exitTestTotalInput.value || state.exitTest.totalScore || 100))
+  const file = els.exitTestInput && els.exitTestInput.files ? els.exitTestInput.files[0] : null
+  const selectedLecture = getSelectedExitTestLecture()
+
+  if (file && state.exitTest.lectures.length > 1 && !selectedLecture) {
+    showToast('请选择出门测文件中的讲次')
+    return null
+  }
+
+  if (!students.length) {
+    return {
+      mode,
+      totalScore: mode === 'grade' ? null : totalScore,
+      fileName: file ? file.name : '',
+      selectedLecture: selectedLecture ? selectedLecture.title || '' : '',
+      selectedPdfPages: selectedLecture ? buildPageRange(selectedLecture.startPage, selectedLecture.endPage) : [],
+      students: []
+    }
+  }
+
+  const rows = students.map((student) => {
+    const saved = state.exitTest.scores[student.id] || {}
+    return {
+      id: student.id,
+      name: student.name,
+      score: mode === 'percent' ? normalizeScoreValue(saved.score) : null,
+      grade: mode === 'grade' ? String(saved.grade || '').trim() : '',
+      note: String(saved.note || '').trim()
+    }
+  })
+
+  const missing = rows.find((row) => mode === 'grade' ? !row.grade : row.score === null)
+  if (missing) {
+    showToast(`请填写 ${missing.name} 的出门测${mode === 'grade' ? '等级' : '成绩'}`)
+    return null
+  }
+
+  const sortedStudents = rows.slice().sort((left, right) => compareExitTestRows(left, right, mode))
+
+  return {
+    mode,
+    totalScore: mode === 'grade' ? null : totalScore,
+    fileName: file ? file.name : '',
+    selectedLecture: selectedLecture ? selectedLecture.title || '' : '',
+    selectedPdfPages: selectedLecture ? buildPageRange(selectedLecture.startPage, selectedLecture.endPage) : [],
+    students: sortedStudents
+  }
+}
+
+function getSelectedExitTestLecture() {
+  if (!state.exitTest.lectures.length) return null
+  const index = Number(state.exitTest.selectedLectureIndex)
+  if (!Number.isInteger(index)) return null
+  return state.exitTest.lectures[index] || null
+}
+
+function normalizeScoreValue(value) {
+  if (value === '' || value === null || value === undefined) return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function compareExitTestRows(left, right, mode) {
+  if (mode === 'grade') {
+    const order = { A: 4, B: 3, C: 2, D: 1 }
+    return (order[right.grade] || 0) - (order[left.grade] || 0)
+  }
+
+  return Number(right.score || 0) - Number(left.score || 0)
+}
+
+function getExitTestScoreText(exitTest, studentName) {
+  const row = exitTest && Array.isArray(exitTest.students)
+    ? exitTest.students.find((item) => item.name === studentName)
+    : null
+  if (!row) return ''
+  if (exitTest.mode === 'grade') return `${row.grade} 等`
+  return `${row.score}/${exitTest.totalScore}`
+}
+
+function updateAllFilePickers() {
+  updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
+  updateFilePicker(els.coursewareInput, els.coursewareFileName)
+  updateFilePicker(els.exitTestInput, els.exitTestFileName)
+}
+
+function updateFilePicker(input, nameElement) {
+  if (!input || !nameElement) return
+
+  const file = input.files && input.files[0]
+  const picker = input.closest('.file-picker')
+  nameElement.textContent = file ? file.name : '未选择任何文件'
+  if (picker) picker.classList.toggle('has-file', Boolean(file))
 }
 
 function getSelectedOneProfile() {
@@ -1931,6 +4510,30 @@ function updateWorkingStudentField(index, field, value) {
   if (!student) return
 
   student[field] = value
+  persistClasses()
+}
+
+function appendStudentKeyword(index, keyword) {
+  const students = getWorkingStudents()
+  const student = students[index]
+  if (!student || !keyword) return
+
+  const remark = String(student.remark || '').trim()
+  const keywords = new Set(String(student.keywords || '')
+    .split(/[、,，\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean))
+  keywords.add(keyword)
+  student.keywords = Array.from(keywords).join('、')
+  student.remark = remark.includes(keyword)
+    ? remark
+    : [remark, keyword].filter(Boolean).join('；')
+
+  if (state.mode === 'oneOnOne') {
+    state.oneLesson.remark = student.remark
+    return
+  }
+
   persistClasses()
 }
 

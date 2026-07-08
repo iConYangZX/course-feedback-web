@@ -27,6 +27,8 @@ const LEGACY_DATA_DIR = path.join(__dirname, 'data')
 const DATA_DIR = resolveDataDir()
 const USAGE_PATH = path.join(DATA_DIR, 'usage.json')
 const ACCOUNTS_PATH = path.join(DATA_DIR, 'accounts.json')
+const FEEDBACK_DATA_PATH = path.join(DATA_DIR, 'feedback-data.json')
+const MATERIAL_INDEX_PATH = path.join(DATA_DIR, 'materials.json')
 const LEGACY_USAGE_PATH = path.join(LEGACY_DATA_DIR, 'usage.json')
 const LEGACY_ACCOUNTS_PATH = path.join(LEGACY_DATA_DIR, 'accounts.json')
 const OCR_BINARY_PATH = path.join(__dirname, 'scripts', 'ocr_image')
@@ -69,6 +71,8 @@ const DEFAULT_ACCOUNTS = [
 let databasePool = null
 let usageState = {}
 let accountState = { users: [] }
+let feedbackDataState = { owners: {} }
+let materialState = { items: [] }
 
 app.use(express.json({ limit: '1mb' }))
 app.use(express.static(path.join(__dirname, 'public')))
@@ -190,6 +194,20 @@ app.patch('/api/admin/users/:userId', requireAdminMiddleware, async (req, res) =
   }
 })
 
+app.delete('/api/admin/users/:userId', requireAdminMiddleware, async (req, res) => {
+  try {
+    const account = deleteAccount(req.params.userId, req.accessSession)
+    await writeAccountState()
+    await clearUsageForClient(getUsageClientIdForAccount(account))
+    res.json({
+      ok: true,
+      userId: account.id
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '删除账号失败' })
+  }
+})
+
 app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, async (req, res) => {
   try {
     const account = findAccountById(req.params.userId)
@@ -202,6 +220,43 @@ app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, async (
     })
   } catch (error) {
     res.status(400).json({ error: error.message || '重置次数失败' })
+  }
+})
+
+app.get('/api/feedback-data', requireAccessMiddleware, (req, res) => {
+  const ownerId = getDataOwnerId(req.accessSession)
+  res.json({
+    data: getFeedbackDataForOwner(ownerId)
+  })
+})
+
+app.put('/api/feedback-data', requireAccessMiddleware, async (req, res) => {
+  try {
+    const ownerId = getDataOwnerId(req.accessSession)
+    const data = normalizeFeedbackData(req.body || {})
+    feedbackDataState.owners[ownerId] = data
+    await writeFeedbackDataState()
+    res.json({
+      ok: true,
+      data
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '保存档案数据失败' })
+  }
+})
+
+app.post('/api/materials', requireAccessMiddleware, upload.single('material'), async (req, res) => {
+  try {
+    if (!req.file) throw new Error('请先上传教材文件')
+
+    const ownerId = getDataOwnerId(req.accessSession)
+    const material = await saveUploadedMaterial(ownerId, req.file, req.body || {})
+    res.json({
+      ok: true,
+      material: getSafeMaterial(material)
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '上传教材失败' })
   }
 })
 
@@ -255,11 +310,13 @@ app.post('/api/config', (req, res) => {
 
 app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
   { name: 'courseware', maxCount: 1 },
+  { name: 'exitTest', maxCount: 1 },
   { name: 'pdfPageImage', maxCount: 500 }
 ]), async (req, res) => {
   try {
     const session = req.accessSession
     const coursewareFile = getUploadedFile(req, 'courseware')
+    const exitTestFile = getUploadedFile(req, 'exitTest')
     const pdfPageImages = getUploadedFiles(req, 'pdfPageImage')
 
     const usageClientId = getUsageClientId(session)
@@ -273,14 +330,22 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     }
 
     const payload = parsePayload(req.body.payload)
-    validatePayload(payload, Boolean(coursewareFile))
+    const storedMaterialFile = !coursewareFile && payload.materialId
+      ? getStoredMaterialFile(session, payload.materialId)
+      : null
+    validatePayload(payload, Boolean(coursewareFile || storedMaterialFile))
 
     const aiConfig = getAIConfig()
-    const courseware = coursewareFile ? await normalizeCourseware(coursewareFile, {
+    const coursewareSource = coursewareFile || storedMaterialFile
+    const courseware = coursewareSource ? await normalizeCourseware(coursewareSource, {
       clientPdfText: payload.clientPdfText,
       pdfPageImages,
       selectedPdfPages: payload.selectedPdfPages
     }) : null
+    const exitTestCourseware = exitTestFile ? await normalizeCourseware(exitTestFile, {
+      selectedPdfPages: payload.exitTest && payload.exitTest.selectedPdfPages
+    }) : null
+    if (exitTestCourseware) payload.exitTestFile = buildUploadedFileSummary(exitTestCourseware)
 
     if (!aiConfig.apiKey) {
       const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
@@ -358,6 +423,8 @@ function validatePayload(payload, hasCourseware = false) {
       name: trim(student.name),
       performance: trim(student.performance) || '表现良好',
       remark: trim(student.remark),
+      keywords: trim(student.keywords),
+      exitTestScore: trim(student.exitTestScore),
       personality: trim(student.personality),
       habit: trim(student.habit)
     }))
@@ -514,6 +581,8 @@ function isWritableDirectory(dirPath) {
 async function initializeStorage() {
   usageState = readUsageState()
   accountState = readAccountState()
+  feedbackDataState = readFeedbackDataState()
+  materialState = readMaterialState()
 
   if (!DATABASE_URL) return
 
@@ -535,6 +604,20 @@ async function initializeStorage() {
     usageState = databaseUsage
   } else {
     await writeDatabaseState('usage', usageState)
+  }
+
+  const databaseFeedbackData = await readDatabaseState('feedback-data')
+  if (databaseFeedbackData && typeof databaseFeedbackData === 'object' && !Array.isArray(databaseFeedbackData)) {
+    feedbackDataState = normalizeFeedbackDataState(databaseFeedbackData)
+  } else {
+    await writeDatabaseState('feedback-data', feedbackDataState)
+  }
+
+  const databaseMaterials = await readDatabaseState('materials')
+  if (databaseMaterials && typeof databaseMaterials === 'object' && Array.isArray(databaseMaterials.items)) {
+    materialState = databaseMaterials
+  } else {
+    await writeDatabaseState('materials', materialState)
   }
 }
 
@@ -879,6 +962,20 @@ function updateAccount(accountId, input) {
   return account
 }
 
+function deleteAccount(accountId, session = {}) {
+  const index = accountState.users.findIndex((account) => account.id === accountId)
+  if (index < 0) throw new Error('账号不存在')
+
+  const account = accountState.users[index]
+  if (account.id === session.accountId) throw new Error('不能删除当前登录的管理员账号')
+  if (account.role === 'admin' && account.active && getActiveAdminCount() <= 1) {
+    throw new Error('至少需要保留一个启用的管理员账号')
+  }
+
+  accountState.users.splice(index, 1)
+  return account
+}
+
 function getActiveAdminCount() {
   return accountState.users.filter((account) => account.role === 'admin' && account.active).length
 }
@@ -970,6 +1067,13 @@ async function resetUsage(clientId) {
   }
 }
 
+async function clearUsageForClient(clientId) {
+  Object.keys(usageState).forEach((date) => {
+    if (usageState[date]) delete usageState[date][clientId]
+  })
+  await writeUsageState()
+}
+
 function getTodayKey() {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Shanghai',
@@ -994,6 +1098,186 @@ function readUsageState() {
 async function writeUsageState() {
   writeJsonState(USAGE_PATH, usageState)
   await writeDatabaseState('usage', usageState)
+}
+
+function readFeedbackDataState() {
+  try {
+    const raw = fs.existsSync(FEEDBACK_DATA_PATH) ? fs.readFileSync(FEEDBACK_DATA_PATH, 'utf8') : '{"owners":{}}'
+    return normalizeFeedbackDataState(JSON.parse(raw))
+  } catch (error) {
+    return { owners: {} }
+  }
+}
+
+function normalizeFeedbackDataState(input) {
+  const source = input && typeof input === 'object' ? input : {}
+  const owners = source.owners && typeof source.owners === 'object' ? source.owners : {}
+  const nextOwners = {}
+
+  Object.entries(owners).forEach(([ownerId, data]) => {
+    nextOwners[ownerId] = normalizeFeedbackData(data)
+  })
+
+  return { owners: nextOwners }
+}
+
+async function writeFeedbackDataState() {
+  writeJsonState(FEEDBACK_DATA_PATH, feedbackDataState)
+  await writeDatabaseState('feedback-data', feedbackDataState)
+}
+
+function getDataOwnerId(session = {}) {
+  return session.accountId ? `account:${session.accountId}` : getUsageClientId(session)
+}
+
+function getFeedbackDataForOwner(ownerId) {
+  return normalizeFeedbackData(feedbackDataState.owners[ownerId] || {})
+}
+
+function normalizeFeedbackData(input) {
+  const source = input && typeof input === 'object' ? input : {}
+  return {
+    classes: normalizeFeedbackClasses(source.classes),
+    oneProfiles: normalizeFeedbackOneProfiles(source.oneProfiles),
+    updatedAt: Number(source.updatedAt || Date.now())
+  }
+}
+
+function normalizeFeedbackClasses(classes) {
+  return Array.isArray(classes) ? classes.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `class-${crypto.randomUUID()}`,
+      name: trim(source.name) || '未命名班级',
+      grade: trim(source.grade) || '高一',
+      template: trim(source.template),
+      materialMode: trim(source.materialMode) === 'book' ? 'book' : 'lesson',
+      textbook: source.textbook && typeof source.textbook === 'object' ? getSafeMaterial(source.textbook) : null,
+      students: normalizeFeedbackStudents(source.students),
+      updatedAt: Number(source.updatedAt || Date.now())
+    }
+  }) : []
+}
+
+function normalizeFeedbackStudents(students) {
+  return Array.isArray(students) ? students
+    .map((student) => {
+      if (typeof student === 'string') {
+        return {
+          id: `stu-${crypto.randomUUID()}`,
+          name: trim(student),
+          performance: '表现良好',
+          remark: ''
+        }
+      }
+      const source = student && typeof student === 'object' ? student : {}
+      return {
+        id: trim(source.id) || `stu-${crypto.randomUUID()}`,
+        name: trim(source.name),
+        performance: trim(source.performance) || '表现良好',
+        remark: trim(source.remark),
+        keywords: trim(source.keywords)
+      }
+    })
+    .filter((student) => student.name) : []
+}
+
+function normalizeFeedbackOneProfiles(profiles) {
+  return Array.isArray(profiles) ? profiles.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `one-${crypto.randomUUID()}`,
+      name: trim(source.name) || '未命名学生',
+      grade: trim(source.grade) || '高一',
+      personality: trim(source.personality),
+      habit: trim(source.habit),
+      template: trim(source.template),
+      updatedAt: Number(source.updatedAt || Date.now())
+    }
+  }) : []
+}
+
+function readMaterialState() {
+  try {
+    const raw = fs.existsSync(MATERIAL_INDEX_PATH) ? fs.readFileSync(MATERIAL_INDEX_PATH, 'utf8') : '{"items":[]}'
+    const parsed = JSON.parse(raw)
+    return parsed && Array.isArray(parsed.items) ? parsed : { items: [] }
+  } catch (error) {
+    return { items: [] }
+  }
+}
+
+async function writeMaterialState() {
+  writeJsonState(MATERIAL_INDEX_PATH, materialState)
+  await writeDatabaseState('materials', materialState)
+}
+
+async function saveUploadedMaterial(ownerId, file, input = {}) {
+  const originalName = file.originalname || 'material.pdf'
+  const lowerName = originalName.toLowerCase()
+  if (!/\.(pdf|docx|pptx|txt|md|png|jpg|jpeg|webp)$/i.test(lowerName)) {
+    throw new Error('教材目前支持 PDF、Word、PPT、文本或图片文件')
+  }
+
+  const material = {
+    id: `mat-${crypto.randomUUID()}`,
+    ownerId,
+    originalName,
+    mime: getMimeType(originalName, file.mimetype || 'application/octet-stream'),
+    size: file.size,
+    dataBase64: file.buffer.toString('base64'),
+    lectures: parseMaterialLectures(input.lectures),
+    createdAt: Date.now()
+  }
+
+  materialState.items = materialState.items.filter((item) => item.id !== material.id)
+  materialState.items.push(material)
+  await writeMaterialState()
+  return material
+}
+
+function parseMaterialLectures(rawLectures) {
+  if (!rawLectures) return []
+  const source = typeof rawLectures === 'string' ? parseJsonText(rawLectures) : rawLectures
+  const list = Array.isArray(source) ? source : []
+
+  return list.map((lecture, index) => ({
+    key: trim(lecture && lecture.key) || `lecture-${index + 1}`,
+    title: trim(lecture && lecture.title) || `第 ${index + 1} 讲`,
+    startPage: Math.max(1, Number(lecture && lecture.startPage) || 1),
+    endPage: Math.max(1, Number(lecture && lecture.endPage) || Number(lecture && lecture.startPage) || 1)
+  }))
+}
+
+function getStoredMaterialFile(session, materialId) {
+  const ownerId = getDataOwnerId(session)
+  const material = materialState.items.find((item) => item.id === materialId && item.ownerId === ownerId)
+
+  if (!material || !material.dataBase64) {
+    throw new Error('没有找到班级教材，请重新上传')
+  }
+
+  return {
+    originalname: material.originalName,
+    mimetype: material.mime,
+    buffer: Buffer.from(material.dataBase64, 'base64')
+  }
+}
+
+function getSafeMaterial(material = {}) {
+  return {
+    id: trim(material.id),
+    name: trim(material.name || material.originalName),
+    mime: trim(material.mime),
+    size: Number(material.size || 0),
+    lectures: Array.isArray(material.lectures) ? material.lectures.map((lecture, index) => ({
+      key: trim(lecture && lecture.key) || `lecture-${index + 1}`,
+      title: trim(lecture && lecture.title) || `第 ${index + 1} 讲`,
+      startPage: Math.max(1, Number(lecture && lecture.startPage) || 1),
+      endPage: Math.max(1, Number(lecture && lecture.endPage) || Number(lecture && lecture.startPage) || 1)
+    })) : [],
+    createdAt: Number(material.createdAt || Date.now())
+  }
 }
 
 function readStateFile(primaryPath, legacyPath, emptyValue = '') {
@@ -1324,6 +1608,11 @@ function buildSystemPrompt() {
     '不能编造课件或课堂中没有依据的细节；课件信息不足时，用课程主题和老师备注生成稳妥反馈。',
     '每个学生反馈建议 120 到 220 个汉字。',
     '每一条反馈必须包含：1 个本节课/课件里的具体知识点，1 个该学生的课堂表现等级，若老师填写了备注则必须自然写入备注。',
+    '如果反馈类型是班级整体反馈，请面向整个班级生成课堂表现总结，不要写成单个学生逐条反馈。',
+    '如果提供了上课日期，可以自然使用；如果上课时段为空或未填写，任何文字反馈和图片报告文案都不要出现时段，也不要自行编造时段。',
+    '如果提供了出门测成绩，必须写入反馈：个性化学生反馈只写当前学生自己的成绩；班级整体反馈要按从高到低列出全班所有学生成绩。',
+    '如果提供了出门测文件内容，请结合文件里的测试知识点、题型或讲次内容评价学习情况；不要只写分数。',
+    '如果反馈呈现形式是图片报告文案，请语言更适合放入报告里的“课堂表现”段落，结构清晰、少寒暄。',
     '一对一反馈里如果包含 personality 或 habit，要把它们作为长期档案背景，用自然、克制的方式融入建议，不要写得像诊断。',
     '不同学生的反馈必须根据 performance、remark、personality 和 habit 明显区分，不允许只替换姓名。'
   ].join('\n')
@@ -1335,9 +1624,13 @@ function buildUserContent(payload, courseware) {
       type: 'input_text',
       text: [
         `课程类型：${payload.mode === 'oneOnOne' ? '一对一' : '班课'}`,
+        `反馈类型：${payload.feedbackScope === 'class' ? '班级整体反馈' : '个性化学生反馈'}`,
+        `反馈呈现形式：${payload.feedbackFormat === 'image' ? '图片报告文案' : '文字反馈'}`,
         `班级/课程：${payload.className || '未填写'}`,
         `年级：${payload.grade || '未填写'}`,
         `课程主题：${payload.lessonTitle || '未填写'}`,
+        `上课日期：${payload.lessonDateText || payload.lessonDate || '未填写'}`,
+        payload.timeSlot ? `上课时段：${payload.timeSlot}` : '上课时段：未填写；请不要在反馈中出现时段。',
         '',
         '老师提供的反馈模板：',
         payload.template || '请根据学生本节课表现生成反馈。',
@@ -1346,6 +1639,11 @@ function buildUserContent(payload, courseware) {
         '',
         '老师补充的课程内容：',
         payload.courseNote || '未填写',
+        payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
+        payload.homework ? `课后作业：${payload.homework}` : '',
+        '',
+        '出门测信息：',
+        formatExitTestSummary(payload),
         '',
         '学生表现数据 JSON：',
         JSON.stringify(payload.students, null, 2),
@@ -1436,9 +1734,13 @@ function buildPlainPrompt(payload, courseware, options = {}) {
 
   return [
     `课程类型：${payload.mode === 'oneOnOne' ? '一对一' : '班课'}`,
+    `反馈类型：${payload.feedbackScope === 'class' ? '班级整体反馈' : '个性化学生反馈'}`,
+    `反馈呈现形式：${payload.feedbackFormat === 'image' ? '图片报告文案' : '文字反馈'}`,
     `班级/课程：${payload.className || '未填写'}`,
     `年级：${payload.grade || '未填写'}`,
     `课程主题：${payload.lessonTitle || '未填写'}`,
+    `上课日期：${payload.lessonDateText || payload.lessonDate || '未填写'}`,
+    payload.timeSlot ? `上课时段：${payload.timeSlot}` : '上课时段：未填写；请不要在反馈中出现时段。',
     '',
     '老师提供的反馈模板：',
     payload.template || '请根据学生本节课表现生成反馈。',
@@ -1447,6 +1749,11 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     '',
     '老师补充的课程内容：',
     payload.courseNote || '未填写',
+    payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
+    payload.homework ? `课后作业：${payload.homework}` : '',
+    '',
+    '出门测信息：',
+    formatExitTestSummary(payload),
     '',
     '课件内容：',
     coursewareLines.join('\n'),
@@ -1466,6 +1773,47 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     '不同学生不要套用完全相同的句子。',
     '返回 JSON 前逐条自检：每条 feedback 是否保留了模板结构和固定句；不符合就先重写再返回。'
   ].join('\n')
+}
+
+function formatExitTestSummary(payload = {}) {
+  const exitTest = payload.exitTest && typeof payload.exitTest === 'object' ? payload.exitTest : null
+  const lines = []
+
+  if (exitTest) {
+    lines.push(`成绩制度：${exitTest.mode === 'grade' ? '等级制 A/B/C/D' : `分数制，满分 ${exitTest.totalScore || 100}`}`)
+    if (exitTest.fileName) lines.push(`出门测文件：${exitTest.fileName}`)
+    if (exitTest.selectedLecture) lines.push(`出门测讲次：${exitTest.selectedLecture}`)
+
+    const students = Array.isArray(exitTest.students) ? exitTest.students : []
+    if (students.length) {
+      lines.push('学生成绩：')
+      students.forEach((student) => {
+        if (exitTest.mode === 'grade') {
+          lines.push(`- ${student.name}：${student.grade || '未填'}${student.note ? `；${student.note}` : ''}`)
+        } else {
+          lines.push(`- ${student.name}：${student.score ?? '未填'}/${exitTest.totalScore || 100}${student.note ? `；${student.note}` : ''}`)
+        }
+      })
+    }
+  }
+
+  const fileSummary = payload.exitTestFile && typeof payload.exitTestFile === 'object' ? payload.exitTestFile : null
+  if (fileSummary && fileSummary.extractedText) {
+    lines.push('出门测文件识别内容：')
+    lines.push(fileSummary.extractedText)
+  }
+
+  return lines.length ? lines.join('\n') : '未填写'
+}
+
+function buildUploadedFileSummary(courseware) {
+  return {
+    name: courseware.name,
+    mime: courseware.mime,
+    extractionSource: courseware.extractionSource,
+    selectedPdfPages: courseware.selectedPdfPages,
+    extractedText: courseware.extractedText ? courseware.extractedText.slice(0, 8000) : ''
+  }
 }
 
 function getTemplateRules() {
@@ -1806,12 +2154,37 @@ function buildAdviceFallback(student) {
 
 function buildFallbackFeedback(student, payload = {}) {
   const lesson = payload.lessonTitle ? `本节课围绕“${payload.lessonTitle}”展开，` : '本节课整体学习状态较为清晰，'
+  const schedule = buildFallbackScheduleText(payload)
   const remark = student.remark ? `课堂中特别需要关注的是：${student.remark}。` : ''
+  const exitTestText = getFallbackExitTestText(student, payload)
   const advice = student.performance === '表现较差'
     ? '后续建议先把基础概念和典型题步骤补扎实，课后用少量高频题巩固。'
     : '后续建议继续整理本节课重点和错题，保持稳定练习节奏。'
 
-  return `${student.name}同学${lesson}${student.performance}。${remark}${advice}`
+  return `${student.name}同学${schedule}${lesson}${student.performance}。${remark}${exitTestText}${advice}`
+}
+
+function buildFallbackScheduleText(payload = {}) {
+  if (!payload.lessonDateText && !payload.lessonDate && !payload.timeSlot) return ''
+
+  const dateText = payload.lessonDateText || payload.lessonDate || ''
+  return payload.timeSlot
+    ? `本次上课时间为${dateText} ${payload.timeSlot}，`
+    : `本次上课日期为${dateText}，`
+}
+
+function getFallbackExitTestText(student, payload = {}) {
+  if (student.exitTestScore) return `出门测成绩为${student.exitTestScore}。`
+
+  const rows = payload.exitTest && Array.isArray(payload.exitTest.students)
+    ? payload.exitTest.students
+    : []
+  const row = rows.find((item) => item.name === student.name)
+  if (!row) return ''
+  if (payload.exitTest.mode === 'grade') return row.grade ? `出门测等级为${row.grade}。` : ''
+  return row.score !== null && row.score !== undefined && row.score !== ''
+    ? `出门测成绩为${row.score}/${payload.exitTest.totalScore || 100}。`
+    : ''
 }
 
 async function extractCoursewareText(buffer, fileName) {
