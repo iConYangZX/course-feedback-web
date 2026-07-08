@@ -249,7 +249,7 @@ app.post('/api/config', (req, res) => {
 
 app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
   { name: 'courseware', maxCount: 1 },
-  { name: 'pdfPageImage', maxCount: 3 }
+  { name: 'pdfPageImage', maxCount: 500 }
 ]), async (req, res) => {
   try {
     const session = req.accessSession
@@ -272,7 +272,8 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     const aiConfig = getAIConfig()
     const courseware = coursewareFile ? await normalizeCourseware(coursewareFile, {
       clientPdfText: payload.clientPdfText,
-      pdfPageImages
+      pdfPageImages,
+      selectedPdfPages: payload.selectedPdfPages
     }) : null
 
     if (!aiConfig.apiKey) {
@@ -966,15 +967,22 @@ async function normalizeCourseware(file, options = {}) {
   const originalName = file.originalname || 'courseware'
   const mime = getMimeType(originalName, file.mimetype)
   const isImage = mime.startsWith('image/')
+  const isPdf = mime === 'application/pdf'
   const pdfPageImages = Array.isArray(options.pdfPageImages) ? options.pdfPageImages : []
-  const extraction = isImage
-    ? { text: await extractImageText(file.buffer, originalName), source: 'image-ocr', pageCount: 1 }
-    : await extractCoursewareText(file.buffer, originalName)
+  const selectedPdfPages = normalizePageNumbers(options.selectedPdfPages)
   const clientPdfText = trim(options.clientPdfText)
-  const extractedText = extraction.text || clientPdfText
-  const extractionSource = extraction.text
-    ? extraction.source
-    : (clientPdfText ? 'browser-pdf-text' : extraction.source)
+  const shouldUseSelectedPdfPages = isPdf && (selectedPdfPages.length || pdfPageImages.length || clientPdfText)
+  const extraction = shouldUseSelectedPdfPages
+    ? { text: '', source: 'pdf-selected-pages', pageCount: selectedPdfPages.length || pdfPageImages.length }
+    : (isImage
+        ? { text: await extractImageText(file.buffer, originalName), source: 'image-ocr', pageCount: 1 }
+        : await extractCoursewareText(file.buffer, originalName))
+  const extractedText = shouldUseSelectedPdfPages
+    ? clientPdfText
+    : (extraction.text || clientPdfText)
+  const extractionSource = extractedText && shouldUseSelectedPdfPages
+    ? 'pdf-selected-pages'
+    : (extraction.text ? extraction.source : (clientPdfText ? 'browser-pdf-text' : extraction.source))
 
   return {
     name: originalName,
@@ -983,6 +991,7 @@ async function normalizeCourseware(file, options = {}) {
     extractedText,
     extractionSource,
     ocrPageCount: extraction.pageCount || pdfPageImages.length || 0,
+    selectedPdfPages,
     isImage,
     dataUrl: isImage ? `data:${mime};base64,${file.buffer.toString('base64')}` : '',
     visionImages: pdfPageImages.map((imageFile) => ({
@@ -994,6 +1003,15 @@ async function normalizeCourseware(file, options = {}) {
     imageSendSucceeded: false,
     imageFallbackUsed: false
   }
+}
+
+function normalizePageNumbers(pageNumbers) {
+  const list = Array.isArray(pageNumbers) ? pageNumbers : []
+  return Array.from(new Set(
+    list
+      .map((pageNumber) => Number(pageNumber))
+      .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0)
+  )).sort((left, right) => left - right)
 }
 
 function hasCoursewareVisionImages(courseware) {
@@ -1273,9 +1291,7 @@ function buildUserContent(payload, courseware) {
   if (!courseware) return content
 
   if (courseware.extractedText) {
-    const textLabel = courseware.extractionSource === 'pdf-ocr'
-      ? `从图片版 PDF 前 ${courseware.ocrPageCount || 0} 页识别到的文字如下，请优先结合这些内容生成反馈：`
-      : '从课件中提取到的文字如下，请优先结合这些内容生成反馈：'
+    const textLabel = getCoursewareTextLabel(courseware)
 
     content.push({
       type: 'input_text',
@@ -1286,7 +1302,7 @@ function buildUserContent(payload, courseware) {
     })
   }
 
-  if (courseware.mime === 'application/pdf') {
+  if (courseware.mime === 'application/pdf' && !courseware.selectedPdfPages.length) {
     content.push({
       type: 'input_file',
       filename: courseware.name,
@@ -1326,7 +1342,7 @@ function buildPlainPrompt(payload, courseware, options = {}) {
       coursewareLines.push('图片本体也已作为视觉输入附在本消息中，请结合图片排版、题目和可见内容。')
     }
     if (!courseware.isImage && Array.isArray(courseware.visionImages) && courseware.visionImages.length && includeImage) {
-      coursewareLines.push(`PDF 前 ${courseware.visionImages.length} 页也已转成图片作为视觉输入附在本消息中，请结合图片页面里的题目和可见内容。`)
+      coursewareLines.push(`PDF ${getSelectedPdfPageLabel(courseware)}也已转成图片作为视觉输入附在本消息中，请结合图片页面里的题目和可见内容。`)
     }
   } else if (courseware && courseware.isImage) {
     coursewareLines.push(includeImage
@@ -1334,7 +1350,7 @@ function buildPlainPrompt(payload, courseware, options = {}) {
       : `老师上传了一张图片课件：${courseware.name}。当前没有识别到可用文字，请结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
   } else if (courseware && Array.isArray(courseware.visionImages) && courseware.visionImages.length) {
     coursewareLines.push(includeImage
-      ? `老师上传了 PDF 课件：${courseware.name}。系统已把前 ${courseware.visionImages.length} 页转成图片并作为视觉输入附在本消息中，请直接阅读图片里的文字、题目、板书或页面内容。`
+      ? `老师上传了 PDF 课件：${courseware.name}。系统已把 ${getSelectedPdfPageLabel(courseware)}转成图片并作为视觉输入附在本消息中，请直接阅读图片里的文字、题目、板书或页面内容。`
       : `老师上传了 PDF 课件：${courseware.name}。当前没有提取到可用文字，请结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
   } else if (courseware) {
     coursewareLines.push(`老师上传了课件文件：${courseware.name}。当前接口没有提取到可用文字，请只结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
@@ -1390,11 +1406,55 @@ function getCoursewareTextLabel(courseware) {
     return '从图片课件中识别到的文字如下，请优先结合这些内容生成反馈：'
   }
 
+  if (courseware.extractionSource === 'pdf-selected-pages') {
+    return `从 PDF ${getSelectedPdfPageLabel(courseware)}提取到的文字如下，请优先结合这些内容生成反馈：`
+  }
+
   if (courseware.extractionSource === 'pdf-ocr') {
     return `从图片版 PDF 前 ${courseware.ocrPageCount || 0} 页识别到的文字如下，请优先结合这些内容生成反馈：`
   }
 
   return '从课件中提取到的文字如下，请优先结合这些内容生成反馈：'
+}
+
+function getSelectedPdfPageLabel(courseware) {
+  const selectedPages = Array.isArray(courseware.selectedPdfPages) ? courseware.selectedPdfPages : []
+  if (selectedPages.length) return `所选第 ${formatNumberRanges(selectedPages)} 页`
+
+  const imageCount = Array.isArray(courseware.visionImages) ? courseware.visionImages.length : 0
+  if (imageCount) return `所选 ${imageCount} 页`
+
+  return '所选页面'
+}
+
+function formatNumberRanges(numbers) {
+  const sortedNumbers = Array.from(new Set(numbers))
+    .map((number) => Number(number))
+    .filter((number) => Number.isInteger(number))
+    .sort((left, right) => left - right)
+  const ranges = []
+  let start = null
+  let end = null
+
+  sortedNumbers.forEach((number) => {
+    if (start === null) {
+      start = number
+      end = number
+      return
+    }
+
+    if (number === end + 1) {
+      end = number
+      return
+    }
+
+    ranges.push(start === end ? String(start) : `${start}-${end}`)
+    start = number
+    end = number
+  })
+
+  if (start !== null) ranges.push(start === end ? String(start) : `${start}-${end}`)
+  return ranges.join('、')
 }
 
 function buildChatCompatibleUserContent(payload, courseware, options = {}) {
@@ -1929,6 +1989,7 @@ function buildDebugSummary(payload, courseware) {
     coursewareSentAsImage: Boolean(courseware && courseware.imageSendSucceeded),
     coursewareImageFallbackUsed: Boolean(courseware && courseware.imageFallbackUsed),
     coursewareVisionImageCount: courseware && Array.isArray(courseware.visionImages) ? courseware.visionImages.length : 0,
+    coursewareSelectedPdfPages: courseware && Array.isArray(courseware.selectedPdfPages) ? courseware.selectedPdfPages : [],
     coursewareExtractionSource: courseware ? courseware.extractionSource : '',
     coursewareOcrPageCount: courseware ? courseware.ocrPageCount : 0,
     coursewareTextLength: courseware && courseware.extractedText ? courseware.extractedText.length : 0,

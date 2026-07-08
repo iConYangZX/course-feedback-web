@@ -42,6 +42,15 @@ const state = {
     user: null
   },
   adminUsers: [],
+  pdfSelection: {
+    fileKey: '',
+    fileName: '',
+    pageCount: 0,
+    selectedPages: [],
+    loading: false,
+    isOpen: false,
+    error: ''
+  },
   rearrange: {
     files: [],
     questions: [],
@@ -118,6 +127,18 @@ function bindElements() {
     workspaceTitle: document.querySelector('#workspaceTitle'),
     lessonTitleInput: document.querySelector('#lessonTitleInput'),
     coursewareInput: document.querySelector('#coursewareInput'),
+    pdfPageSelectionBar: document.querySelector('#pdfPageSelectionBar'),
+    pdfPageSelectionText: document.querySelector('#pdfPageSelectionText'),
+    pdfPageSelectBtn: document.querySelector('#pdfPageSelectBtn'),
+    pdfPageModal: document.querySelector('#pdfPageModal'),
+    pdfPageModalTitle: document.querySelector('#pdfPageModalTitle'),
+    pdfPageModalMeta: document.querySelector('#pdfPageModalMeta'),
+    pdfPageGrid: document.querySelector('#pdfPageGrid'),
+    pdfPageSelectAllBtn: document.querySelector('#pdfPageSelectAllBtn'),
+    pdfPageSelectNoneBtn: document.querySelector('#pdfPageSelectNoneBtn'),
+    pdfPageCancelBtn: document.querySelector('#pdfPageCancelBtn'),
+    pdfPageConfirmBtn: document.querySelector('#pdfPageConfirmBtn'),
+    pdfPageModalCloseBtn: document.querySelector('#pdfPageModalCloseBtn'),
     courseNoteInput: document.querySelector('#courseNoteInput'),
     studentCount: document.querySelector('#studentCount'),
     studentTable: document.querySelector('#studentTable'),
@@ -189,6 +210,17 @@ function bindEvents() {
   els.deleteOneProfileBtn.addEventListener('click', deleteSelectedOneProfile)
   els.generateBtn.addEventListener('click', generateFeedback)
   els.copyAllBtn.addEventListener('click', copyAllFeedbacks)
+  els.coursewareInput.addEventListener('change', handleCoursewareChange)
+  els.pdfPageSelectBtn.addEventListener('click', openPdfPageSelection)
+  els.pdfPageSelectAllBtn.addEventListener('click', selectAllPdfPages)
+  els.pdfPageSelectNoneBtn.addEventListener('click', clearPdfPages)
+  els.pdfPageCancelBtn.addEventListener('click', cancelPdfPageSelection)
+  els.pdfPageConfirmBtn.addEventListener('click', confirmPdfPageSelection)
+  els.pdfPageModalCloseBtn.addEventListener('click', closePdfPageModal)
+  els.pdfPageModal.addEventListener('click', (event) => {
+    if (event.target === els.pdfPageModal) closePdfPageModal()
+  })
+  els.pdfPageGrid.addEventListener('change', updatePdfPageSelectionFromGrid)
   els.rearrangeUploadBtn.addEventListener('click', () => els.rearrangeFileInput.click())
   els.rearrangeTitleInput.addEventListener('input', renderQuestionPreview)
   els.rearrangeFileInput.addEventListener('change', (event) => {
@@ -705,6 +737,7 @@ function render() {
   renderStudentTable()
   renderResults()
   renderRearrange()
+  renderPdfPageSelection()
   renderAccessState()
 }
 
@@ -1571,6 +1604,227 @@ function isPdfFile(file) {
   )
 }
 
+async function handleCoursewareChange() {
+  const file = getCoursewareFile()
+  resetPdfPageSelection()
+
+  if (file && isPdfFile(file)) {
+    await loadPdfPageSelection(file, true)
+    return
+  }
+
+  renderPdfPageSelection()
+}
+
+function getCoursewareFile() {
+  return els.coursewareInput.files && els.coursewareInput.files[0]
+}
+
+function getFileKey(file) {
+  if (!file) return ''
+  return [file.name, file.size, file.lastModified].join(':')
+}
+
+function resetPdfPageSelection() {
+  state.pdfSelection = {
+    fileKey: '',
+    fileName: '',
+    pageCount: 0,
+    selectedPages: [],
+    loading: false,
+    isOpen: false,
+    error: ''
+  }
+}
+
+async function loadPdfPageSelection(file, openWhenReady = false) {
+  if (!window.pdfjsLib) {
+    showToast('PDF 解析组件加载失败，请刷新页面重试')
+    renderPdfPageSelection()
+    return
+  }
+
+  state.pdfSelection = {
+    fileKey: getFileKey(file),
+    fileName: file.name,
+    pageCount: 0,
+    selectedPages: [],
+    loading: true,
+    isOpen: true,
+    error: ''
+  }
+  renderPdfPageSelection()
+
+  try {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+    const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+    const pageCount = pdf.numPages
+
+    state.pdfSelection.pageCount = pageCount
+    state.pdfSelection.selectedPages = Array.from({ length: pageCount }, (item, index) => index + 1)
+    state.pdfSelection.loading = false
+    state.pdfSelection.isOpen = openWhenReady
+    renderPdfPageSelection()
+  } catch (error) {
+    state.pdfSelection.loading = false
+    state.pdfSelection.error = error.message || 'PDF 页面读取失败'
+    renderPdfPageSelection()
+    showToast(state.pdfSelection.error)
+  }
+}
+
+async function openPdfPageSelection() {
+  const file = getCoursewareFile()
+  if (!file || !isPdfFile(file)) return
+
+  if (state.pdfSelection.fileKey !== getFileKey(file) || !state.pdfSelection.pageCount) {
+    await loadPdfPageSelection(file, true)
+    return
+  }
+
+  state.pdfSelection.isOpen = true
+  renderPdfPageSelection()
+}
+
+function closePdfPageModal() {
+  state.pdfSelection.isOpen = false
+  renderPdfPageSelection()
+}
+
+function cancelPdfPageSelection() {
+  els.coursewareInput.value = ''
+  resetPdfPageSelection()
+  renderPdfPageSelection()
+  showToast('已取消上传 PDF')
+}
+
+function confirmPdfPageSelection() {
+  if (!state.pdfSelection.selectedPages.length) {
+    showToast('请至少选择 1 页 PDF')
+    return
+  }
+
+  closePdfPageModal()
+}
+
+function selectAllPdfPages() {
+  const pageCount = state.pdfSelection.pageCount
+  state.pdfSelection.selectedPages = Array.from({ length: pageCount }, (item, index) => index + 1)
+  renderPdfPageSelection()
+}
+
+function clearPdfPages() {
+  state.pdfSelection.selectedPages = []
+  renderPdfPageSelection()
+}
+
+function updatePdfPageSelectionFromGrid(event) {
+  if (!event.target.matches('[data-pdf-page]')) return
+
+  state.pdfSelection.selectedPages = Array.from(els.pdfPageGrid.querySelectorAll('[data-pdf-page]:checked'))
+    .map((input) => Number(input.dataset.pdfPage))
+    .filter((pageNumber) => Number.isFinite(pageNumber))
+    .sort((left, right) => left - right)
+
+  renderPdfPageSelection()
+}
+
+function renderPdfPageSelection() {
+  if (!els.pdfPageSelectionBar || !els.pdfPageModal) return
+
+  const file = getCoursewareFile()
+  const hasPdf = Boolean(file && isPdfFile(file))
+
+  els.pdfPageSelectionBar.classList.toggle('hidden', !hasPdf)
+
+  if (hasPdf) {
+    const selectedCount = state.pdfSelection.selectedPages.length
+    const totalCount = state.pdfSelection.pageCount
+    const summary = state.pdfSelection.loading
+      ? `${file.name}：正在读取页面...`
+      : `${file.name}：已选 ${selectedCount}/${totalCount || '?'} 页${selectedCount ? `（${formatPageRanges(state.pdfSelection.selectedPages)}）` : ''}`
+
+    els.pdfPageSelectionText.textContent = summary
+    els.pdfPageSelectBtn.disabled = state.pdfSelection.loading
+  }
+
+  renderPdfPageModal()
+}
+
+function renderPdfPageModal() {
+  const selection = state.pdfSelection
+  els.pdfPageModal.classList.toggle('hidden', !selection.isOpen)
+
+  if (!selection.isOpen) return
+
+  els.pdfPageModalTitle.textContent = selection.fileName || '选择 PDF 页面'
+  els.pdfPageModalMeta.textContent = selection.loading
+    ? '正在读取 PDF...'
+    : (selection.error || `共 ${selection.pageCount} 页，已选 ${selection.selectedPages.length} 页`)
+
+  els.pdfPageSelectAllBtn.disabled = selection.loading || !selection.pageCount
+  els.pdfPageSelectNoneBtn.disabled = selection.loading || !selection.pageCount
+  els.pdfPageConfirmBtn.disabled = selection.loading || !selection.selectedPages.length
+
+  if (selection.loading) {
+    els.pdfPageGrid.innerHTML = '<div class="student-empty">正在读取 PDF 页面...</div>'
+    return
+  }
+
+  if (selection.error) {
+    els.pdfPageGrid.innerHTML = `<div class="student-empty">${escapeHtml(selection.error)}</div>`
+    return
+  }
+
+  const selectedPages = new Set(selection.selectedPages)
+  els.pdfPageGrid.innerHTML = Array.from({ length: selection.pageCount }, (item, index) => {
+    const pageNumber = index + 1
+    return `
+      <label class="pdf-page-option">
+        <input data-pdf-page="${pageNumber}" type="checkbox" ${selectedPages.has(pageNumber) ? 'checked' : ''} />
+        <span>第 ${pageNumber} 页</span>
+      </label>
+    `
+  }).join('')
+}
+
+function getSelectedPdfPages(file, pageCount) {
+  if (state.pdfSelection.fileKey === getFileKey(file)) {
+    return state.pdfSelection.selectedPages
+      .filter((pageNumber) => pageNumber >= 1 && pageNumber <= pageCount)
+      .sort((left, right) => left - right)
+  }
+
+  return Array.from({ length: pageCount }, (item, index) => index + 1)
+}
+
+function formatPageRanges(pages) {
+  const sortedPages = Array.from(new Set(pages)).sort((left, right) => left - right)
+  const ranges = []
+  let start = null
+  let end = null
+
+  sortedPages.forEach((pageNumber) => {
+    if (start === null) {
+      start = pageNumber
+      end = pageNumber
+      return
+    }
+
+    if (pageNumber === end + 1) {
+      end = pageNumber
+      return
+    }
+
+    ranges.push(start === end ? String(start) : `${start}-${end}`)
+    start = pageNumber
+    end = pageNumber
+  })
+
+  if (start !== null) ranges.push(start === end ? String(start) : `${start}-${end}`)
+  return ranges.join('、')
+}
+
 async function appendPdfPreviewData(formData, file, payload) {
   if (!window.pdfjsLib) {
     showToast('PDF 解析组件加载失败，将按普通 PDF 上传')
@@ -1581,14 +1835,22 @@ async function appendPdfPreviewData(formData, file, payload) {
 
   const arrayBuffer = await file.arrayBuffer()
   const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise
-  const maxPages = Math.min(pdf.numPages, 3)
+  const selectedPages = getSelectedPdfPages(file, pdf.numPages)
   const textParts = []
 
-  for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+  if (!selectedPages.length) {
+    throw new Error('请至少选择 1 页 PDF')
+  }
+
+  payload.selectedPdfPages = selectedPages
+
+  for (let index = 0; index < selectedPages.length; index += 1) {
+    const pageNumber = selectedPages[index]
+    els.generateBtn.textContent = `正在读取 PDF ${index + 1}/${selectedPages.length}`
     const page = await pdf.getPage(pageNumber)
     const textContent = await page.getTextContent().catch(() => null)
     if (textContent && Array.isArray(textContent.items)) {
-      textParts.push(textContent.items.map((item) => item.str || '').join(' '))
+      textParts.push(`第 ${pageNumber} 页：${textContent.items.map((item) => item.str || '').join(' ')}`)
     }
 
     const imageBlob = await renderPdfPageToImageBlob(page)
@@ -1603,7 +1865,7 @@ async function appendPdfPreviewData(formData, file, payload) {
     .trim()
 
   if (extractedText) {
-    payload.clientPdfText = extractedText.slice(0, 12000)
+    payload.clientPdfText = extractedText.slice(0, 30000)
   }
 }
 
@@ -1739,7 +2001,10 @@ function getCoursewareStatus(debug) {
 
   if (!debug.coursewareIsImage) {
     if (debug.coursewareVisionImageCount && debug.coursewareSentAsImage) {
-      return `${debug.coursewareName}（PDF 前 ${debug.coursewareVisionImageCount} 页已转图片发送，提取 ${debug.coursewareTextLength || 0} 个文字）`
+      const selectedPages = Array.isArray(debug.coursewareSelectedPdfPages) && debug.coursewareSelectedPdfPages.length
+        ? `第 ${formatPageRanges(debug.coursewareSelectedPdfPages)} 页`
+        : `${debug.coursewareVisionImageCount} 页`
+      return `${debug.coursewareName}（PDF ${selectedPages}已转图片发送，提取 ${debug.coursewareTextLength || 0} 个文字）`
     }
 
     if (debug.coursewareExtractionSource === 'pdf-ocr') {

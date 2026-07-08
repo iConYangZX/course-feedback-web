@@ -253,6 +253,11 @@
             </label>
           </div>
 
+          <div class="pdf-page-selection hidden" id="pdfPageSelectionBar">
+            <span id="pdfPageSelectionText">PDF 页面未选择</span>
+            <button class="secondary-button compact-button" id="pdfPageSelectBtn" type="button">选择页面</button>
+          </div>
+
           <label class="field">
             <span>补充课程内容</span>
             <textarea id="courseNoteInput" rows="4" placeholder="可选：写下本节课重点、作业、错题或老师补充要求"></textarea>
@@ -327,6 +332,27 @@
     </div>
 
     <div id="toast" class="toast" role="status"></div>
+    <div class="modal-backdrop hidden" id="pdfPageModal" role="dialog" aria-modal="true" aria-labelledby="pdfPageModalTitle">
+      <div class="pdf-page-dialog">
+        <div class="panel-heading compact">
+          <div>
+            <p class="eyebrow">PDF Pages</p>
+            <h1 id="pdfPageModalTitle">选择 PDF 页面</h1>
+          </div>
+          <button class="icon-close-button" id="pdfPageModalCloseBtn" type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="pdf-page-meta" id="pdfPageModalMeta">正在读取 PDF...</div>
+        <div class="pdf-page-toolbar">
+          <button class="secondary-button compact-button" id="pdfPageSelectAllBtn" type="button">全选</button>
+          <button class="secondary-button compact-button" id="pdfPageSelectNoneBtn" type="button">清空</button>
+        </div>
+        <div class="pdf-page-grid" id="pdfPageGrid"></div>
+        <div class="panel-actions">
+          <button class="secondary-button" id="pdfPageCancelBtn" type="button">取消上传</button>
+          <button class="primary-button" id="pdfPageConfirmBtn" type="button">确定</button>
+        </div>
+      </div>
+    </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script src="/app.js"></script>
   </body>
