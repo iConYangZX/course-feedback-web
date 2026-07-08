@@ -39,6 +39,7 @@
         <div class="mode-switch" role="tablist" aria-label="课程类型">
           <button class="mode-button active" data-mode="class" type="button">班课</button>
           <button class="mode-button" data-mode="oneOnOne" type="button">一对一</button>
+          <button class="mode-button" data-mode="rearrange" type="button">题卷重排</button>
           <button class="mode-button admin-entry hidden" data-mode="admin" type="button">账户</button>
         </div>
 
@@ -280,6 +281,47 @@
           </div>
           <div id="debugSummary" class="debug-summary hidden"></div>
           <div id="resultList" class="result-list"></div>
+        </section>
+
+        <section class="rearrange-panel hidden" id="rearrangePanel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Question Word Tool</p>
+              <h1>题卷重排</h1>
+            </div>
+            <span class="result-note" id="rearrangeStatus">等待上传文件</span>
+          </div>
+
+          <div class="rearrange-workbench">
+            <div class="rearrange-controls">
+              <label class="field">
+                <span>试卷标题</span>
+                <input id="rearrangeTitleInput" type="text" placeholder="例如：高一数学函数单元练习" />
+              </label>
+
+              <button class="upload-zone compact" id="rearrangeUploadBtn" type="button">
+                <span>上传 PDF / DOCX / PNG / JPG</span>
+              </button>
+              <input class="hidden" id="rearrangeFileInput" type="file" multiple accept=".pdf,.docx,.png,.jpg,.jpeg,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg" />
+              <div class="upload-hint">一次最多 3 个文件；每次先识别前 8 页，测试稳定后可以继续扩展。</div>
+              <div class="file-chip-list" id="rearrangeFileList"></div>
+
+              <div class="panel-actions stretch">
+                <button class="primary-button" id="recognizeQuestionsBtn" type="button">AI 识别题目</button>
+                <button class="secondary-button" id="exportQuestionsBtn" type="button">导出 Word</button>
+              </div>
+
+              <div class="student-empty" id="rearrangeEmpty">上传试卷后，AI 会识别题干、选项和图形说明。</div>
+              <div class="question-editor-list" id="questionEditorList"></div>
+            </div>
+
+            <div class="a4-preview-wrap">
+              <div class="a4-title">A4 预览</div>
+              <div class="a4-paper" id="questionPreviewPaper">
+                <div class="empty-paper">识别完成后在这里预览排版</div>
+              </div>
+            </div>
+          </div>
         </section>
       </main>
     </div>

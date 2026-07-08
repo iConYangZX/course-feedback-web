@@ -65,7 +65,7 @@ const DEFAULT_ACCOUNTS = [
 const usageState = readUsageState()
 const accountState = readAccountState()
 
-app.use(express.json({ limit: '1mb' }))
+app.use(express.json({ limit: '5mb' }))
 app.use(express.static(path.join(__dirname, 'public')))
 
 app.get('/api/health', (req, res) => {
@@ -297,6 +297,87 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
       usage: nextUsage,
       feedbacks: normalizeFeedbacks(parsed.feedbacks, payload.students, payload)
     })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({
+      error: getUserFacingError(error)
+    })
+  }
+})
+
+app.post('/api/rearrange/recognize', requireAccessMiddleware, upload.fields([
+  { name: 'rearrangePageImage', maxCount: 12 },
+  { name: 'sourceFile', maxCount: 3 }
+]), async (req, res) => {
+  try {
+    const session = req.accessSession
+    const usageClientId = getUsageClientId(session)
+    const usageInfo = getUsageInfoForSession(session)
+
+    if (!usageInfo.unlimited && usageInfo.remaining <= 0) {
+      res.status(429).json({
+        error: `今天的生成次数已用完。每日最多 ${usageInfo.limit} 次，请联系管理员或明天再试。`,
+        usage: usageInfo
+      })
+      return
+    }
+
+    const payload = parsePayload(req.body.payload)
+    const pageFiles = getUploadedFiles(req, 'rearrangePageImage')
+    const sourceFiles = getUploadedFiles(req, 'sourceFile')
+
+    if (!pageFiles.length && !sourceFiles.length) {
+      throw new Error('请先上传 PDF、图片或 Word 文件')
+    }
+
+    const aiConfig = getAIConfig()
+    const pages = pageFiles.map((file, index) => ({
+      pageIndex: index,
+      name: file.originalname || `page-${index + 1}.jpg`,
+      mime: getMimeType(file.originalname || 'page.jpg', file.mimetype || 'image/jpeg'),
+      dataUrl: `data:${getMimeType(file.originalname || 'page.jpg', file.mimetype || 'image/jpeg')};base64,${file.buffer.toString('base64')}`
+    }))
+    const docTexts = sourceFiles.map((file) => extractQuestionSourceText(file)).filter((item) => item.text)
+
+    let questions
+    if (!aiConfig.apiKey) {
+      questions = buildDemoQuestions(payload, docTexts)
+    } else {
+      const aiResponse = await requestQuestionRecognition(payload, pages, docTexts, aiConfig)
+      questions = parseQuestionRecognitionResponse(aiResponse, aiConfig.provider).questions
+    }
+
+    const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+
+    res.json({
+      provider: aiConfig.provider,
+      model: aiConfig.model,
+      usage: nextUsage,
+      questions: normalizeQuestions(questions)
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({
+      error: getUserFacingError(error)
+    })
+  }
+})
+
+app.post('/api/rearrange/export-word', requireAccessMiddleware, (req, res) => {
+  try {
+    const title = trim(req.body && req.body.title) || '题卷重排'
+    const questions = normalizeQuestions(req.body && req.body.questions)
+
+    if (!questions.length) {
+      throw new Error('没有可导出的题目')
+    }
+
+    const buffer = buildQuestionDocx(title, questions)
+    const fileName = encodeURIComponent(`${title}.docx`)
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${fileName}`)
+    res.send(buffer)
   } catch (error) {
     console.error(error)
     res.status(400).json({
@@ -1337,6 +1418,497 @@ function buildChatCompatibleUserContent(payload, courseware, options = {}) {
       }
     }))
   ]
+}
+
+async function requestQuestionRecognition(payload, pages, docTexts, aiConfig) {
+  if (aiConfig.provider === 'openai') {
+    return requestOpenAIQuestionRecognition(payload, pages, docTexts, aiConfig)
+  }
+
+  return requestChatQuestionRecognition(payload, pages, docTexts, aiConfig, {
+    providerLabel: aiConfig.provider === 'deepseek' ? 'DeepSeek' : 'AI'
+  })
+}
+
+async function requestOpenAIQuestionRecognition(payload, pages, docTexts, aiConfig) {
+  const content = buildQuestionRecognitionContent(payload, pages, docTexts, 'responses')
+  const body = {
+    model: aiConfig.model,
+    instructions: buildQuestionRecognitionSystemPrompt(),
+    input: [
+      {
+        role: 'user',
+        content
+      }
+    ],
+    text: {
+      format: {
+        type: 'json_schema',
+        name: 'question_rearrange_result',
+        strict: true,
+        schema: getQuestionRecognitionJsonSchema()
+      }
+    }
+  }
+
+  const response = await fetch(`${aiConfig.baseUrl}/responses`, withProxy({
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiConfig.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  }))
+  const text = await response.text()
+  const parsed = JSON.parse(text)
+  if (!response.ok) {
+    const message = parsed.error && parsed.error.message ? parsed.error.message : text
+    throw new Error(`AI 请求失败：${message}`)
+  }
+  return parsed
+}
+
+async function requestChatQuestionRecognition(payload, pages, docTexts, aiConfig, options = {}) {
+  const body = {
+    model: aiConfig.model,
+    messages: [
+      {
+        role: 'system',
+        content: buildQuestionRecognitionSystemPrompt()
+      },
+      {
+        role: 'user',
+        content: buildQuestionRecognitionContent(payload, pages, docTexts, 'chat')
+      }
+    ],
+    temperature: 0.1,
+    max_tokens: 8000,
+    stream: false,
+    response_format: {
+      type: 'json_object'
+    }
+  }
+
+  const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiConfig.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  }))
+  const text = await response.text()
+  const parsed = JSON.parse(text)
+  if (!response.ok) {
+    const message = parsed.error && parsed.error.message ? parsed.error.message : text
+    throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
+  }
+  return parsed
+}
+
+function buildQuestionRecognitionSystemPrompt() {
+  return [
+    '你是一名严谨的试卷题目结构化助手。',
+    '你要从老师上传的试卷页面或 Word 文本中识别题目，并整理成可重新排版的结构化 JSON。',
+    '必须尽量保留原题文字、数学符号、编号、选项顺序和题目含义。',
+    '如果页面中有图形、表格、函数图像、几何图或统计图，请在 figureNote 中用简短中文描述，不要编造图中没有的信息。',
+    '如果无法确定答案或解析，可以留空。',
+    '只返回 JSON，不要使用 Markdown，不要解释。'
+  ].join('\n')
+}
+
+function buildQuestionRecognitionContent(payload, pages, docTexts, target) {
+  const text = [
+    `试卷标题：${payload.title || '未命名试卷'}`,
+    `上传文件：${Array.isArray(payload.files) ? payload.files.map((file) => file.name).join('、') : '未填写'}`,
+    '',
+    '识别要求：',
+    '1. 将试卷拆分成独立题目。',
+    '2. 每道题返回 number、stemMarkdown、options、figureNote、answer、analysis。',
+    '3. 选择题选项放入 options 数组，每个选项保留 A. / B. / C. / D. 等标记。',
+    '4. 非选择题 options 为空数组。',
+    '5. stemMarkdown 可以包含简单 LaTeX 或普通数学符号，但不要添加题目里没有的内容。',
+    '6. 如果题目跨页，请合并成一道题。',
+    '',
+    'Word 文本内容：',
+    docTexts.length
+      ? docTexts.map((item) => `文件：${item.name}\n${item.text}`).join('\n\n---\n\n')
+      : '无',
+    '',
+    '请严格返回 JSON，格式为：',
+    '{"questions":[{"id":"q1","number":"1","stemMarkdown":"题干","options":["A. ...","B. ..."],"figureNote":"","answer":"","analysis":""}],"warnings":[]}'
+  ].join('\n')
+
+  if (target === 'responses') {
+    const content = [{ type: 'input_text', text }]
+    pages.forEach((page) => {
+      content.push({
+        type: 'input_image',
+        image_url: page.dataUrl,
+        detail: 'high'
+      })
+    })
+    return content
+  }
+
+  if (!pages.length) return text
+
+  return [
+    { type: 'text', text },
+    ...pages.map((page) => ({
+      type: 'image_url',
+      image_url: {
+        url: page.dataUrl
+      }
+    }))
+  ]
+}
+
+function getQuestionRecognitionJsonSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      questions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string' },
+            number: { type: 'string' },
+            stemMarkdown: { type: 'string' },
+            options: {
+              type: 'array',
+              items: { type: 'string' }
+            },
+            figureNote: { type: 'string' },
+            answer: { type: 'string' },
+            analysis: { type: 'string' }
+          },
+          required: ['id', 'number', 'stemMarkdown', 'options', 'figureNote', 'answer', 'analysis']
+        }
+      },
+      warnings: {
+        type: 'array',
+        items: { type: 'string' }
+      }
+    },
+    required: ['questions', 'warnings']
+  }
+}
+
+function parseQuestionRecognitionResponse(response, provider) {
+  if (provider === 'deepseek' || provider === 'custom') {
+    const content = response.choices && response.choices[0] && response.choices[0].message
+      ? response.choices[0].message.content
+      : ''
+    return parseJsonText(content)
+  }
+
+  if (response.output_text) {
+    return parseJsonText(response.output_text)
+  }
+
+  const output = Array.isArray(response.output) ? response.output : []
+  const text = output.flatMap((item) => Array.isArray(item.content) ? item.content : [])
+    .map((part) => part.text || '')
+    .filter(Boolean)
+    .join('\n')
+
+  return parseJsonText(text)
+}
+
+function extractQuestionSourceText(file) {
+  const name = file.originalname || 'source'
+  const mime = getMimeType(name, file.mimetype)
+
+  if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    return {
+      name,
+      text: truncateText(extractDocxText(file.buffer))
+    }
+  }
+
+  if (mime === 'text/plain' || mime === 'text/markdown') {
+    return {
+      name,
+      text: truncateText(file.buffer.toString('utf8'))
+    }
+  }
+
+  return {
+    name,
+    text: ''
+  }
+}
+
+function normalizeQuestions(questions) {
+  const list = Array.isArray(questions) ? questions : []
+  return list.map((question, index) => {
+    const item = question && typeof question === 'object' ? question : {}
+    const options = Array.isArray(item.options)
+      ? item.options.map((option) => trim(option)).filter(Boolean)
+      : []
+
+    return {
+      id: trim(item.id) || `q-${index + 1}`,
+      number: trim(item.number) || String(index + 1),
+      stemMarkdown: trim(item.stemMarkdown || item.stem),
+      options,
+      figureNote: trim(item.figureNote || item.figureDescription),
+      answer: trim(item.answer),
+      analysis: trim(item.analysis)
+    }
+  }).filter((question) => question.stemMarkdown || question.options.length || question.figureNote)
+}
+
+function buildDemoQuestions(payload, docTexts) {
+  const text = docTexts.map((item) => item.text).join('\n').trim()
+  if (text) {
+    return [{
+      id: 'demo-q1',
+      number: '1',
+      stemMarkdown: text.slice(0, 180),
+      options: [],
+      figureNote: '',
+      answer: '',
+      analysis: ''
+    }]
+  }
+
+  return [{
+    id: 'demo-q1',
+    number: '1',
+    stemMarkdown: `${payload.title || '本试卷'}示例题：请根据上传页面识别题干内容。`,
+    options: ['A. 选项一', 'B. 选项二', 'C. 选项三', 'D. 选项四'],
+    figureNote: '演示模式未调用 AI。',
+    answer: '',
+    analysis: ''
+  }]
+}
+
+function buildQuestionDocx(title, questions) {
+  const zip = new AdmZip()
+
+  zip.addFile('[Content_Types].xml', Buffer.from(buildDocxContentTypes(), 'utf8'))
+  zip.addFile('_rels/.rels', Buffer.from(buildDocxRootRels(), 'utf8'))
+  zip.addFile('word/_rels/document.xml.rels', Buffer.from(buildDocxDocumentRels(), 'utf8'))
+  zip.addFile('word/styles.xml', Buffer.from(buildQuestionStylesXml(), 'utf8'))
+  zip.addFile('word/document.xml', Buffer.from(buildQuestionDocumentXml(title, questions), 'utf8'))
+
+  return zip.toBuffer()
+}
+
+function buildQuestionDocumentXml(title, questions) {
+  const paragraphs = [
+    buildDocxParagraph(title || '题卷重排', {
+      style: 'Title',
+      align: 'center',
+      bold: true,
+      size: 32,
+      after: 260
+    })
+  ]
+
+  questions.forEach((question, index) => {
+    const number = trim(question.number) || String(index + 1)
+    const stemLines = splitDocxLines(question.stemMarkdown)
+    const firstStemLine = stemLines.shift() || ''
+
+    paragraphs.push(buildDocxParagraph(`${number}. ${firstStemLine}`.trim(), {
+      style: 'Question',
+      bold: true,
+      after: stemLines.length ? 80 : 120
+    }))
+
+    stemLines.forEach((line) => {
+      paragraphs.push(buildDocxParagraph(line, {
+        indent: 420,
+        after: 80
+      }))
+    })
+
+    ;(question.options || []).forEach((option) => {
+      paragraphs.push(buildDocxParagraph(cleanQuestionDocText(option), {
+        indent: 420,
+        after: 80
+      }))
+    })
+
+    if (question.figureNote) {
+      paragraphs.push(buildDocxParagraph(`图形说明：${cleanQuestionDocText(question.figureNote)}`, {
+        indent: 420,
+        color: '666666',
+        after: 80
+      }))
+    }
+
+    if (question.answer) {
+      paragraphs.push(buildDocxParagraph(`答案：${cleanQuestionDocText(question.answer)}`, {
+        indent: 420,
+        after: 80
+      }))
+    }
+
+    if (question.analysis) {
+      paragraphs.push(buildDocxParagraph(`解析：${cleanQuestionDocText(question.analysis)}`, {
+        indent: 420,
+        after: 80
+      }))
+    }
+
+    if (index < questions.length - 1) {
+      paragraphs.push(buildDocxParagraph('', { after: 120 }))
+    }
+  })
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${paragraphs.join('\n    ')}
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="720" w:footer="720" w:gutter="0"/>
+      <w:cols w:space="720"/>
+      <w:docGrid w:linePitch="312"/>
+    </w:sectPr>
+  </w:body>
+</w:document>`
+}
+
+function buildDocxParagraph(text, options = {}) {
+  const cleanText = cleanQuestionDocText(text)
+  const paragraphProperties = buildDocxParagraphProperties(options)
+
+  if (!cleanText) {
+    return `<w:p>${paragraphProperties}</w:p>`
+  }
+
+  return `<w:p>${paragraphProperties}<w:r>${buildDocxRunProperties(options)}<w:t xml:space="preserve">${escapeDocxXml(cleanText)}</w:t></w:r></w:p>`
+}
+
+function buildDocxParagraphProperties(options = {}) {
+  const props = []
+
+  if (options.style) props.push(`<w:pStyle w:val="${escapeDocxXml(options.style)}"/>`)
+  if (options.align) props.push(`<w:jc w:val="${escapeDocxXml(options.align)}"/>`)
+  if (options.indent) props.push(`<w:ind w:left="${Math.max(0, Number(options.indent) || 0)}"/>`)
+
+  const after = Number.isFinite(Number(options.after)) ? Number(options.after) : 120
+  props.push(`<w:spacing w:after="${Math.max(0, after)}" w:line="312" w:lineRule="auto"/>`)
+
+  return props.length ? `<w:pPr>${props.join('')}</w:pPr>` : ''
+}
+
+function buildDocxRunProperties(options = {}) {
+  const props = [
+    '<w:rFonts w:ascii="Arial" w:eastAsia="Microsoft YaHei" w:hAnsi="Arial" w:cs="Arial"/>'
+  ]
+  const size = Math.max(18, Number(options.size) || 22)
+
+  props.push(`<w:sz w:val="${size}"/>`)
+  props.push(`<w:szCs w:val="${size}"/>`)
+  if (options.bold) props.push('<w:b/><w:bCs/>')
+  if (options.color) props.push(`<w:color w:val="${escapeDocxXml(options.color)}"/>`)
+
+  return `<w:rPr>${props.join('')}</w:rPr>`
+}
+
+function splitDocxLines(text) {
+  return cleanQuestionDocText(text)
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function cleanQuestionDocText(text) {
+  return String(text || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/!\[[^\]]*]\([^)]+\)/g, '[图示]')
+    .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
+    .replace(/(\*\*|__|`)/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function escapeDocxXml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+}
+
+function buildDocxContentTypes() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`
+}
+
+function buildDocxRootRels() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`
+}
+
+function buildDocxDocumentRels() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`
+}
+
+function buildQuestionStylesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="Arial" w:eastAsia="Microsoft YaHei" w:hAnsi="Arial" w:cs="Arial"/>
+        <w:sz w:val="22"/>
+        <w:szCs w:val="22"/>
+      </w:rPr>
+    </w:rPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:pPr>
+      <w:spacing w:after="120" w:line="312" w:lineRule="auto"/>
+    </w:pPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Title">
+    <w:name w:val="Title"/>
+    <w:basedOn w:val="Normal"/>
+    <w:qFormat/>
+    <w:pPr>
+      <w:jc w:val="center"/>
+      <w:spacing w:after="260"/>
+    </w:pPr>
+    <w:rPr>
+      <w:b/>
+      <w:bCs/>
+      <w:sz w:val="32"/>
+      <w:szCs w:val="32"/>
+    </w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Question">
+    <w:name w:val="Question"/>
+    <w:basedOn w:val="Normal"/>
+    <w:qFormat/>
+    <w:rPr>
+      <w:b/>
+      <w:bCs/>
+    </w:rPr>
+  </w:style>
+</w:styles>`
 }
 
 function buildDebugSummary(payload, courseware) {

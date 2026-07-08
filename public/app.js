@@ -16,6 +16,8 @@ const performanceClasses = {
   表现良好: 'performance-good',
   表现较差: 'performance-poor'
 }
+const REARRANGE_MAX_FILES = 3
+const REARRANGE_MAX_PAGE_IMAGES = 8
 
 const state = {
   mode: 'class',
@@ -39,7 +41,13 @@ const state = {
     usage: null,
     user: null
   },
-  adminUsers: []
+  adminUsers: [],
+  rearrange: {
+    files: [],
+    questions: [],
+    busy: false,
+    status: '等待上传文件'
+  }
 }
 
 const els = {}
@@ -118,6 +126,17 @@ function bindElements() {
     resultNote: document.querySelector('#resultNote'),
     debugSummary: document.querySelector('#debugSummary'),
     resultList: document.querySelector('#resultList'),
+    rearrangePanel: document.querySelector('#rearrangePanel'),
+    rearrangeStatus: document.querySelector('#rearrangeStatus'),
+    rearrangeTitleInput: document.querySelector('#rearrangeTitleInput'),
+    rearrangeUploadBtn: document.querySelector('#rearrangeUploadBtn'),
+    rearrangeFileInput: document.querySelector('#rearrangeFileInput'),
+    rearrangeFileList: document.querySelector('#rearrangeFileList'),
+    recognizeQuestionsBtn: document.querySelector('#recognizeQuestionsBtn'),
+    exportQuestionsBtn: document.querySelector('#exportQuestionsBtn'),
+    rearrangeEmpty: document.querySelector('#rearrangeEmpty'),
+    questionEditorList: document.querySelector('#questionEditorList'),
+    questionPreviewPaper: document.querySelector('#questionPreviewPaper'),
     accountStatus: document.querySelector('#accountStatus'),
     usageStatus: document.querySelector('#usageStatus'),
     serverStatus: document.querySelector('#serverStatus'),
@@ -170,6 +189,14 @@ function bindEvents() {
   els.deleteOneProfileBtn.addEventListener('click', deleteSelectedOneProfile)
   els.generateBtn.addEventListener('click', generateFeedback)
   els.copyAllBtn.addEventListener('click', copyAllFeedbacks)
+  els.rearrangeUploadBtn.addEventListener('click', () => els.rearrangeFileInput.click())
+  els.rearrangeTitleInput.addEventListener('input', renderQuestionPreview)
+  els.rearrangeFileInput.addEventListener('change', (event) => {
+    setRearrangeFiles(event.target.files)
+  })
+  els.recognizeQuestionsBtn.addEventListener('click', recognizeQuestions)
+  els.exportQuestionsBtn.addEventListener('click', exportQuestionsToWord)
+  els.questionEditorList.addEventListener('input', updateQuestionFromEditor)
 
   els.classList.addEventListener('click', (event) => {
     const deleteButton = event.target.closest('[data-action="delete-class"]')
@@ -677,6 +704,7 @@ function render() {
   renderOneProfileSummary()
   renderStudentTable()
   renderResults()
+  renderRearrange()
   renderAccessState()
 }
 
@@ -693,9 +721,11 @@ function renderMode() {
     element.classList.toggle('hidden', state.mode !== 'oneOnOne')
   })
 
-  document.querySelector('#feedbackPanel').classList.toggle('hidden', state.mode === 'admin')
-  document.querySelector('#resultsPanel').classList.toggle('hidden', state.mode === 'admin')
+  const isToolMode = state.mode === 'admin' || state.mode === 'rearrange'
+  document.querySelector('#feedbackPanel').classList.toggle('hidden', isToolMode)
+  document.querySelector('#resultsPanel').classList.toggle('hidden', isToolMode)
   els.adminPanel.classList.toggle('hidden', state.mode !== 'admin')
+  els.rearrangePanel.classList.toggle('hidden', state.mode !== 'rearrange')
 
   if (state.mode === 'admin' && state.access.user && state.access.user.isAdmin) {
     renderAdminUsers()
@@ -848,6 +878,355 @@ function renderDebugSummary() {
       ? `<div class="debug-preview">课件文字预览：${escapeHtml(debug.coursewareTextPreview)}</div>`
       : ''
   ].join('')
+}
+
+function setRearrangeFiles(fileList) {
+  const files = Array.from(fileList || [])
+  if (!files.length) return
+
+  if (files.length > REARRANGE_MAX_FILES) {
+    showToast(`一次最多上传 ${REARRANGE_MAX_FILES} 个文件`)
+    return
+  }
+
+  const unsupported = files.find((file) => !isSupportedQuestionFile(file))
+  if (unsupported) {
+    showToast(`不支持 ${unsupported.name}，请上传 PDF、DOCX、PNG 或 JPG`)
+    return
+  }
+
+  state.rearrange.files = files
+  state.rearrange.questions = []
+  state.rearrange.status = `已选择 ${files.length} 个文件`
+  renderRearrange()
+}
+
+function renderRearrange() {
+  if (!els.rearrangePanel) return
+
+  els.rearrangeStatus.textContent = state.rearrange.status || '等待上传文件'
+  els.recognizeQuestionsBtn.disabled = state.rearrange.busy || !state.rearrange.files.length
+  els.exportQuestionsBtn.disabled = state.rearrange.busy || !state.rearrange.questions.length
+  els.recognizeQuestionsBtn.textContent = state.rearrange.busy ? '处理中...' : 'AI 识别题目'
+
+  els.rearrangeFileList.innerHTML = state.rearrange.files.length
+    ? state.rearrange.files.map((file) => `<span class="file-chip">${escapeHtml(file.name)}</span>`).join('')
+    : '<span class="file-chip">未选择文件</span>'
+
+  renderQuestionEditor()
+  renderQuestionPreview()
+}
+
+function renderQuestionEditor() {
+  if (!state.rearrange.questions.length) {
+    els.rearrangeEmpty.classList.remove('hidden')
+    els.questionEditorList.innerHTML = ''
+    return
+  }
+
+  els.rearrangeEmpty.classList.add('hidden')
+  els.questionEditorList.innerHTML = state.rearrange.questions.map((question, index) => `
+    <article class="question-editor-card" data-question-index="${index}">
+      <div class="question-editor-head">
+        <label class="field">
+          <span>题号</span>
+          <input data-question-field="number" type="text" value="${escapeHtml(question.number || String(index + 1))}" />
+        </label>
+        <label class="field">
+          <span>图形说明</span>
+          <input data-question-field="figureNote" type="text" value="${escapeHtml(question.figureNote || '')}" placeholder="可选：例如函数图像、几何图形等" />
+        </label>
+      </div>
+      <label class="field">
+        <span>题干</span>
+        <textarea data-question-field="stemMarkdown" rows="5">${escapeHtml(question.stemMarkdown || '')}</textarea>
+      </label>
+      <label class="field">
+        <span>选项（每行一个）</span>
+        <textarea data-question-field="options" rows="4">${escapeHtml((question.options || []).join('\n'))}</textarea>
+      </label>
+    </article>
+  `).join('')
+}
+
+function renderQuestionPreview() {
+  const title = els.rearrangeTitleInput.value.trim() || '未命名试卷'
+
+  if (!state.rearrange.questions.length) {
+    els.questionPreviewPaper.innerHTML = '<div class="empty-paper">识别完成后在这里预览排版</div>'
+    return
+  }
+
+  els.questionPreviewPaper.innerHTML = [
+    `<h2 class="preview-title">${escapeHtml(title)}</h2>`,
+    ...state.rearrange.questions.map((question, index) => `
+      <article class="preview-question">
+        <div class="preview-question-title">${escapeHtml(question.number || String(index + 1))}. ${escapeHtml(question.stemMarkdown || '')}</div>
+        ${Array.isArray(question.options) && question.options.length ? `
+          <div class="preview-options">
+            ${question.options.map((option) => `<div>${escapeHtml(option)}</div>`).join('')}
+          </div>
+        ` : ''}
+        ${question.figureNote ? `<div class="preview-note">图形说明：${escapeHtml(question.figureNote)}</div>` : ''}
+      </article>
+    `)
+  ].join('')
+}
+
+function updateQuestionFromEditor(event) {
+  const field = event.target.dataset.questionField
+  if (!field) return
+
+  const card = event.target.closest('[data-question-index]')
+  if (!card) return
+
+  const index = Number(card.dataset.questionIndex)
+  const question = state.rearrange.questions[index]
+  if (!question) return
+
+  if (field === 'options') {
+    question.options = event.target.value
+      .split(/\n+/)
+      .map((option) => option.trim())
+      .filter(Boolean)
+  } else {
+    question[field] = event.target.value
+  }
+
+  renderQuestionPreview()
+}
+
+async function recognizeQuestions() {
+  if (!state.rearrange.files.length) {
+    showToast('请先上传试卷文件')
+    return
+  }
+
+  setRearrangeBusy(true, '正在准备文件...')
+
+  try {
+    const formData = await buildQuestionRecognizeFormData()
+    setRearrangeBusy(true, 'AI 正在识别题目...')
+
+    const response = await fetch('/api/rearrange/recognize', {
+      method: 'POST',
+      body: formData
+    })
+    const data = await response.json()
+
+    if (response.status === 401) {
+      updateAccessState({ authenticated: false })
+      renderAccessState()
+      throw new Error(data.error || '请先登录账号')
+    }
+
+    if (response.status === 429) {
+      updateAccessState({ usage: data.usage || state.access.usage })
+      renderAccessState()
+      throw new Error(data.error || '今天的生成次数已用完')
+    }
+
+    if (!response.ok || data.error) throw new Error(data.error || '题目识别失败')
+
+    if (data.usage) {
+      updateAccessState({ usage: data.usage })
+      renderAccessState()
+    }
+
+    state.rearrange.questions = Array.isArray(data.questions)
+      ? data.questions.map(normalizeQuestion)
+      : []
+    state.rearrange.status = state.rearrange.questions.length
+      ? `已识别 ${state.rearrange.questions.length} 道题`
+      : '没有识别到题目，请换更清晰的文件试试'
+    renderRearrange()
+    showToast('题目识别完成')
+  } catch (error) {
+    state.rearrange.status = error.message || '题目识别失败'
+    showToast(error.message || '题目识别失败')
+  } finally {
+    setRearrangeBusy(false)
+  }
+}
+
+async function buildQuestionRecognizeFormData() {
+  const formData = new FormData()
+  const payload = {
+    title: els.rearrangeTitleInput.value.trim() || '未命名试卷',
+    files: state.rearrange.files.map((file) => ({
+      name: file.name,
+      type: file.type || getFileTypeFromName(file.name),
+      size: file.size
+    }))
+  }
+  let pageCount = 0
+
+  for (const file of state.rearrange.files) {
+    if (isPdfFile(file)) {
+      const count = await appendPdfQuestionPages(formData, file, pageCount)
+      pageCount += count
+    } else if (pageCount < REARRANGE_MAX_PAGE_IMAGES && (file.type.startsWith('image/') || /\.(png|jpe?g)$/i.test(file.name))) {
+      await appendImageQuestionPage(formData, file, pageCount)
+      pageCount += 1
+    } else {
+      formData.append('sourceFile', file, file.name)
+    }
+  }
+
+  payload.pageCount = pageCount
+  formData.append('payload', JSON.stringify(payload))
+  return formData
+}
+
+async function appendPdfQuestionPages(formData, file, startIndex) {
+  if (!window.pdfjsLib) throw new Error('PDF 解析组件加载失败，请刷新页面重试')
+
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+  const remaining = Math.max(0, REARRANGE_MAX_PAGE_IMAGES - startIndex)
+  const pageTotal = Math.min(pdf.numPages, remaining)
+
+  if (!pageTotal) return 0
+
+  for (let pageNumber = 1; pageNumber <= pageTotal; pageNumber += 1) {
+    state.rearrange.status = `正在读取 PDF 第 ${pageNumber}/${pageTotal} 页`
+    renderRearrange()
+    const page = await pdf.getPage(pageNumber)
+    const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1800, quality: 0.78 })
+    formData.append('rearrangePageImage', blob, `${file.name}-page-${startIndex + pageNumber}.jpg`)
+  }
+
+  return pageTotal
+}
+
+async function appendImageQuestionPage(formData, file, pageIndex) {
+  state.rearrange.status = `正在压缩图片：${file.name}`
+  renderRearrange()
+  const blob = await imageFileToJpegBlob(file)
+  formData.append('rearrangePageImage', blob, `${file.name}-page-${pageIndex + 1}.jpg`)
+}
+
+async function imageFileToJpegBlob(file) {
+  const image = await loadImageFromUrl(URL.createObjectURL(file))
+  const scale = Math.min(1, 1800 / Math.max(image.naturalWidth, image.naturalHeight, 1))
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  return canvasToBlob(canvas, 'image/jpeg', 0.8)
+}
+
+function loadImageFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => {
+      URL.revokeObjectURL(url)
+      resolve(image)
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('图片加载失败'))
+    }
+    image.src = url
+  })
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), type, quality)
+  })
+}
+
+function setRearrangeBusy(isBusy, status) {
+  state.rearrange.busy = isBusy
+  if (status) state.rearrange.status = status
+  renderRearrange()
+}
+
+async function exportQuestionsToWord() {
+  if (!state.rearrange.questions.length) {
+    showToast('还没有可导出的题目')
+    return
+  }
+
+  setRearrangeBusy(true, '正在生成 Word...')
+
+  try {
+    const response = await fetch('/api/rearrange/export-word', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title: els.rearrangeTitleInput.value.trim() || '未命名试卷',
+        questions: state.rearrange.questions
+      })
+    })
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.error || '导出 Word 失败')
+    }
+
+    const blob = await response.blob()
+    downloadBlob(blob, `${els.rearrangeTitleInput.value.trim() || '题卷重排'}.docx`)
+    state.rearrange.status = 'Word 已导出'
+    showToast('Word 已导出')
+  } catch (error) {
+    state.rearrange.status = error.message || '导出 Word 失败'
+    showToast(error.message || '导出 Word 失败')
+  } finally {
+    setRearrangeBusy(false)
+  }
+}
+
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+function normalizeQuestion(question, index = 0) {
+  const item = question && typeof question === 'object' ? question : {}
+  return {
+    id: item.id || createId('question'),
+    number: String(item.number || index + 1),
+    stemMarkdown: String(item.stemMarkdown || item.stem || '').trim(),
+    options: Array.isArray(item.options)
+      ? item.options.map((option) => String(option || '').trim()).filter(Boolean)
+      : [],
+    figureNote: String(item.figureNote || item.figureDescription || '').trim(),
+    answer: String(item.answer || '').trim(),
+    analysis: String(item.analysis || '').trim()
+  }
+}
+
+function isSupportedQuestionFile(file) {
+  const lowerName = String(file.name || '').toLowerCase()
+  return file.type.startsWith('image/')
+    || lowerName.endsWith('.pdf')
+    || lowerName.endsWith('.docx')
+    || lowerName.endsWith('.png')
+    || lowerName.endsWith('.jpg')
+    || lowerName.endsWith('.jpeg')
+}
+
+function getFileTypeFromName(name) {
+  const lowerName = String(name || '').toLowerCase()
+  if (lowerName.endsWith('.pdf')) return 'application/pdf'
+  if (lowerName.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  if (lowerName.endsWith('.png')) return 'image/png'
+  if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg'
+  return 'application/octet-stream'
 }
 
 function resetClassForm() {
@@ -1228,9 +1607,12 @@ async function appendPdfPreviewData(formData, file, payload) {
   }
 }
 
-async function renderPdfPageToImageBlob(page) {
+async function renderPdfPageToImageBlob(page, options = {}) {
   const baseViewport = page.getViewport({ scale: 1 })
-  const scale = Math.min(1.8, 1400 / Math.max(baseViewport.width, 1))
+  const maxScale = options.maxScale || 1.8
+  const maxEdge = options.maxEdge || 1400
+  const quality = options.quality || 0.82
+  const scale = Math.min(maxScale, maxEdge / Math.max(baseViewport.width, 1))
   const viewport = page.getViewport({ scale })
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
@@ -1245,9 +1627,7 @@ async function renderPdfPageToImageBlob(page) {
     viewport
   }).promise
 
-  return new Promise((resolve) => {
-    canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.82)
-  })
+  return canvasToBlob(canvas, 'image/jpeg', quality)
 }
 
 function copyAllFeedbacks() {
