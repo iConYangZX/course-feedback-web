@@ -36,8 +36,10 @@ const state = {
     accessRequired: false,
     authenticated: true,
     dailyLimit: 10,
-    usage: null
-  }
+    usage: null,
+    user: null
+  },
+  adminUsers: []
 }
 
 const els = {}
@@ -48,6 +50,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadOneProfiles()
   bindEvents()
   await checkAccessStatus()
+  if (state.access.user && state.access.user.isAdmin) loadAdminUsers()
   checkServer()
   if (!state.access.publicMode) loadAIConfig()
   resetClassForm()
@@ -61,10 +64,19 @@ function bindElements() {
   Object.assign(els, {
     appShell: document.querySelector('#app'),
     accessGate: document.querySelector('#accessGate'),
-    accessCodeInput: document.querySelector('#accessCodeInput'),
+    loginUsernameInput: document.querySelector('#loginUsernameInput'),
+    loginPasswordInput: document.querySelector('#loginPasswordInput'),
     accessLoginBtn: document.querySelector('#accessLoginBtn'),
     accessMessage: document.querySelector('#accessMessage'),
     modeButtons: document.querySelectorAll('.mode-button'),
+    adminEntry: document.querySelector('.admin-entry'),
+    adminPanel: document.querySelector('#adminPanel'),
+    refreshUsersBtn: document.querySelector('#refreshUsersBtn'),
+    createUserBtn: document.querySelector('#createUserBtn'),
+    newAccountUsernameInput: document.querySelector('#newAccountUsernameInput'),
+    newAccountPasswordInput: document.querySelector('#newAccountPasswordInput'),
+    newAccountLimitInput: document.querySelector('#newAccountLimitInput'),
+    adminUserList: document.querySelector('#adminUserList'),
     configPanel: document.querySelector('#configPanel'),
     configProviderSelect: document.querySelector('#configProviderSelect'),
     configModelInput: document.querySelector('#configModelInput'),
@@ -106,17 +118,26 @@ function bindElements() {
     resultNote: document.querySelector('#resultNote'),
     debugSummary: document.querySelector('#debugSummary'),
     resultList: document.querySelector('#resultList'),
+    accountStatus: document.querySelector('#accountStatus'),
     usageStatus: document.querySelector('#usageStatus'),
     serverStatus: document.querySelector('#serverStatus'),
+    logoutBtn: document.querySelector('#logoutBtn'),
     toast: document.querySelector('#toast')
   })
 }
 
 function bindEvents() {
   els.accessLoginBtn.addEventListener('click', loginWithAccessCode)
-  els.accessCodeInput.addEventListener('keydown', (event) => {
+  els.loginPasswordInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') loginWithAccessCode()
   })
+  els.loginUsernameInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') els.loginPasswordInput.focus()
+  })
+  els.logoutBtn.addEventListener('click', logout)
+  els.refreshUsersBtn.addEventListener('click', loadAdminUsers)
+  els.createUserBtn.addEventListener('click', createAdminUser)
+  els.adminUserList.addEventListener('click', handleAdminUserAction)
 
   els.modeButtons.forEach((button) => {
     button.addEventListener('click', () => {
@@ -230,19 +251,42 @@ function updateAccessState(data = {}) {
     state.access.dailyLimit = Number(data.dailyLimit)
   }
   if ('usage' in data) state.access.usage = data.usage || null
+  if ('user' in data) state.access.user = data.user || null
 }
 
 function renderAccessState() {
   const locked = state.access.accessRequired && !state.access.authenticated
+  const isAdmin = Boolean(state.access.user && state.access.user.isAdmin)
 
   els.accessGate.classList.toggle('hidden', !locked)
   els.appShell.classList.toggle('locked', locked)
   els.configPanel.classList.toggle('hidden', state.access.publicMode)
+  els.adminEntry.classList.toggle('hidden', !isAdmin)
+  els.logoutBtn.classList.toggle('hidden', !state.access.authenticated || locked)
+  renderAccountStatus()
   renderUsageStatus()
 
-  if (locked) {
-    window.setTimeout(() => els.accessCodeInput.focus(), 50)
+  if (!isAdmin && state.mode === 'admin') {
+    state.mode = 'class'
+    render()
   }
+
+  if (locked) {
+    window.setTimeout(() => els.loginUsernameInput.focus(), 50)
+  }
+}
+
+function renderAccountStatus() {
+  if (!state.access.authenticated || !state.access.user) {
+    els.accountStatus.classList.add('hidden')
+    els.accountStatus.textContent = ''
+    return
+  }
+
+  els.accountStatus.classList.remove('hidden')
+  els.accountStatus.textContent = state.access.user.isAdmin
+    ? `${state.access.user.username} · 管理员`
+    : `${state.access.user.username} · 普通用户`
 }
 
 function renderUsageStatus() {
@@ -253,8 +297,15 @@ function renderUsageStatus() {
   }
 
   const usage = state.access.usage
-  const limit = Number(usage.limit || state.access.dailyLimit || 10)
   const used = Number(usage.used || 0)
+  if (usage.unlimited) {
+    els.usageStatus.classList.remove('hidden')
+    els.usageStatus.classList.remove('exhausted')
+    els.usageStatus.textContent = `今日已生成 ${used} 次 · 不限次数`
+    return
+  }
+
+  const limit = Number(usage.limit || state.access.dailyLimit || 10)
   const remaining = Math.max(0, Number(usage.remaining ?? (limit - used)))
 
   els.usageStatus.classList.remove('hidden')
@@ -267,10 +318,11 @@ function showAccessMessage(message) {
 }
 
 async function loginWithAccessCode() {
-  const accessCode = els.accessCodeInput.value.trim()
+  const username = els.loginUsernameInput.value.trim()
+  const password = els.loginPasswordInput.value.trim()
 
-  if (!accessCode) {
-    showAccessMessage('请先输入邀请码')
+  if (!username || !password) {
+    showAccessMessage('请先输入账号和密码')
     return
   }
 
@@ -283,7 +335,7 @@ async function loginWithAccessCode() {
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ accessCode })
+      body: JSON.stringify({ username, password })
     })
     const data = await response.json()
 
@@ -294,20 +346,210 @@ async function loginWithAccessCode() {
       accessRequired: data.accessRequired ?? state.access.accessRequired,
       authenticated: true,
       dailyLimit: data.dailyLimit,
-      usage: data.usage
+      usage: data.usage,
+      user: data.user
     })
-    els.accessCodeInput.value = ''
+    els.loginPasswordInput.value = ''
     showAccessMessage('')
     renderAccessState()
+    if (state.access.user && state.access.user.isAdmin) loadAdminUsers()
     checkServer()
     showToast('已进入系统')
   } catch (error) {
     state.access.authenticated = false
     renderAccessState()
-    showAccessMessage(error.message || '邀请码验证失败')
+    showAccessMessage(error.message || '登录失败')
   } finally {
     els.accessLoginBtn.disabled = false
   }
+}
+
+async function logout() {
+  try {
+    await fetch('/api/access/logout', { method: 'POST' })
+  } catch (error) {
+    // Ignore network errors; the next status check will correct the UI.
+  }
+
+  state.access.authenticated = false
+  state.access.user = null
+  state.access.usage = null
+  state.mode = 'class'
+  render()
+}
+
+async function loadAdminUsers() {
+  if (!state.access.user || !state.access.user.isAdmin) return
+
+  try {
+    const response = await fetch('/api/admin/users')
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '读取账户失败')
+
+    state.adminUsers = Array.isArray(data.users) ? data.users : []
+    renderAdminUsers()
+  } catch (error) {
+    showToast(error.message || '读取账户失败')
+  }
+}
+
+async function createAdminUser() {
+  const payload = {
+    username: els.newAccountUsernameInput.value.trim(),
+    password: els.newAccountPasswordInput.value.trim(),
+    dailyLimit: Number(els.newAccountLimitInput.value || 10),
+    role: 'user',
+    active: true
+  }
+
+  if (!payload.username || !payload.password) {
+    showToast('请填写新账号和初始密码')
+    return
+  }
+
+  try {
+    els.createUserBtn.disabled = true
+    const response = await fetch('/api/admin/users', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '创建账号失败')
+
+    els.newAccountUsernameInput.value = ''
+    els.newAccountPasswordInput.value = ''
+    els.newAccountLimitInput.value = '10'
+    showToast('账号已创建')
+    await loadAdminUsers()
+  } catch (error) {
+    showToast(error.message || '创建账号失败')
+  } finally {
+    els.createUserBtn.disabled = false
+  }
+}
+
+async function handleAdminUserAction(event) {
+  const button = event.target.closest('[data-admin-action]')
+  if (!button) return
+
+  const userId = button.dataset.id
+  const action = button.dataset.adminAction
+  const row = button.closest('.admin-user-card')
+  const user = state.adminUsers.find((item) => item.id === userId)
+  if (!row || !user) return
+
+  if (action === 'save-user') {
+    await saveAdminUser(row, user)
+  }
+
+  if (action === 'reset-usage') {
+    await resetAdminUserUsage(user)
+  }
+}
+
+async function saveAdminUser(row, user) {
+  const payload = {
+    active: row.querySelector('[data-admin-field="active"]').checked
+  }
+
+  const limitInput = row.querySelector('[data-admin-field="dailyLimit"]')
+  const passwordInput = row.querySelector('[data-admin-field="password"]')
+
+  if (!user.isAdmin) {
+    payload.dailyLimit = Number(limitInput.value || 10)
+  }
+
+  if (passwordInput.value.trim()) {
+    payload.password = passwordInput.value.trim()
+  }
+
+  try {
+    const response = await fetch(`/api/admin/users/${encodeURIComponent(user.id)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '保存账号失败')
+
+    showToast('账号已保存')
+    await loadAdminUsers()
+  } catch (error) {
+    showToast(error.message || '保存账号失败')
+  }
+}
+
+async function resetAdminUserUsage(user) {
+  const confirmed = window.confirm(`确定重置 ${user.username} 今日使用次数吗？`)
+  if (!confirmed) return
+
+  try {
+    const response = await fetch(`/api/admin/users/${encodeURIComponent(user.id)}/reset-usage`, {
+      method: 'POST'
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '重置次数失败')
+
+    showToast('今日次数已重置')
+    await loadAdminUsers()
+  } catch (error) {
+    showToast(error.message || '重置次数失败')
+  }
+}
+
+function renderAdminUsers() {
+  if (!els.adminUserList) return
+
+  if (!state.adminUsers.length) {
+    els.adminUserList.innerHTML = '<div class="student-empty">暂无账户数据，点击刷新试试。</div>'
+    return
+  }
+
+  els.adminUserList.innerHTML = state.adminUsers.map((user) => {
+    const usage = user.usage || {}
+    const usageText = usage.unlimited
+      ? `今日已用 ${usage.used || 0} 次 / 不限次数`
+      : `今日已用 ${usage.used || 0} 次，剩余 ${usage.remaining || 0} / ${usage.limit || user.dailyLimit || 10} 次`
+    const roleText = user.isAdmin ? '管理员' : '普通用户'
+    const statusText = user.active ? '启用中' : '已停用'
+
+    return `
+      <article class="admin-user-card">
+        <div class="admin-user-head">
+          <div>
+            <div class="admin-user-name">${escapeHtml(user.username)}</div>
+            <div class="admin-user-meta">${roleText} · ${statusText} · ${escapeHtml(usageText)}</div>
+          </div>
+          <button class="secondary-button" data-admin-action="reset-usage" data-id="${escapeHtml(user.id)}" type="button">重置今日次数</button>
+        </div>
+        <div class="form-grid three admin-user-controls">
+          <label class="field checkbox-field">
+            <span>账号状态</span>
+            <label class="inline-check">
+              <input data-admin-field="active" type="checkbox" ${user.active ? 'checked' : ''} />
+              启用
+            </label>
+          </label>
+          <label class="field">
+            <span>每日次数</span>
+            <input data-admin-field="dailyLimit" type="number" min="1" value="${user.dailyLimit || ''}" ${user.isAdmin ? 'disabled placeholder="不限"' : ''} />
+          </label>
+          <label class="field">
+            <span>重设密码</span>
+            <input data-admin-field="password" type="text" placeholder="留空则不修改" />
+          </label>
+        </div>
+        <div class="panel-actions">
+          <button class="primary-button" data-admin-action="save-user" data-id="${escapeHtml(user.id)}" type="button">保存账号</button>
+        </div>
+      </article>
+    `
+  }).join('')
 }
 
 async function checkServer() {
@@ -450,6 +692,15 @@ function renderMode() {
   document.querySelectorAll('.one-only').forEach((element) => {
     element.classList.toggle('hidden', state.mode !== 'oneOnOne')
   })
+
+  document.querySelector('#feedbackPanel').classList.toggle('hidden', state.mode === 'admin')
+  document.querySelector('#resultsPanel').classList.toggle('hidden', state.mode === 'admin')
+  els.adminPanel.classList.toggle('hidden', state.mode !== 'admin')
+
+  if (state.mode === 'admin' && state.access.user && state.access.user.isAdmin) {
+    renderAdminUsers()
+    if (!state.adminUsers.length) loadAdminUsers()
+  }
 }
 
 function renderClassList() {
@@ -834,8 +1085,8 @@ async function generateFeedback() {
     if (response.status === 401) {
       updateAccessState({ authenticated: false })
       renderAccessState()
-      showAccessMessage(data.error || '请先输入邀请码')
-      throw new Error(data.error || '请先输入邀请码')
+      showAccessMessage(data.error || '请先登录账号')
+      throw new Error(data.error || '请先登录账号')
     }
 
     if (response.status === 429) {

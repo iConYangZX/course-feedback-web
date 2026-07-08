@@ -147,6 +147,10 @@ button:disabled {
   background: #ffffff;
 }
 
+.mode-switch:has(.admin-entry:not(.hidden)) {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .mode-button {
   height: 42px;
   border: 0;
@@ -283,6 +287,7 @@ button:disabled {
 }
 
 .usage-status,
+.account-status,
 .server-status {
   padding: 12px;
   border: 1px solid var(--line);
@@ -291,6 +296,22 @@ button:disabled {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.4;
+}
+
+.account-status {
+  background: #ffffff;
+  color: var(--ink);
+  font-weight: 850;
+}
+
+.status-logout {
+  min-height: 38px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #40535a;
+  font-size: 13px;
+  font-weight: 850;
 }
 
 .usage-status {
@@ -323,6 +344,7 @@ button:disabled {
 .setup-panel,
 .feedback-panel,
 .results-panel,
+.admin-panel,
 .config-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -333,6 +355,7 @@ button:disabled {
 .setup-panel,
 .feedback-panel,
 .results-panel,
+.admin-panel,
 .config-panel {
   padding: 24px;
 }
@@ -390,6 +413,15 @@ h1 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.form-grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.form-grid.four {
+  grid-template-columns: 1fr 1fr 130px auto;
+  align-items: end;
+}
+
 .field {
   display: grid;
   gap: 8px;
@@ -400,6 +432,20 @@ h1 {
   color: #586966;
   font-size: 13px;
   font-weight: 800;
+}
+
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  color: #40535a;
+  font-weight: 800;
+}
+
+.inline-check input {
+  width: 18px;
+  height: 18px;
 }
 
 input,
@@ -523,6 +569,55 @@ textarea:focus {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.admin-create {
+  margin-bottom: 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7faf8;
+}
+
+.admin-create .field,
+.admin-create .primary-button {
+  margin-bottom: 0;
+}
+
+.admin-user-list {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-user-card {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfc;
+}
+
+.admin-user-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.admin-user-name {
+  font-size: 16px;
+  font-weight: 850;
+}
+
+.admin-user-meta {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.admin-user-controls {
+  align-items: end;
 }
 
 .student-toolbar {
@@ -696,6 +791,8 @@ textarea:focus {
   }
 
   .form-grid.two,
+  .form-grid.three,
+  .form-grid.four,
   .student-row {
     grid-template-columns: 1fr;
   }

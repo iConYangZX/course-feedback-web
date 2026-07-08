@@ -10,12 +10,16 @@
     <section id="accessGate" class="access-gate hidden" aria-live="polite">
       <div class="access-panel">
         <div class="brand-mark">课</div>
-        <p class="eyebrow">Access</p>
-        <h1>输入邀请码</h1>
-        <p class="access-copy">请输入老师提供的邀请码后进入课程反馈系统。</p>
+        <p class="eyebrow">Account</p>
+        <h1>账号登录</h1>
+        <p class="access-copy">请输入管理员提供的账号和密码后进入课程反馈系统。</p>
         <label class="field">
-          <span>邀请码</span>
-          <input id="accessCodeInput" type="password" placeholder="请输入邀请码" autocomplete="off" />
+          <span>账号</span>
+          <input id="loginUsernameInput" type="text" placeholder="请输入账号" autocomplete="username" />
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="loginPasswordInput" type="password" placeholder="请输入密码" autocomplete="current-password" />
         </label>
         <button class="primary-button" id="accessLoginBtn" type="button">进入系统</button>
         <div id="accessMessage" class="access-message"></div>
@@ -35,6 +39,7 @@
         <div class="mode-switch" role="tablist" aria-label="课程类型">
           <button class="mode-button active" data-mode="class" type="button">班课</button>
           <button class="mode-button" data-mode="oneOnOne" type="button">一对一</button>
+          <button class="mode-button admin-entry hidden" data-mode="admin" type="button">账户</button>
         </div>
 
         <section class="sidebar-section class-only">
@@ -54,12 +59,44 @@
         </section>
 
         <div class="status-stack">
+          <div class="account-status hidden" id="accountStatus"></div>
           <div class="usage-status hidden" id="usageStatus"></div>
           <div class="server-status" id="serverStatus">正在连接后端...</div>
+          <button class="status-logout hidden" id="logoutBtn" type="button">退出登录</button>
         </div>
       </aside>
 
       <main class="workspace">
+        <section class="admin-panel hidden" id="adminPanel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Admin</p>
+              <h1>账户管理</h1>
+            </div>
+            <button class="secondary-button" id="refreshUsersBtn" type="button">刷新</button>
+          </div>
+
+          <div class="admin-create">
+            <div class="form-grid four">
+              <label class="field">
+                <span>新账号</span>
+                <input id="newAccountUsernameInput" type="text" placeholder="例如：student01" />
+              </label>
+              <label class="field">
+                <span>初始密码</span>
+                <input id="newAccountPasswordInput" type="text" placeholder="至少 6 位" />
+              </label>
+              <label class="field">
+                <span>每日次数</span>
+                <input id="newAccountLimitInput" type="number" min="1" value="10" />
+              </label>
+              <button class="primary-button" id="createUserBtn" type="button">创建账号</button>
+            </div>
+          </div>
+
+          <div class="admin-user-list" id="adminUserList"></div>
+        </section>
+
         <section class="config-panel" id="configPanel">
           <div class="panel-heading">
             <div>

@@ -25,6 +25,7 @@ const DEFAULT_PROVIDER = 'openai'
 const ENV_PATH = path.join(__dirname, '.env')
 const DATA_DIR = path.join(__dirname, 'data')
 const USAGE_PATH = path.join(DATA_DIR, 'usage.json')
+const ACCOUNTS_PATH = path.join(DATA_DIR, 'accounts.json')
 const OCR_BINARY_PATH = path.join(__dirname, 'scripts', 'ocr_image')
 const OCR_SCRIPT_PATH = path.join(__dirname, 'scripts', 'ocr_image.swift')
 const PDFTOPPM_PATHS = [
@@ -41,7 +42,28 @@ const ACCESS_CODE = trim(process.env.ACCESS_CODE)
 const DAILY_LIMIT = parseDailyLimit(process.env.DAILY_LIMIT)
 const SESSION_COOKIE = 'course_feedback_session'
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
+const DEFAULT_ACCOUNTS = [
+  {
+    id: 'admin-iconyang',
+    username: 'iConYang',
+    role: 'admin',
+    active: true,
+    dailyLimit: null,
+    passwordSalt: 'b8c96bc65748fd9c492407d8cc8b22f4',
+    passwordHash: '5f759b01dd37107af762b34634103bdb7673b6feccca4ebef2554e5653c09ec9'
+  },
+  {
+    id: 'user-daijienuo',
+    username: 'daijienuo',
+    role: 'user',
+    active: true,
+    dailyLimit: DAILY_LIMIT,
+    passwordSalt: 'c3ec09b2c243d19cf8950b6a2ca5fd69',
+    passwordHash: '3766097707db5944e26b203f98e804fa47b36fd27cfc7b66c0e12ea7282b4847'
+  }
+]
 const usageState = readUsageState()
+const accountState = readAccountState()
 
 app.use(express.json({ limit: '1mb' }))
 app.use(express.static(path.join(__dirname, 'public')))
@@ -59,8 +81,9 @@ app.get('/api/health', (req, res) => {
     publicMode: PUBLIC_MODE,
     accessRequired: isAccessRequired(),
     authenticated: Boolean(session),
-    dailyLimit: DAILY_LIMIT,
-    usage: session ? getUsageInfo(getUsageClientId(session)) : null
+    dailyLimit: getSessionDailyLimit(session),
+    user: session ? getSafeSessionUser(session) : null,
+    usage: session ? getUsageInfoForSession(session) : null
   })
 })
 
@@ -71,8 +94,9 @@ app.get('/api/access/status', (req, res) => {
     publicMode: PUBLIC_MODE,
     accessRequired: isAccessRequired(),
     authenticated: Boolean(session),
-    dailyLimit: DAILY_LIMIT,
-    usage: session ? getUsageInfo(getUsageClientId(session)) : null
+    dailyLimit: getSessionDailyLimit(session),
+    user: session ? getSafeSessionUser(session) : null,
+    usage: session ? getUsageInfoForSession(session) : null
   })
 })
 
@@ -89,15 +113,17 @@ app.post('/api/access/login', (req, res) => {
     return
   }
 
-  const accessCode = trim(req.body && req.body.accessCode)
+  const username = trim(req.body && req.body.username)
+  const password = trim(req.body && req.body.password)
 
-  if (!safeEqual(accessCode, ACCESS_CODE)) {
-    res.status(401).json({ error: '邀请码不正确' })
+  const account = findAccountByUsername(username)
+
+  if (!account || !account.active || !verifyPassword(password, account)) {
+    res.status(401).json({ error: '账号或密码不正确' })
     return
   }
 
-  const clientId = crypto.randomUUID()
-  const token = createSessionToken(clientId)
+  const token = createSessionToken(account)
   res.setHeader('Set-Cookie', serializeCookie(SESSION_COOKIE, token, {
     httpOnly: true,
     maxAge: SESSION_MAX_AGE_SECONDS,
@@ -110,8 +136,9 @@ app.post('/api/access/login', (req, res) => {
     publicMode: PUBLIC_MODE,
     accessRequired: true,
     authenticated: true,
-    dailyLimit: DAILY_LIMIT,
-    usage: getUsageInfo(getUsageClientId({ clientId }))
+    dailyLimit: getAccountDailyLimit(account),
+    user: getSafeAccount(account),
+    usage: getUsageInfoForAccount(account)
   })
 })
 
@@ -123,6 +150,53 @@ app.post('/api/access/logout', (req, res) => {
     secure: isSecureRequest(req)
   }))
   res.json({ ok: true })
+})
+
+app.get('/api/admin/users', requireAdminMiddleware, (req, res) => {
+  res.json({
+    users: getAccountsForAdmin()
+  })
+})
+
+app.post('/api/admin/users', requireAdminMiddleware, (req, res) => {
+  try {
+    const account = createAccount(req.body || {})
+    writeAccountState()
+    res.json({
+      ok: true,
+      user: getAccountForAdmin(account)
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '创建账号失败' })
+  }
+})
+
+app.patch('/api/admin/users/:userId', requireAdminMiddleware, (req, res) => {
+  try {
+    const account = updateAccount(req.params.userId, req.body || {})
+    writeAccountState()
+    res.json({
+      ok: true,
+      user: getAccountForAdmin(account)
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '保存账号失败' })
+  }
+})
+
+app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, (req, res) => {
+  try {
+    const account = findAccountById(req.params.userId)
+    if (!account) throw new Error('账号不存在')
+
+    resetUsage(getUsageClientIdForAccount(account))
+    res.json({
+      ok: true,
+      user: getAccountForAdmin(account)
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '重置次数失败' })
+  }
 })
 
 app.get('/api/config', (req, res) => {
@@ -183,10 +257,10 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     const pdfPageImages = getUploadedFiles(req, 'pdfPageImage')
 
     const usageClientId = getUsageClientId(session)
-    const usageInfo = getUsageInfo(usageClientId)
-    if (usageInfo.remaining <= 0) {
+    const usageInfo = getUsageInfoForSession(session)
+    if (!usageInfo.unlimited && usageInfo.remaining <= 0) {
       res.status(429).json({
-        error: `今天的生成次数已用完。每日最多 ${DAILY_LIMIT} 次，请明天再试。`,
+        error: `今天的生成次数已用完。每日最多 ${usageInfo.limit} 次，请联系管理员或明天再试。`,
         usage: usageInfo
       })
       return
@@ -202,7 +276,7 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     }) : null
 
     if (!aiConfig.apiKey) {
-      const nextUsage = incrementUsage(usageClientId)
+      const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
       res.json({
         demo: true,
         message: `当前未配置 ${aiConfig.keyName}，已返回演示反馈。`,
@@ -213,7 +287,7 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     }
 
     const aiResponse = await requestAI(payload, courseware, aiConfig)
-    const nextUsage = incrementUsage(usageClientId)
+    const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
     const parsed = parseFeedbackResponse(aiResponse, aiConfig.provider)
 
     res.json({
@@ -401,26 +475,41 @@ function writeEnvMap(envMap) {
 }
 
 function isAccessRequired() {
-  return PUBLIC_MODE && Boolean(ACCESS_CODE)
+  return PUBLIC_MODE
 }
 
 function requireAccess(req, res) {
   if (!isAccessRequired()) {
     return {
-      clientId: getRequestFingerprint(req)
+      clientId: getRequestFingerprint(req),
+      role: 'user',
+      dailyLimit: DAILY_LIMIT
     }
   }
 
   const session = getAccessSession(req)
   if (session) return session
 
-  res.status(401).json({ error: '请先输入邀请码' })
+  res.status(401).json({ error: '请先登录账号' })
   return null
 }
 
 function requireAccessMiddleware(req, res, next) {
   const session = requireAccess(req, res)
   if (!session) return
+
+  req.accessSession = session
+  next()
+}
+
+function requireAdminMiddleware(req, res, next) {
+  const session = requireAccess(req, res)
+  if (!session) return
+
+  if (session.role !== 'admin') {
+    res.status(403).json({ error: '只有管理员可以操作账号管理' })
+    return
+  }
 
   req.accessSession = session
   next()
@@ -434,9 +523,11 @@ function getAccessSession(req) {
   return verifySessionToken(token)
 }
 
-function createSessionToken(clientId) {
+function createSessionToken(account) {
   const payload = Buffer.from(JSON.stringify({
-    clientId,
+    accountId: account.id,
+    username: account.username,
+    role: account.role,
     createdAt: Date.now()
   })).toString('base64url')
   const signature = signTokenPayload(payload)
@@ -451,13 +542,19 @@ function verifySessionToken(token) {
 
   try {
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
-    if (!parsed.clientId) return null
+    if (!parsed.accountId) return null
 
     const age = Date.now() - Number(parsed.createdAt || 0)
     if (age < 0 || age > SESSION_MAX_AGE_SECONDS * 1000) return null
 
+    const account = findAccountById(parsed.accountId)
+    if (!account || !account.active) return null
+
     return {
-      clientId: String(parsed.clientId)
+      accountId: account.id,
+      username: account.username,
+      role: account.role,
+      dailyLimit: getAccountDailyLimit(account)
     }
   } catch (error) {
     return null
@@ -484,6 +581,27 @@ function getSessionSecret() {
       'course-feedback-session'
     ].join('|'))
     .digest('hex')
+}
+
+function getSafeSessionUser(session) {
+  return {
+    id: session.accountId || '',
+    username: session.username || '',
+    role: session.role || 'user',
+    isAdmin: session.role === 'admin',
+    dailyLimit: session.role === 'admin' ? null : getSessionDailyLimit(session)
+  }
+}
+
+function getSafeAccount(account) {
+  return {
+    id: account.id,
+    username: account.username,
+    role: account.role,
+    isAdmin: account.role === 'admin',
+    active: Boolean(account.active),
+    dailyLimit: getAccountDailyLimit(account)
+  }
 }
 
 function parseCookies(cookieHeader) {
@@ -526,33 +644,204 @@ function getRequestFingerprint(req) {
   return crypto.createHash('sha256').update(raw).digest('hex')
 }
 
-function getUsageClientId(session) {
-  if (isAccessRequired()) {
-    return `access:${crypto.createHash('sha256').update(ACCESS_CODE).digest('hex')}`
+function readAccountState() {
+  try {
+    const raw = fs.existsSync(ACCOUNTS_PATH) ? fs.readFileSync(ACCOUNTS_PATH, 'utf8') : ''
+    const parsed = raw ? JSON.parse(raw) : null
+    const state = parsed && Array.isArray(parsed.users) ? parsed : { users: [] }
+    mergeDefaultAccounts(state)
+    return state
+  } catch (error) {
+    return { users: DEFAULT_ACCOUNTS.map((account) => ({ ...account })) }
   }
+}
+
+function mergeDefaultAccounts(state) {
+  DEFAULT_ACCOUNTS.forEach((defaultAccount) => {
+    const existed = state.users.find((account) => account.username === defaultAccount.username)
+    if (!existed) {
+      state.users.push({
+        ...defaultAccount,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      })
+    }
+  })
+}
+
+function writeAccountState() {
+  fs.mkdirSync(DATA_DIR, { recursive: true })
+  fs.writeFileSync(ACCOUNTS_PATH, `${JSON.stringify(accountState, null, 2)}\n`)
+}
+
+function findAccountByUsername(username) {
+  const normalized = trim(username).toLowerCase()
+  return accountState.users.find((account) => trim(account.username).toLowerCase() === normalized)
+}
+
+function findAccountById(accountId) {
+  return accountState.users.find((account) => account.id === accountId)
+}
+
+function verifyPassword(password, account) {
+  if (!password || !account || !account.passwordSalt || !account.passwordHash) return false
+  const hash = hashPassword(password, account.passwordSalt)
+  return safeEqual(hash, account.passwordHash)
+}
+
+function hashPassword(password, salt) {
+  return crypto.scryptSync(String(password), String(salt), 32).toString('hex')
+}
+
+function createPasswordRecord(password) {
+  const salt = crypto.randomBytes(16).toString('hex')
+  return {
+    passwordSalt: salt,
+    passwordHash: hashPassword(password, salt)
+  }
+}
+
+function createAccount(input) {
+  const username = trim(input.username)
+  const password = trim(input.password)
+  const role = trim(input.role || 'user') === 'admin' ? 'admin' : 'user'
+
+  if (!username) throw new Error('请填写账号名')
+  if (!/^[A-Za-z0-9_@.-]{3,32}$/.test(username)) {
+    throw new Error('账号名需为 3-32 位英文、数字或 _ @ . -')
+  }
+  if (findAccountByUsername(username)) throw new Error('账号已存在')
+  if (!password || password.length < 6) throw new Error('密码至少 6 位')
+
+  const account = {
+    id: `user-${crypto.randomUUID()}`,
+    username,
+    role,
+    active: input.active !== false,
+    dailyLimit: role === 'admin' ? null : parseDailyLimit(input.dailyLimit || DAILY_LIMIT),
+    ...createPasswordRecord(password),
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  }
+
+  accountState.users.push(account)
+  return account
+}
+
+function updateAccount(accountId, input) {
+  const account = findAccountById(accountId)
+  if (!account) throw new Error('账号不存在')
+
+  if ('active' in input) {
+    if (account.role === 'admin' && input.active === false && getActiveAdminCount() <= 1) {
+      throw new Error('至少需要保留一个启用的管理员账号')
+    }
+    account.active = Boolean(input.active)
+  }
+
+  if (account.role !== 'admin' && 'dailyLimit' in input) {
+    account.dailyLimit = parseDailyLimit(input.dailyLimit || DAILY_LIMIT)
+  }
+
+  const nextPassword = trim(input.password)
+  if (nextPassword) {
+    if (nextPassword.length < 6) throw new Error('密码至少 6 位')
+    Object.assign(account, createPasswordRecord(nextPassword))
+  }
+
+  account.updatedAt = Date.now()
+  return account
+}
+
+function getActiveAdminCount() {
+  return accountState.users.filter((account) => account.role === 'admin' && account.active).length
+}
+
+function getAccountsForAdmin() {
+  return accountState.users
+    .slice()
+    .sort((left, right) => {
+      if (left.role !== right.role) return left.role === 'admin' ? -1 : 1
+      return left.username.localeCompare(right.username)
+    })
+    .map(getAccountForAdmin)
+}
+
+function getAccountForAdmin(account) {
+  return {
+    ...getSafeAccount(account),
+    usage: getUsageInfoForAccount(account),
+    createdAt: account.createdAt || null,
+    updatedAt: account.updatedAt || null
+  }
+}
+
+function getUsageClientId(session) {
+  if (session.accountId) return `account:${session.accountId}`
 
   return session.clientId
 }
 
-function getUsageInfo(clientId) {
+function getUsageClientIdForAccount(account) {
+  return `account:${account.id}`
+}
+
+function getSessionDailyLimit(session) {
+  if (!session) return DAILY_LIMIT
+  if (session.role === 'admin') return null
+  return parseDailyLimit(session.dailyLimit || DAILY_LIMIT)
+}
+
+function getAccountDailyLimit(account) {
+  if (!account || account.role === 'admin') return null
+  return parseDailyLimit(account.dailyLimit || DAILY_LIMIT)
+}
+
+function getUsageInfoForSession(session) {
+  return getUsageInfo(
+    getUsageClientId(session),
+    getSessionDailyLimit(session),
+    session.role === 'admin'
+  )
+}
+
+function getUsageInfoForAccount(account) {
+  return getUsageInfo(
+    getUsageClientIdForAccount(account),
+    getAccountDailyLimit(account),
+    account.role === 'admin'
+  )
+}
+
+function getUsageInfo(clientId, limit = DAILY_LIMIT, unlimited = false) {
   const today = getTodayKey()
   const used = Number(usageState[today] && usageState[today][clientId] ? usageState[today][clientId] : 0)
+  const safeLimit = unlimited ? null : parseDailyLimit(limit || DAILY_LIMIT)
 
   return {
     date: today,
     used,
-    limit: DAILY_LIMIT,
-    remaining: Math.max(0, DAILY_LIMIT - used)
+    limit: safeLimit,
+    unlimited,
+    remaining: unlimited ? null : Math.max(0, safeLimit - used)
   }
 }
 
-function incrementUsage(clientId) {
+function incrementUsage(clientId, limit = DAILY_LIMIT, unlimited = false) {
   const today = getTodayKey()
   cleanupUsageState(today)
   if (!usageState[today]) usageState[today] = {}
   usageState[today][clientId] = Number(usageState[today][clientId] || 0) + 1
   writeUsageState()
-  return getUsageInfo(clientId)
+  return getUsageInfo(clientId, limit, unlimited)
+}
+
+function resetUsage(clientId) {
+  const today = getTodayKey()
+  if (usageState[today]) {
+    usageState[today][clientId] = 0
+    writeUsageState()
+  }
 }
 
 function getTodayKey() {
