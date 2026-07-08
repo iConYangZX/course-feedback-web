@@ -260,7 +260,16 @@ function bindEvents() {
     if (!copyButton) return
 
     const item = state.feedbacks[Number(copyButton.dataset.index)]
-    if (item) copyText(item.feedback, `${item.name} 的反馈已复制`)
+    if (!item) return
+
+    copyText(item.feedback, `${item.name} 的反馈已复制`)
+    copyButton.textContent = '已复制'
+    copyButton.classList.add('copied')
+    clearTimeout(copyButton.resetTimer)
+    copyButton.resetTimer = setTimeout(() => {
+      copyButton.textContent = '复制'
+      copyButton.classList.remove('copied')
+    }, 1400)
   })
 }
 
@@ -842,7 +851,9 @@ function renderStudentTable() {
 
 function renderResults() {
   els.copyAllBtn.disabled = !state.feedbacks.length
-  els.resultNote.textContent = state.feedbacks.length ? `${state.feedbacks.length} 条反馈` : '生成后会显示在这里'
+  els.resultNote.textContent = state.feedbacks.length
+    ? `${state.feedbacks.length} 条反馈 · 全部已展开`
+    : '生成后会显示在这里'
   renderDebugSummary()
 
   if (!state.feedbacks.length) {
@@ -853,7 +864,10 @@ function renderResults() {
   els.resultList.innerHTML = state.feedbacks.map((item, index) => `
     <article class="result-card">
       <div class="result-head">
-        <div class="result-name">${escapeHtml(item.name)}</div>
+        <div class="result-name-group">
+          <span class="result-index">${index + 1}</span>
+          <div class="result-name">${escapeHtml(item.name)}</div>
+        </div>
         <button class="copy-button" data-action="copy-feedback" data-index="${index}" type="button">复制</button>
       </div>
       <p class="result-text">${escapeHtml(item.feedback)}</p>
