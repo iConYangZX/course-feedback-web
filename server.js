@@ -381,11 +381,13 @@ app.post('/api/config', (req, res) => {
 
 app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
   { name: 'courseware', maxCount: 1 },
+  { name: 'exitTest', maxCount: 1 },
   { name: 'pdfPageImage', maxCount: 500 }
 ]), async (req, res) => {
   try {
     const session = req.accessSession
     const coursewareFile = getUploadedFile(req, 'courseware')
+    const exitTestFile = getUploadedFile(req, 'exitTest')
     const pdfPageImages = getUploadedFiles(req, 'pdfPageImage')
 
     const usageClientId = getUsageClientId(session)
@@ -411,6 +413,8 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
       pdfPageImages,
       selectedPdfPages: payload.selectedPdfPages
     }) : null
+    const exitTestCourseware = exitTestFile ? await normalizeCourseware(exitTestFile) : null
+    if (exitTestCourseware) payload.exitTestFile = buildUploadedFileSummary(exitTestCourseware)
 
     if (!aiConfig.apiKey) {
       const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
@@ -1631,6 +1635,18 @@ async function normalizeCourseware(file, options = {}) {
   }
 }
 
+function buildUploadedFileSummary(courseware) {
+  if (!courseware) return null
+
+  return {
+    name: courseware.name,
+    source: courseware.extractionSource,
+    text: truncateText(courseware.extractedText || '', 18000),
+    selectedPdfPages: courseware.selectedPdfPages || [],
+    ocrPageCount: courseware.ocrPageCount || 0
+  }
+}
+
 function normalizePageNumbers(pageNumbers) {
   const list = Array.isArray(pageNumbers) ? pageNumbers : []
   return Array.from(new Set(
@@ -1877,10 +1893,51 @@ function buildSystemPrompt() {
     '每个学生反馈建议 120 到 220 个汉字。',
     '每一条反馈必须包含：1 个本节课/课件里的具体知识点，1 个该学生的课堂表现等级，若老师填写了备注则必须自然写入备注。',
     '如果反馈类型是班级整体反馈，请面向整个班级生成课堂表现总结，不要写成单个学生逐条反馈。',
+    '如果提供了出门测成绩，必须写入反馈：个性化学生反馈只写当前学生自己的成绩；班级整体反馈要按从高到低列出全班所有学生成绩。',
+    '如果提供了出门测文件内容，请结合文件里的测试知识点、题型或讲次内容评价学习情况；不要只写分数。',
     '如果反馈呈现形式是图片报告文案，请语言更适合放入报告里的“课堂表现”段落，结构清晰、少寒暄。',
     '一对一反馈里如果包含 personality 或 habit，要把它们作为长期档案背景，用自然、克制的方式融入建议，不要写得像诊断。',
     '不同学生的反馈必须根据 performance、remark、personality 和 habit 明显区分，不允许只替换姓名。'
   ].join('\n')
+}
+
+function buildExitTestPromptText(payload) {
+  const lines = []
+  const exitTest = payload && payload.exitTest
+  const hasScores = exitTest && Array.isArray(exitTest.students) && exitTest.students.length
+
+  if (hasScores) {
+    lines.push('出门测成绩（已按成绩/等级从高到低排序）：')
+    lines.push(JSON.stringify(exitTest, null, 2))
+    lines.push(exitTest.mode === 'grade'
+      ? '成绩制度：等级制，只能使用学生对应的 A/B/C/D 等级。'
+      : `成绩制度：分数制，满分 ${exitTest.totalScore || 100} 分。`)
+    lines.push(payload.feedbackScope === 'class'
+      ? '班级整体反馈中必须从高到低列出所有学生的出门测成绩，并概括整体得分情况。'
+      : '个性化反馈中每个学生只写自己的出门测成绩，不要泄露或罗列其他学生成绩。')
+  } else {
+    lines.push('出门测成绩：未填写。')
+  }
+
+  const file = payload && payload.exitTestFile
+  if (file && file.name) {
+    lines.push('')
+    lines.push(`出门测文件：${file.name}`)
+    lines.push(`出门测文件识别来源：${file.source || '未识别'}`)
+    if (file.selectedPdfPages && file.selectedPdfPages.length) {
+      lines.push(`出门测文件页码：${file.selectedPdfPages.join('、')}`)
+    }
+    if (file.ocrPageCount) {
+      lines.push(`出门测 OCR 页数：${file.ocrPageCount}`)
+    }
+    lines.push('出门测文件识别内容：')
+    lines.push(file.text || '未识别到可用文字，请只结合成绩和老师备注生成稳妥反馈。')
+  } else {
+    lines.push('')
+    lines.push('出门测文件：未上传。')
+  }
+
+  return lines.join('\n')
 }
 
 function buildUserContent(payload, courseware) {
@@ -1902,6 +1959,9 @@ function buildUserContent(payload, courseware) {
         '',
         '老师补充的课程内容：',
         payload.courseNote || '未填写',
+        '',
+        '出门测数据：',
+        buildExitTestPromptText(payload),
         '',
         '学生表现数据 JSON：',
         JSON.stringify(payload.students, null, 2),
@@ -2005,6 +2065,9 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     '',
     '老师补充的课程内容：',
     payload.courseNote || '未填写',
+    '',
+    '出门测数据：',
+    buildExitTestPromptText(payload),
     '',
     '课件内容：',
     coursewareLines.join('\n'),
@@ -3179,11 +3242,23 @@ function buildDebugSummary(payload, courseware) {
     counts[student.performance] = (counts[student.performance] || 0) + 1
     return counts
   }, {})
+  const exitTest = payload.exitTest || {}
+  const exitTestFile = payload.exitTestFile || {}
 
   return {
     studentCount: payload.students.length,
     remarksCount,
     performanceCounts,
+    exitTestMode: exitTest.mode || '',
+    exitTestTotalScore: exitTest.totalScore || null,
+    exitTestStudentCount: Array.isArray(exitTest.students) ? exitTest.students.length : 0,
+    exitTestRankingPreview: Array.isArray(exitTest.students)
+      ? exitTest.students.slice(0, 8).map((student) => formatExitTestScore(student, exitTest)).join('；')
+      : '',
+    exitTestFileName: exitTestFile.name || '',
+    exitTestFileSource: exitTestFile.source || '',
+    exitTestFileTextLength: exitTestFile.text ? exitTestFile.text.length : 0,
+    exitTestFileTextPreview: exitTestFile.text ? exitTestFile.text.slice(0, 180) : '',
     coursewareName: courseware ? courseware.name : '',
     coursewareMime: courseware ? courseware.mime : '',
     coursewareIsImage: Boolean(courseware && courseware.isImage),
@@ -3197,6 +3272,12 @@ function buildDebugSummary(payload, courseware) {
     coursewareTextLength: courseware && courseware.extractedText ? courseware.extractedText.length : 0,
     coursewareTextPreview: courseware && courseware.extractedText ? courseware.extractedText.slice(0, 180) : ''
   }
+}
+
+function formatExitTestScore(student, exitTest = {}) {
+  if (!student) return ''
+  if (exitTest.mode === 'grade') return `${student.name}：${student.grade || '-'}等`
+  return `${student.name}：${student.score ?? '-'}/${exitTest.totalScore || 100}`
 }
 
 function isLikelyImageRequestError(error) {
@@ -3416,11 +3497,28 @@ function buildAdviceFallback(student) {
 function buildFallbackFeedback(student, payload = {}) {
   const lesson = payload.lessonTitle ? `本节课围绕“${payload.lessonTitle}”展开，` : '本节课整体学习状态较为清晰，'
   const remark = student.remark ? `课堂中特别需要关注的是：${student.remark}。` : ''
+  const exitTestText = getFallbackExitTestText(student, payload)
   const advice = student.performance === '表现较差'
     ? '后续建议先把基础概念和典型题步骤补扎实，课后用少量高频题巩固。'
     : '后续建议继续整理本节课重点和错题，保持稳定练习节奏。'
 
-  return `${student.name}同学${lesson}${student.performance}。${remark}${advice}`
+  return `${student.name}同学${lesson}${student.performance}。${remark}${exitTestText}${advice}`
+}
+
+function getFallbackExitTestText(student, payload = {}) {
+  const exitTest = payload.exitTest || {}
+  const rows = Array.isArray(exitTest.students) ? exitTest.students : []
+
+  if (!rows.length) return ''
+
+  if (payload.feedbackScope === 'class') {
+    return `本次出门测成绩从高到低为：${rows.map((row) => formatExitTestScore(row, exitTest)).join('，')}。`
+  }
+
+  const matched = rows.find((row) => row.id === student.id || row.name === student.name)
+  if (!matched && !student.exitTestScore) return ''
+
+  return `本次出门测成绩为${student.exitTestScore || formatExitTestScore(matched, exitTest).replace(/^.*?：/, '')}。`
 }
 
 async function extractCoursewareText(buffer, fileName) {
@@ -3739,9 +3837,8 @@ function xmlToText(xml) {
     .trim()
 }
 
-function truncateText(text) {
+function truncateText(text, maxLength = 22000) {
   const cleanText = String(text || '').trim()
-  const maxLength = 22000
 
   if (cleanText.length <= maxLength) return cleanText
   return `${cleanText.slice(0, maxLength)}\n\n[课件内容较长，后文已截断]`

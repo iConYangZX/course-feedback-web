@@ -70,6 +70,11 @@ const state = {
     performance: '表现良好',
     remark: ''
   },
+  exitTest: {
+    mode: 'percent',
+    totalScore: 100,
+    scores: {}
+  },
   access: {
     publicMode: false,
     accessRequired: false,
@@ -203,6 +208,7 @@ function bindElements() {
     classMaterialModeSelect: document.querySelector('#classMaterialModeSelect'),
     classTextbookField: document.querySelector('#classTextbookField'),
     classTextbookInput: document.querySelector('#classTextbookInput'),
+    classTextbookFileName: document.querySelector('#classTextbookFileName'),
     classTextbookStatus: document.querySelector('#classTextbookStatus'),
     oneProfileNameInput: document.querySelector('#oneProfileNameInput'),
     oneProfileGradeSelect: document.querySelector('#oneProfileGradeSelect'),
@@ -215,6 +221,7 @@ function bindElements() {
     lessonTitleInput: document.querySelector('#lessonTitleInput'),
     coursewareField: document.querySelector('#coursewareField'),
     coursewareInput: document.querySelector('#coursewareInput'),
+    coursewareFileName: document.querySelector('#coursewareFileName'),
     classLectureField: document.querySelector('#classLectureField'),
     classLectureSelect: document.querySelector('#classLectureSelect'),
     feedbackFormatSelect: document.querySelector('#feedbackFormatSelect'),
@@ -241,6 +248,14 @@ function bindElements() {
     pdfPageConfirmBtn: document.querySelector('#pdfPageConfirmBtn'),
     pdfPageModalCloseBtn: document.querySelector('#pdfPageModalCloseBtn'),
     courseNoteInput: document.querySelector('#courseNoteInput'),
+    exitTestPanel: document.querySelector('#exitTestPanel'),
+    exitTestInput: document.querySelector('#exitTestInput'),
+    exitTestFileName: document.querySelector('#exitTestFileName'),
+    exitTestModeSelect: document.querySelector('#exitTestModeSelect'),
+    exitTestTotalField: document.querySelector('#exitTestTotalField'),
+    exitTestTotalInput: document.querySelector('#exitTestTotalInput'),
+    exitTestCount: document.querySelector('#exitTestCount'),
+    exitTestTable: document.querySelector('#exitTestTable'),
     studentToolbar: document.querySelector('.student-toolbar'),
     studentCount: document.querySelector('#studentCount'),
     studentTable: document.querySelector('#studentTable'),
@@ -333,11 +348,20 @@ function bindEvents() {
   els.coursewareInput.addEventListener('change', handleCoursewareChange)
   if (els.classMaterialModeSelect) els.classMaterialModeSelect.addEventListener('change', renderClassMaterialControls)
   if (els.classTextbookInput) els.classTextbookInput.addEventListener('change', handleClassTextbookChange)
+  if (els.exitTestInput) els.exitTestInput.addEventListener('change', () => updateFilePicker(els.exitTestInput, els.exitTestFileName))
   if (els.feedbackScopeSelect) els.feedbackScopeSelect.addEventListener('change', renderFeedbackModeControls)
   if (els.feedbackFormatSelect) els.feedbackFormatSelect.addEventListener('change', renderFeedbackModeControls)
   if (els.classPositiveKeywordList) els.classPositiveKeywordList.addEventListener('click', handleClassKeywordClick)
   if (els.classKeywordList) els.classKeywordList.addEventListener('click', handleClassKeywordClick)
   if (els.downloadImageReportBtn) els.downloadImageReportBtn.addEventListener('click', downloadImageReport)
+  if (els.exitTestModeSelect) els.exitTestModeSelect.addEventListener('change', handleExitTestModeChange)
+  if (els.exitTestTotalInput) els.exitTestTotalInput.addEventListener('input', () => {
+    state.exitTest.totalScore = Number(els.exitTestTotalInput.value || 100)
+  })
+  if (els.exitTestTable) {
+    els.exitTestTable.addEventListener('input', handleExitTestInput)
+    els.exitTestTable.addEventListener('change', handleExitTestInput)
+  }
   els.pdfPageSelectBtn.addEventListener('click', openPdfPageSelection)
   els.pdfPageSelectAllBtn.addEventListener('click', selectAllPdfPages)
   els.pdfPageSelectNoneBtn.addEventListener('click', clearPdfPages)
@@ -1795,6 +1819,7 @@ function render() {
   renderOneProfileList()
   renderWorkspace()
   renderOneProfileSummary()
+  renderExitTestTable()
   renderStudentTable()
   renderResults()
   renderRearrange()
@@ -1803,6 +1828,7 @@ function render() {
   renderClassLectureSelect()
   renderFeedbackModeControls()
   renderAccessState()
+  updateAllFilePickers()
 }
 
 function renderMode() {
@@ -1911,6 +1937,17 @@ function renderOneProfileSummary() {
 }
 
 function renderStudentTable() {
+  const shouldHideClassStudents = state.mode === 'class'
+    && els.feedbackScopeSelect
+    && els.feedbackScopeSelect.value === 'class'
+
+  if (els.studentToolbar) els.studentToolbar.classList.toggle('hidden', shouldHideClassStudents)
+  if (els.studentTable) els.studentTable.classList.toggle('hidden', shouldHideClassStudents)
+  if (shouldHideClassStudents) {
+    els.studentTable.innerHTML = ''
+    return
+  }
+
   const students = getWorkingStudents()
   els.studentCount.textContent = `${students.length} 人`
 
@@ -1946,6 +1983,57 @@ function renderStudentTable() {
       <span></span>
     </div>
   `).join('')
+}
+
+function renderExitTestTable() {
+  if (!els.exitTestPanel || !els.exitTestTable) return
+
+  const selectedClass = getSelectedClass()
+  const students = state.mode === 'class' && selectedClass ? selectedClass.students : []
+  els.exitTestPanel.classList.toggle('hidden', state.mode !== 'class')
+  if (els.exitTestCount) els.exitTestCount.textContent = `${students.length} 人`
+  if (els.exitTestTotalField) els.exitTestTotalField.classList.toggle('hidden', state.exitTest.mode === 'grade')
+  if (els.exitTestModeSelect) els.exitTestModeSelect.value = state.exitTest.mode
+  if (els.exitTestTotalInput) els.exitTestTotalInput.value = String(state.exitTest.totalScore || 100)
+
+  if (!students.length) {
+    els.exitTestTable.innerHTML = '<div class="student-empty">保存班级后，可以在这里填写每位学生的出门测成绩。</div>'
+    return
+  }
+
+  els.exitTestTable.innerHTML = students.map((student) => {
+    const score = state.exitTest.scores[student.id] || {}
+    return `
+      <div class="exit-test-row ${state.exitTest.mode === 'grade' ? 'grade-mode' : 'score-mode'}" data-student-id="${escapeHtml(student.id)}">
+        <div class="student-name">${escapeHtml(student.name)}</div>
+        ${state.exitTest.mode === 'grade'
+          ? `<select data-exit-field="grade" aria-label="${escapeHtml(student.name)}出门测等级">
+              <option value="">选择等级</option>
+              ${['A', 'B', 'C', 'D'].map((grade) => `<option value="${grade}" ${score.grade === grade ? 'selected' : ''}>${grade}</option>`).join('')}
+            </select>`
+          : `<input data-exit-field="score" type="number" min="0" max="${state.exitTest.totalScore || 100}" value="${escapeHtml(score.score ?? '')}" placeholder="填写分数" aria-label="${escapeHtml(student.name)}出门测分数" />`}
+        <input data-exit-field="note" type="text" value="${escapeHtml(score.note || '')}" placeholder="可选：错因或特殊情况" />
+      </div>
+    `
+  }).join('')
+}
+
+function handleExitTestModeChange() {
+  if (!els.exitTestModeSelect) return
+  state.exitTest.mode = els.exitTestModeSelect.value === 'grade' ? 'grade' : 'percent'
+  renderExitTestTable()
+}
+
+function handleExitTestInput(event) {
+  const field = event.target.dataset.exitField
+  if (!field) return
+
+  const row = event.target.closest('[data-student-id]')
+  if (!row) return
+
+  const studentId = row.dataset.studentId
+  if (!state.exitTest.scores[studentId]) state.exitTest.scores[studentId] = {}
+  state.exitTest.scores[studentId][field] = event.target.value
 }
 
 function renderResults() {
@@ -1994,15 +2082,20 @@ function renderImageReport(payload = null) {
   const now = new Date()
   const feedbackText = state.feedbacks.map((item) => item.feedback).join('\n\n')
   const lessonTitle = reportPayload.lessonTitle || els.lessonTitleInput.value.trim() || '本节课程'
-  const courseLines = extractReportLines(reportPayload.courseNote || els.courseNoteInput.value || feedbackText)
+  const reportSections = parseFeedbackReportSections(feedbackText)
+  const contentSource = reportSections.courseContent || reportPayload.courseNote || els.courseNoteInput.value || feedbackText
+  const courseLines = extractReportLines(contentSource)
+  const focusText = reportSections.studyFocus || ''
+  const performanceText = reportSections.performance || feedbackText || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
   const students = selectedClass ? selectedClass.students : []
-  const fakeScores = buildReportScoreRows(students)
-  const avg = fakeScores.length
-    ? (fakeScores.reduce((sum, item) => sum + item.score, 0) / fakeScores.length).toFixed(1)
+  const reportScores = buildReportScoreRows(students, reportPayload.exitTest)
+  const numericScores = reportScores.map((item) => Number(item.score)).filter(Number.isFinite)
+  const avg = numericScores.length
+    ? (numericScores.reduce((sum, score) => sum + score, 0) / numericScores.length).toFixed(1)
     : '-'
-  const max = fakeScores.length ? Math.max(...fakeScores.map((item) => item.score)) : '-'
-  const min = fakeScores.length ? Math.min(...fakeScores.map((item) => item.score)) : '-'
-  const rate = fakeScores.length ? `${(fakeScores.reduce((sum, item) => sum + item.rate, 0) / fakeScores.length).toFixed(1)}%` : '-'
+  const max = numericScores.length ? Math.max(...numericScores) : '-'
+  const min = numericScores.length ? Math.min(...numericScores) : '-'
+  const rate = numericScores.length ? `${(reportScores.reduce((sum, item) => sum + Number(item.rate || 0), 0) / reportScores.length).toFixed(1)}%` : '-'
 
   els.imageReportPreview.innerHTML = `
     <article class="report-sheet" id="imageReportSheet">
@@ -2024,22 +2117,22 @@ function renderImageReport(payload = null) {
         <ol>
           ${courseLines.slice(0, 4).map((line) => `<li>${escapeHtml(line)}</li>`).join('') || `<li>${escapeHtml(lessonTitle)}</li>`}
         </ol>
-        <p>核心重点：${escapeHtml(courseLines[0] || lessonTitle)}。</p>
+        <p class="report-paragraph">核心重点：${escapeHtml(focusText || courseLines[0] || lessonTitle)}。</p>
       </section>
       <section>
         <h3>【课堂表现】</h3>
-        <p>${escapeHtml(feedbackText || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。')}</p>
+        <div class="report-paragraph">${formatReportText(performanceText)}</div>
       </section>
       <section>
         <h3>【课后作业】</h3>
-        <p>${escapeHtml(reportPayload.homework || els.homeworkInput.value.trim() || '完成课后巩固练习，整理课堂笔记并预习下一节内容。')}</p>
+        <div class="report-paragraph">${formatReportText(reportPayload.homework || els.homeworkInput.value.trim() || '完成课后巩固练习，整理课堂笔记并预习下一节内容。')}</div>
       </section>
       <section>
         <h3>【学生成绩记录】</h3>
         <table class="report-table">
           <thead><tr><th>姓名</th><th>成绩</th><th>正确率</th></tr></thead>
           <tbody>
-            ${fakeScores.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${item.score || '—'}</td><td>${item.score ? `${item.rate.toFixed(1)}%` : '—'}</td></tr>`).join('')}
+            ${reportScores.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.displayScore || item.score || '—')}</td><td>${item.rate !== null ? `${Number(item.rate).toFixed(1)}%` : '—'}</td></tr>`).join('')}
           </tbody>
         </table>
         <p>平均分：${avg} 最高分：${max} 最低分：${min} 得分率：${rate}</p>
@@ -2049,15 +2142,90 @@ function renderImageReport(payload = null) {
   `
 }
 
+function parseFeedbackReportSections(text) {
+  const sections = {
+    courseContent: '',
+    studyFocus: '',
+    performance: ''
+  }
+  const source = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/家长您好[，,。]?\s*本次[^：:]*反馈如下[：:]?/g, '')
+    .trim()
+
+  if (!source) return sections
+
+  const matches = Array.from(source.matchAll(/【([^】]+)】/g))
+  if (!matches.length) {
+    sections.performance = source
+    return sections
+  }
+
+  matches.forEach((match, index) => {
+    const title = match[1].trim()
+    const start = match.index + match[0].length
+    const end = matches[index + 1] ? matches[index + 1].index : source.length
+    const content = normalizeReportText(source.slice(start, end))
+
+    if (/课堂内容|课程内容/.test(title)) sections.courseContent = content
+    if (/学习重点|课程重点|核心重点/.test(title)) sections.studyFocus = content
+    if (/课堂表现|学生表现/.test(title)) sections.performance = content
+  })
+
+  if (!sections.performance) {
+    sections.performance = normalizeReportText(source.replace(/【[^】]+】/g, '\n'))
+  }
+
+  return sections
+}
+
+function normalizeReportText(text) {
+  return String(text || '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\s*[：:，,。；;]\s*/, '')
+    .trim()
+}
+
+function formatReportText(text) {
+  const normalized = normalizeReportText(text)
+  if (!normalized) return ''
+
+  return escapeHtml(normalized)
+    .replace(/\n{2,}/g, '<br><br>')
+    .replace(/\n/g, '<br>')
+}
+
 function extractReportLines(text) {
   return String(text || '')
+    .replace(/\s+([1-9][0-9]*[.、])/g, '\n$1')
     .split(/[\n。；;]/)
     .map((line) => line.replace(/[【】]/g, '').trim())
     .filter((line) => line && !/^课后作业/.test(line) && !/^班级/.test(line))
     .slice(0, 6)
 }
 
-function buildReportScoreRows(students) {
+function buildReportScoreRows(students, exitTest = null) {
+  if (exitTest && Array.isArray(exitTest.students) && exitTest.students.length) {
+    return exitTest.students.map((student) => {
+      if (exitTest.mode === 'grade') {
+        return {
+          name: student.name,
+          score: null,
+          displayScore: student.grade || '—',
+          rate: null
+        }
+      }
+
+      return {
+        name: student.name,
+        score: Number(student.score),
+        displayScore: `${student.score}/${exitTest.totalScore || 100}`,
+        rate: exitTest.totalScore ? (Number(student.score) / Number(exitTest.totalScore)) * 100 : null
+      }
+    })
+  }
+
   const records = getScoreRecordsForClass(getSelectedClass() && getSelectedClass().id)
   const latest = records[records.length - 1]
 
@@ -2072,6 +2240,7 @@ function buildReportScoreRows(students) {
     return {
       name: student.name,
       score: recordStudent && latest && latest.mode === 'grade' ? 0 : score,
+      displayScore: recordStudent && latest && latest.mode === 'grade' ? (recordStudent.grade || '—') : String(score),
       rate: total ? (score / total) * 100 : 0
     }
   })
@@ -2648,6 +2817,7 @@ async function handleClassTextbookChange() {
   const file = els.classTextbookInput && els.classTextbookInput.files
     ? els.classTextbookInput.files[0]
     : null
+  updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
   if (!file || !els.classTextbookStatus) return
 
   if (!isPdfFile(file)) {
@@ -2777,6 +2947,7 @@ function resetClassForm() {
   els.templateInput.value = DEFAULT_TEMPLATE
   if (els.classMaterialModeSelect) els.classMaterialModeSelect.value = 'lesson'
   if (els.classTextbookInput) els.classTextbookInput.value = ''
+  updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
   if (els.classTextbookStatus) {
     els.classTextbookStatus.textContent = '选择 PDF 后会自动检测第几讲；其他文档会作为整本教材保存。'
   }
@@ -2812,6 +2983,7 @@ function fillClassForm(classInfo) {
   els.templateInput.value = classInfo.template || DEFAULT_TEMPLATE
   if (els.classMaterialModeSelect) els.classMaterialModeSelect.value = classInfo.materialMode || 'lesson'
   if (els.classTextbookInput) els.classTextbookInput.value = ''
+  updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
   if (els.classTextbookStatus) {
     const lectureCount = classInfo.textbook && Array.isArray(classInfo.textbook.lectures)
       ? classInfo.textbook.lectures.length
@@ -3028,6 +3200,9 @@ async function generateFeedback() {
   const formData = new FormData()
 
   const file = payload.materialId ? null : (els.coursewareInput.files && els.coursewareInput.files[0])
+  const exitTestFile = els.exitTestInput && els.exitTestInput.files
+    ? els.exitTestInput.files[0]
+    : null
 
   setGenerating(true)
 
@@ -3040,6 +3215,7 @@ async function generateFeedback() {
 
     formData.append('payload', JSON.stringify(payload))
     if (file) formData.append('courseware', file)
+    if (exitTestFile) formData.append('exitTest', exitTestFile)
 
     const response = await fetch('/api/generate-feedback', {
       method: 'POST',
@@ -3112,6 +3288,8 @@ function buildGeneratePayload() {
     const feedbackFormat = els.feedbackFormatSelect ? els.feedbackFormatSelect.value : 'text'
     const classRemark = els.classRemarkInput ? els.classRemarkInput.value.trim() : ''
     const homework = els.homeworkInput ? els.homeworkInput.value.trim() : ''
+    const exitTest = buildExitTestPayload(selectedClass)
+    if (!exitTest) return null
     const lectureNote = selectedLecture
       ? `教材讲次：${selectedLecture.title || '所选讲次'}（第 ${selectedLecture.startPage}-${selectedLecture.endPage} 页）`
       : ''
@@ -3122,7 +3300,10 @@ function buildGeneratePayload() {
           performance: '班级整体反馈',
           remark: classRemark || '请根据班级关键词和课程内容生成整班反馈'
         }]
-      : selectedClass.students
+      : selectedClass.students.map((student) => ({
+          ...student,
+          exitTestScore: getExitTestScoreText(exitTest, student.name)
+        }))
 
     return {
       mode: 'class',
@@ -3137,6 +3318,7 @@ function buildGeneratePayload() {
         .join('\n'),
       classRemark,
       homework,
+      exitTest,
       materialId: hasStoredMaterial ? selectedClass.textbook.id : '',
       selectedPdfPages: selectedLecture ? buildPageRange(selectedLecture.startPage, selectedLecture.endPage) : [],
       students: classStudents
@@ -3191,6 +3373,7 @@ function isPdfFile(file) {
 
 async function handleCoursewareChange() {
   const file = getCoursewareFile()
+  updateFilePicker(els.coursewareInput, els.coursewareFileName)
   resetPdfPageSelection()
 
   if (file && isPdfFile(file)) {
@@ -3296,6 +3479,7 @@ function closePdfPageModal() {
 
 function cancelPdfPageSelection() {
   els.coursewareInput.value = ''
+  updateFilePicker(els.coursewareInput, els.coursewareFileName)
   resetPdfPageSelection()
   renderPdfPageSelection()
   showToast('已取消上传 PDF')
@@ -3846,6 +4030,87 @@ function getSelectedTextbookLecture(classInfo = getSelectedClass()) {
   const index = Number(els.classLectureSelect && els.classLectureSelect.value)
   if (!Number.isInteger(index)) return null
   return classInfo.textbook.lectures[index] || null
+}
+
+function buildExitTestPayload(classInfo) {
+  const students = classInfo && Array.isArray(classInfo.students) ? classInfo.students : []
+  const mode = state.exitTest.mode === 'grade' ? 'grade' : 'percent'
+  const totalScore = Math.max(1, Number(els.exitTestTotalInput && els.exitTestTotalInput.value || state.exitTest.totalScore || 100))
+  const file = els.exitTestInput && els.exitTestInput.files ? els.exitTestInput.files[0] : null
+
+  if (!students.length) {
+    return {
+      mode,
+      totalScore: mode === 'grade' ? null : totalScore,
+      fileName: file ? file.name : '',
+      students: []
+    }
+  }
+
+  const rows = students.map((student) => {
+    const saved = state.exitTest.scores[student.id] || {}
+    return {
+      id: student.id,
+      name: student.name,
+      score: mode === 'percent' ? normalizeScoreValue(saved.score) : null,
+      grade: mode === 'grade' ? String(saved.grade || '').trim() : '',
+      note: String(saved.note || '').trim()
+    }
+  })
+
+  const missing = rows.find((row) => mode === 'grade' ? !row.grade : row.score === null)
+  if (missing) {
+    showToast(`请填写 ${missing.name} 的出门测${mode === 'grade' ? '等级' : '成绩'}`)
+    return null
+  }
+
+  const sortedStudents = rows.slice().sort((left, right) => compareExitTestRows(left, right, mode))
+
+  return {
+    mode,
+    totalScore: mode === 'grade' ? null : totalScore,
+    fileName: file ? file.name : '',
+    students: sortedStudents
+  }
+}
+
+function normalizeScoreValue(value) {
+  if (value === '' || value === null || value === undefined) return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function compareExitTestRows(left, right, mode) {
+  if (mode === 'grade') {
+    const order = { A: 4, B: 3, C: 2, D: 1 }
+    return (order[right.grade] || 0) - (order[left.grade] || 0)
+  }
+
+  return Number(right.score || 0) - Number(left.score || 0)
+}
+
+function getExitTestScoreText(exitTest, studentName) {
+  const row = exitTest && Array.isArray(exitTest.students)
+    ? exitTest.students.find((item) => item.name === studentName)
+    : null
+  if (!row) return ''
+  if (exitTest.mode === 'grade') return `${row.grade} 等`
+  return `${row.score}/${exitTest.totalScore}`
+}
+
+function updateAllFilePickers() {
+  updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
+  updateFilePicker(els.coursewareInput, els.coursewareFileName)
+  updateFilePicker(els.exitTestInput, els.exitTestFileName)
+}
+
+function updateFilePicker(input, nameElement) {
+  if (!input || !nameElement) return
+
+  const file = input.files && input.files[0]
+  const picker = input.closest('.file-picker')
+  nameElement.textContent = file ? file.name : '未选择任何文件'
+  if (picker) picker.classList.toggle('has-file', Boolean(file))
 }
 
 function getSelectedOneProfile() {

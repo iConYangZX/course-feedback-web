@@ -218,9 +218,13 @@
                 <option value="book">上传整本教材，反馈时选择讲次</option>
               </select>
             </label>
-            <label class="field class-textbook-field hidden" id="classTextbookField">
+            <label class="field file-field class-textbook-field hidden" id="classTextbookField">
               <span>上传整本教材</span>
-              <input id="classTextbookInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md" />
+              <div class="file-picker">
+                <input id="classTextbookInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md" />
+                <span class="file-picker-button">选择文件</span>
+                <span class="file-picker-name" id="classTextbookFileName">未选择任何文件</span>
+              </div>
             </label>
           </div>
           <div class="upload-hint hidden" id="classTextbookStatus">选择 PDF 后会自动检测第几讲；其他文档会作为整本教材保存。</div>
@@ -300,7 +304,11 @@
             </label>
             <label class="field file-field" id="coursewareField">
               <span>导入当节课课件</span>
-              <input id="coursewareInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" />
+              <div class="file-picker">
+                <input id="coursewareInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" />
+                <span class="file-picker-button">选择文件</span>
+                <span class="file-picker-name" id="coursewareFileName">未选择任何文件</span>
+              </div>
             </label>
             <label class="field hidden" id="classLectureField">
               <span>选择章节/讲次</span>
@@ -379,6 +387,36 @@
             <span>补充课程内容</span>
             <textarea id="courseNoteInput" rows="4" placeholder="可选：写下本节课重点、作业、错题或老师补充要求"></textarea>
           </label>
+
+          <section class="exit-test-panel class-only" id="exitTestPanel">
+            <div class="student-toolbar compact-toolbar">
+              <h2>出门测</h2>
+              <span id="exitTestCount">0 人</span>
+            </div>
+            <div class="form-grid three">
+              <label class="field file-field">
+                <span>上传出门测文件</span>
+                <div class="file-picker">
+                  <input id="exitTestInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" />
+                  <span class="file-picker-button">选择文件</span>
+                  <span class="file-picker-name" id="exitTestFileName">未选择任何文件</span>
+                </div>
+              </label>
+              <label class="field">
+                <span>成绩制度</span>
+                <select id="exitTestModeSelect">
+                  <option value="percent" selected>分数制（填写分数）</option>
+                  <option value="grade">等级制（选择 A/B/C/D）</option>
+                </select>
+              </label>
+              <label class="field" id="exitTestTotalField">
+                <span>满分（分数制）</span>
+                <input id="exitTestTotalInput" type="number" min="1" value="100" />
+              </label>
+            </div>
+            <div class="upload-hint">可上传整本或单独一讲，AI 会结合文件内容和成绩生成反馈。</div>
+            <div id="exitTestTable" class="exit-test-table"></div>
+          </section>
 
           <div class="student-toolbar">
             <h2>学生表现</h2>
