@@ -271,20 +271,35 @@
           </div>
 
           <div class="form-grid two">
-            <label class="field">
+            <label class="field one-profile-note-field">
               <span>平时性格</span>
               <textarea id="onePersonalityInput" rows="4" placeholder="例如：比较谨慎，回答前会反复确认；需要鼓励后更愿意表达"></textarea>
+              <div class="profile-keyword-panel">
+                <div>
+                  <div class="field-label">性格优势关键词</div>
+                  <div class="keyword-chip-list compact" id="onePersonalityPositiveList"></div>
+                </div>
+                <div>
+                  <div class="field-label">性格需关注关键词</div>
+                  <div class="keyword-chip-list compact" id="onePersonalityNegativeList"></div>
+                </div>
+              </div>
             </label>
-            <label class="field">
+            <label class="field one-profile-note-field">
               <span>做题习惯备注</span>
               <textarea id="oneHabitInput" rows="4" placeholder="例如：步骤意识较好，但容易漏写条件；计算速度偏慢"></textarea>
+              <div class="profile-keyword-panel">
+                <div>
+                  <div class="field-label">习惯优势关键词</div>
+                  <div class="keyword-chip-list compact" id="oneHabitPositiveList"></div>
+                </div>
+                <div>
+                  <div class="field-label">习惯需改进关键词</div>
+                  <div class="keyword-chip-list compact" id="oneHabitNegativeList"></div>
+                </div>
+              </div>
             </label>
           </div>
-
-          <label class="field">
-            <span>反馈模板</span>
-            <textarea id="oneProfileTemplateInput" rows="7"></textarea>
-          </label>
 
           <div class="panel-actions">
             <button class="secondary-button danger-button" id="deleteOneProfileBtn" type="button">删除档案</button>
@@ -322,7 +337,7 @@
             </label>
           </div>
 
-          <section class="class-schedule-panel class-only" id="classSchedulePanel">
+          <section class="class-schedule-panel" id="classSchedulePanel">
             <div class="field class-date-field">
               <span>上课日期</span>
               <button class="date-picker-trigger" id="classDateToggleBtn" type="button" aria-expanded="false" aria-controls="classCalendarPopup">
@@ -353,7 +368,7 @@
             </div>
           </section>
 
-          <div class="form-grid two class-only">
+          <div class="form-grid two">
             <label class="field">
               <span>反馈呈现形式</span>
               <select id="feedbackFormatSelect">
@@ -380,6 +395,11 @@
           <label class="field class-only" id="classFeedbackTemplateField">
             <span>反馈模板</span>
             <textarea id="templateInput" rows="7"></textarea>
+          </label>
+
+          <label class="field one-only hidden" id="oneFeedbackTemplateField">
+            <span>反馈模板</span>
+            <textarea id="oneProfileTemplateInput" rows="7"></textarea>
           </label>
 
           <div class="class-feedback-options class-only" id="classFeedbackOptions">

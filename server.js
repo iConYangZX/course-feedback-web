@@ -1614,11 +1614,13 @@ function buildSystemPrompt() {
     '如果提供了出门测文件内容，请结合文件里的测试知识点、题型或讲次内容评价学习情况；不要只写分数。',
     '如果反馈呈现形式是图片报告文案，请语言更适合放入报告里的“课堂表现”段落，结构清晰、少寒暄。',
     '一对一反馈里如果包含 personality 或 habit，要把它们作为长期档案背景，用自然、克制的方式融入建议，不要写得像诊断。',
+    '所有未填写、未上传、为空的内容都视为不存在，反馈正文里不要提及这些空内容，也不要用“未填写”“未上传”等字样。',
     '不同学生的反馈必须根据 performance、remark、personality 和 habit 明显区分，不允许只替换姓名。'
   ].join('\n')
 }
 
 function buildUserContent(payload, courseware) {
+  const exitTestPromptText = formatExitTestSummary(payload)
   const content = [
     {
       type: 'input_text',
@@ -1626,24 +1628,22 @@ function buildUserContent(payload, courseware) {
         `课程类型：${payload.mode === 'oneOnOne' ? '一对一' : '班课'}`,
         `反馈类型：${payload.feedbackScope === 'class' ? '班级整体反馈' : '个性化学生反馈'}`,
         `反馈呈现形式：${payload.feedbackFormat === 'image' ? '图片报告文案' : '文字反馈'}`,
-        `班级/课程：${payload.className || '未填写'}`,
-        `年级：${payload.grade || '未填写'}`,
-        `课程主题：${payload.lessonTitle || '未填写'}`,
-        `上课日期：${payload.lessonDateText || payload.lessonDate || '未填写'}`,
-        payload.timeSlot ? `上课时段：${payload.timeSlot}` : '上课时段：未填写；请不要在反馈中出现时段。',
+        payload.className ? `班级/课程：${payload.className}` : '',
+        payload.grade ? `年级：${payload.grade}` : '',
+        payload.lessonTitle ? `课程主题：${payload.lessonTitle}` : '',
+        (payload.lessonDateText || payload.lessonDate) ? `上课日期：${payload.lessonDateText || payload.lessonDate}` : '',
+        payload.timeSlot ? `上课时段：${payload.timeSlot}` : '',
         '',
         '老师提供的反馈模板：',
         payload.template || '请根据学生本节课表现生成反馈。',
         '',
         getTemplateRules(),
         '',
-        '老师补充的课程内容：',
-        payload.courseNote || '未填写',
+        payload.courseNote ? `老师补充的课程内容：\n${payload.courseNote}` : '',
         payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
         payload.homework ? `课后作业：${payload.homework}` : '',
         '',
-        '出门测信息：',
-        formatExitTestSummary(payload),
+        exitTestPromptText ? `出门测信息：\n${exitTestPromptText}` : '',
         '',
         '学生表现数据 JSON：',
         JSON.stringify(payload.students, null, 2),
@@ -1658,7 +1658,7 @@ function buildUserContent(payload, courseware) {
         '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
         '不同学生不要套用完全相同的句子。',
         '返回 JSON 前逐条自检：每条 feedback 是否保留了模板结构和固定句；不符合就先重写再返回。'
-      ].join('\n')
+      ].filter(Boolean).join('\n')
     }
   ]
 
@@ -1728,35 +1728,31 @@ function buildPlainPrompt(payload, courseware, options = {}) {
       : `老师上传了 PDF 课件：${courseware.name}。当前没有提取到可用文字，请结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
   } else if (courseware) {
     coursewareLines.push(`老师上传了课件文件：${courseware.name}。当前接口没有提取到可用文字，请只结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
-  } else {
-    coursewareLines.push('未上传课件。')
   }
+  const exitTestPromptText = formatExitTestSummary(payload)
 
   return [
     `课程类型：${payload.mode === 'oneOnOne' ? '一对一' : '班课'}`,
     `反馈类型：${payload.feedbackScope === 'class' ? '班级整体反馈' : '个性化学生反馈'}`,
     `反馈呈现形式：${payload.feedbackFormat === 'image' ? '图片报告文案' : '文字反馈'}`,
-    `班级/课程：${payload.className || '未填写'}`,
-    `年级：${payload.grade || '未填写'}`,
-    `课程主题：${payload.lessonTitle || '未填写'}`,
-    `上课日期：${payload.lessonDateText || payload.lessonDate || '未填写'}`,
-    payload.timeSlot ? `上课时段：${payload.timeSlot}` : '上课时段：未填写；请不要在反馈中出现时段。',
+    payload.className ? `班级/课程：${payload.className}` : '',
+    payload.grade ? `年级：${payload.grade}` : '',
+    payload.lessonTitle ? `课程主题：${payload.lessonTitle}` : '',
+    (payload.lessonDateText || payload.lessonDate) ? `上课日期：${payload.lessonDateText || payload.lessonDate}` : '',
+    payload.timeSlot ? `上课时段：${payload.timeSlot}` : '',
     '',
     '老师提供的反馈模板：',
     payload.template || '请根据学生本节课表现生成反馈。',
     '',
     getTemplateRules(),
     '',
-    '老师补充的课程内容：',
-    payload.courseNote || '未填写',
+    payload.courseNote ? `老师补充的课程内容：\n${payload.courseNote}` : '',
     payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
     payload.homework ? `课后作业：${payload.homework}` : '',
     '',
-    '出门测信息：',
-    formatExitTestSummary(payload),
+    exitTestPromptText ? `出门测信息：\n${exitTestPromptText}` : '',
     '',
-    '课件内容：',
-    coursewareLines.join('\n'),
+    coursewareLines.length ? `课件内容：\n${coursewareLines.join('\n')}` : '',
     '',
     '学生表现数据 JSON：',
     JSON.stringify(payload.students, null, 2),
@@ -1772,7 +1768,7 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
     '不同学生不要套用完全相同的句子。',
     '返回 JSON 前逐条自检：每条 feedback 是否保留了模板结构和固定句；不符合就先重写再返回。'
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 }
 
 function formatExitTestSummary(payload = {}) {
@@ -1789,9 +1785,9 @@ function formatExitTestSummary(payload = {}) {
       lines.push('学生成绩：')
       students.forEach((student) => {
         if (exitTest.mode === 'grade') {
-          lines.push(`- ${student.name}：${student.grade || '未填'}${student.note ? `；${student.note}` : ''}`)
+          lines.push(`- ${student.name}：${student.grade || '-'}${student.note ? `；${student.note}` : ''}`)
         } else {
-          lines.push(`- ${student.name}：${student.score ?? '未填'}/${exitTest.totalScore || 100}${student.note ? `；${student.note}` : ''}`)
+          lines.push(`- ${student.name}：${student.score ?? '-'}/${exitTest.totalScore || 100}${student.note ? `；${student.note}` : ''}`)
         }
       })
     }
@@ -1803,7 +1799,7 @@ function formatExitTestSummary(payload = {}) {
     lines.push(fileSummary.extractedText)
   }
 
-  return lines.length ? lines.join('\n') : '未填写'
+  return lines.length ? lines.join('\n') : ''
 }
 
 function buildUploadedFileSummary(courseware) {

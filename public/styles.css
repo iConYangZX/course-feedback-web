@@ -1315,6 +1315,29 @@ textarea:focus {
   gap: 8px;
 }
 
+.one-profile-note-field {
+  align-content: start;
+}
+
+.profile-keyword-panel {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfbff;
+}
+
+.keyword-chip-list.compact {
+  gap: 6px;
+}
+
+.keyword-chip-list.compact .keyword-chip {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
 .teaching-tabs {
   display: flex;
   flex-wrap: wrap;

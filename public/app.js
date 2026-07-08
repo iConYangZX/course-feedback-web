@@ -48,6 +48,14 @@ const studentKeywordNegativeOptions = [
   '计算细节易错'
 ]
 const studentKeywordOptions = [...studentKeywordPositiveOptions, ...studentKeywordNegativeOptions]
+const personalityKeywordGroups = {
+  positive: ['表达积极', '思维活跃', '愿意尝试', '专注度高', '抗挫能力较好', '主动沟通', '学习态度认真'],
+  negative: ['容易紧张', '信心不足', '表达偏少', '注意力易波动', '遇难题容易停顿', '依赖提示', '情绪受错题影响']
+}
+const habitKeywordGroups = {
+  positive: ['步骤规范', '审题认真', '草稿清晰', '会主动检查', '错题整理及时', '计算过程完整', '能总结方法'],
+  negative: ['审题易漏条件', '计算细节易错', '步骤跳跃', '书写不够规范', '检查意识不足', '速度偏慢', '错题复盘不充分']
+}
 const performanceClasses = {
   表现优秀: 'performance-excellent',
   表现良好: 'performance-good',
@@ -223,6 +231,11 @@ function bindElements() {
     oneProfileGradeSelect: document.querySelector('#oneProfileGradeSelect'),
     onePersonalityInput: document.querySelector('#onePersonalityInput'),
     oneHabitInput: document.querySelector('#oneHabitInput'),
+    onePersonalityPositiveList: document.querySelector('#onePersonalityPositiveList'),
+    onePersonalityNegativeList: document.querySelector('#onePersonalityNegativeList'),
+    oneHabitPositiveList: document.querySelector('#oneHabitPositiveList'),
+    oneHabitNegativeList: document.querySelector('#oneHabitNegativeList'),
+    oneFeedbackTemplateField: document.querySelector('#oneFeedbackTemplateField'),
     oneProfileTemplateInput: document.querySelector('#oneProfileTemplateInput'),
     oneProfileSummary: document.querySelector('#oneProfileSummary'),
     workspaceEyebrow: document.querySelector('#workspaceEyebrow'),
@@ -388,6 +401,14 @@ function bindEvents() {
   })
   if (els.classPositiveKeywordList) els.classPositiveKeywordList.addEventListener('click', handleClassKeywordClick)
   if (els.classKeywordList) els.classKeywordList.addEventListener('click', handleClassKeywordClick)
+  ;[
+    els.onePersonalityPositiveList,
+    els.onePersonalityNegativeList,
+    els.oneHabitPositiveList,
+    els.oneHabitNegativeList
+  ].forEach((list) => {
+    if (list) list.addEventListener('click', handleOneProfileKeywordClick)
+  })
   if (els.downloadImageReportBtn) els.downloadImageReportBtn.addEventListener('click', downloadImageReport)
   if (els.exitTestModeSelect) els.exitTestModeSelect.addEventListener('change', handleExitTestModeChange)
   if (els.exitTestTotalInput) els.exitTestTotalInput.addEventListener('input', () => {
@@ -1918,11 +1939,23 @@ function mergeRecordsById(localRecords, remoteRecords) {
     if (!record || !record.id) return
     const existed = records.get(record.id)
     if (!existed || Number(record.updatedAt || 0) >= Number(existed.updatedAt || 0)) {
-      records.set(record.id, record)
+      records.set(record.id, mergeRecordPreservingMaterial(record, existed))
     }
   })
 
   return Array.from(records.values())
+}
+
+function mergeRecordPreservingMaterial(record, existed) {
+  if (!existed || record.textbook) return record
+  if (record.materialMode === 'lesson') return record
+  if (!existed.textbook) return record
+
+  return {
+    ...record,
+    materialMode: record.materialMode || existed.materialMode || 'book',
+    textbook: existed.textbook
+  }
 }
 
 function scheduleFeedbackDataSync() {
@@ -1934,7 +1967,7 @@ function scheduleFeedbackDataSync() {
 }
 
 async function saveFeedbackDataToServer(options = {}) {
-  if (!state.access.authenticated) return
+  if (!state.access.authenticated) return false
 
   try {
     const response = await fetch('/api/feedback-data', {
@@ -1949,8 +1982,10 @@ async function saveFeedbackDataToServer(options = {}) {
     if (!response.ok) throw new Error(data.error || '保存档案数据失败')
 
     if (!options.silent) showToast('档案已同步到正式数据库')
+    return true
   } catch (error) {
     if (!options.silent) showToast(error.message || '档案同步失败')
+    return false
   }
 }
 
@@ -1960,6 +1995,7 @@ function render() {
   renderOneProfileList()
   renderWorkspace()
   renderOneProfileSummary()
+  renderOneProfileKeywordControls()
   renderClassSchedule()
   renderExitTestTable()
   renderStudentTable()
@@ -2062,8 +2098,9 @@ function renderWorkspace() {
 function renderClassSchedule() {
   if (!els.classSchedulePanel || !els.classCalendarGrid || !els.classCalendarTitle) return
 
-  els.classSchedulePanel.classList.toggle('hidden', state.mode !== 'class')
-  if (state.mode !== 'class') return
+  const shouldShow = state.mode === 'class' || state.mode === 'oneOnOne'
+  els.classSchedulePanel.classList.toggle('hidden', !shouldShow)
+  if (!shouldShow) return
 
   const monthDate = getDateFromMonthKey(state.classSchedule.calendarMonth)
   const todayKey = getLocalDateKey(new Date())
@@ -2385,7 +2422,7 @@ function renderResults() {
 }
 
 function isImageFeedbackMode() {
-  return state.mode === 'class'
+  return (state.mode === 'class' || state.mode === 'oneOnOne')
     && els.feedbackFormatSelect
     && els.feedbackFormatSelect.value === 'image'
 }
@@ -2393,8 +2430,7 @@ function isImageFeedbackMode() {
 function renderImageReport(payload = null) {
   if (!els.imageReportPanel || !els.imageReportPreview) return
 
-  const shouldShow = state.mode === 'class'
-    && isImageFeedbackMode()
+  const shouldShow = isImageFeedbackMode()
     && state.feedbacks.length
 
   els.imageReportPanel.classList.toggle('hidden', !shouldShow)
@@ -2404,6 +2440,7 @@ function renderImageReport(payload = null) {
   }
 
   const selectedClass = getSelectedClass()
+  const selectedProfile = getSelectedOneProfile()
   const reportPayload = payload || buildGeneratePayload() || {}
   const reportDate = reportPayload.lessonDate ? getDateFromKey(reportPayload.lessonDate) : new Date()
   const feedbackText = state.feedbacks.map((item) => item.feedback).join('\n\n')
@@ -2413,8 +2450,12 @@ function renderImageReport(payload = null) {
   const courseLines = extractReportLines(contentSource)
   const focusText = reportSections.studyFocus || ''
   const performanceText = reportSections.performance || feedbackText || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
-  const students = selectedClass ? selectedClass.students : []
+  const homeworkText = reportPayload.homework || (els.homeworkInput ? els.homeworkInput.value.trim() : '')
+  const students = state.mode === 'oneOnOne'
+    ? getWorkingStudents()
+    : (selectedClass ? selectedClass.students : [])
   const reportScores = buildReportScoreRows(students, reportPayload.exitTest)
+  const hasScoreRows = reportScores.length > 0
   const numericScores = reportScores.map((item) => Number(item.score)).filter(Number.isFinite)
   const avg = numericScores.length
     ? (numericScores.reduce((sum, score) => sum + score, 0) / numericScores.length).toFixed(1)
@@ -2436,7 +2477,7 @@ function renderImageReport(payload = null) {
       <div class="report-meta">
         <div>日期：${reportDate.getFullYear()}年${reportDate.getMonth() + 1}月${reportDate.getDate()}日（${getChineseWeekday(reportDate)}）</div>
         ${reportPayload.timeSlot ? `<div>时段：${escapeHtml(reportPayload.timeSlot)}</div>` : ''}
-        <div>班级：${escapeHtml(reportPayload.className || (selectedClass && selectedClass.name) || '')}</div>
+        <div>${state.mode === 'oneOnOne' ? '学生' : '班级'}：${escapeHtml(state.mode === 'oneOnOne' ? ((selectedProfile && selectedProfile.name) || reportPayload.className || '') : (reportPayload.className || (selectedClass && selectedClass.name) || ''))}</div>
         <div>课程主题：${escapeHtml(lessonTitle)}</div>
       </div>
       <section>
@@ -2450,11 +2491,11 @@ function renderImageReport(payload = null) {
         <h3>【课堂表现】</h3>
         <div class="report-paragraph">${formatReportText(performanceText)}</div>
       </section>
-      <section>
+      ${homeworkText ? `<section>
         <h3>【课后作业】</h3>
-        <div class="report-paragraph">${formatReportText(reportPayload.homework || els.homeworkInput.value.trim() || '完成课后巩固练习，整理课堂笔记并预习下一节内容。')}</div>
-      </section>
-      <section>
+        <div class="report-paragraph">${formatReportText(homeworkText)}</div>
+      </section>` : ''}
+      ${hasScoreRows ? `<section>
         <h3>【学生成绩记录】</h3>
         <table class="report-table">
           <thead><tr><th>姓名</th><th>成绩</th><th>正确率</th></tr></thead>
@@ -2463,7 +2504,7 @@ function renderImageReport(payload = null) {
           </tbody>
         </table>
         <p>平均分：${avg} 最高分：${max} 最低分：${min} 得分率：${rate}</p>
-      </section>
+      </section>` : ''}
       <footer>以上为本次课程反馈，如有疑问欢迎沟通。</footer>
     </article>
   `
@@ -2553,24 +2594,7 @@ function buildReportScoreRows(students, exitTest = null) {
     })
   }
 
-  const records = getScoreRecordsForClass(getSelectedClass() && getSelectedClass().id)
-  const latest = records[records.length - 1]
-
-  return (students || []).map((student, index) => {
-    const recordStudent = latest && latest.students
-      ? latest.students.find((item) => item.name === student.name)
-      : null
-    const score = recordStudent && Number.isFinite(Number(recordStudent.score))
-      ? Number(recordStudent.score)
-      : Math.max(0, 60 - (index % 5) * 5)
-    const total = latest && latest.totalScore ? Number(latest.totalScore) : 60
-    return {
-      name: student.name,
-      score: recordStudent && latest && latest.mode === 'grade' ? 0 : score,
-      displayScore: recordStudent && latest && latest.mode === 'grade' ? (recordStudent.grade || '—') : String(score),
-      rate: total ? (score / total) * 100 : 0
-    }
-  })
+  return []
 }
 
 async function downloadImageReport() {
@@ -3201,12 +3225,13 @@ function renderFeedbackModeControls() {
   if (!els.feedbackScopeSelect) return
 
   const isClassScope = state.mode === 'class' && els.feedbackScopeSelect.value === 'class'
-  const isImageFormat = state.mode === 'class' && els.feedbackFormatSelect && els.feedbackFormatSelect.value === 'image'
+  const isImageFormat = isImageFeedbackMode()
 
   const studentTable = els.studentTable
   if (els.studentToolbar) els.studentToolbar.classList.toggle('hidden', isClassScope)
   if (studentTable) studentTable.classList.toggle('hidden', isClassScope)
   if (els.classFeedbackTemplateField) els.classFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'class' || isImageFormat)
+  if (els.oneFeedbackTemplateField) els.oneFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'oneOnOne' || isImageFormat)
   if (els.classFeedbackOptions) els.classFeedbackOptions.classList.toggle('hidden', !isClassScope)
   if (els.classPositiveKeywordList) {
     els.classPositiveKeywordList.innerHTML = getClassKeywordGroups().positive.map((keyword) => (
@@ -3263,6 +3288,43 @@ function handleClassKeywordClick(event) {
   }
 
   els.classRemarkInput.value = Array.from(current).join('、')
+}
+
+function renderOneProfileKeywordControls() {
+  renderKeywordButtons(els.onePersonalityPositiveList, personalityKeywordGroups.positive, 'positive', 'personality')
+  renderKeywordButtons(els.onePersonalityNegativeList, personalityKeywordGroups.negative, 'negative', 'personality')
+  renderKeywordButtons(els.oneHabitPositiveList, habitKeywordGroups.positive, 'positive', 'habit')
+  renderKeywordButtons(els.oneHabitNegativeList, habitKeywordGroups.negative, 'negative', 'habit')
+}
+
+function renderKeywordButtons(container, keywords, tone, target) {
+  if (!container) return
+  container.innerHTML = keywords.map((keyword) => (
+    `<button class="keyword-chip ${tone}" data-profile-keyword="${escapeHtml(keyword)}" data-profile-target="${target}" type="button">${escapeHtml(keyword)}</button>`
+  )).join('')
+}
+
+function handleOneProfileKeywordClick(event) {
+  const button = event.target.closest('[data-profile-keyword]')
+  if (!button) return
+
+  const target = button.dataset.profileTarget
+  const textarea = target === 'habit' ? els.oneHabitInput : els.onePersonalityInput
+  if (!textarea) return
+
+  appendKeywordToTextarea(textarea, button.dataset.profileKeyword)
+  button.classList.add('active')
+}
+
+function appendKeywordToTextarea(textarea, keyword) {
+  const current = String(textarea.value || '').trim()
+  const parts = current
+    .split(/[、,，；;\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  if (!parts.includes(keyword)) parts.push(keyword)
+  textarea.value = parts.join('、')
 }
 
 function resetClassForm() {
@@ -3412,8 +3474,11 @@ async function saveClass() {
   state.editingClassId = classInfo.id
   state.feedbacks = []
   persistClasses()
+  els.saveClassBtn.disabled = true
+  els.saveClassBtn.textContent = '正在同步档案...'
+  const synced = await saveFeedbackDataToServer({ silent: true })
   render()
-  showToast('班级已保存')
+  showToast(synced ? '班级已保存并同步' : '班级已保存在本机，数据库同步失败，请稍后再试')
   els.saveClassBtn.disabled = false
   els.saveClassBtn.textContent = '保存班级'
 }
@@ -3430,11 +3495,6 @@ function saveOneProfile() {
     return
   }
 
-  if (!template) {
-    showToast('请输入反馈模板')
-    return
-  }
-
   const oldProfile = state.editingOneProfileId
     ? state.oneProfiles.find((item) => item.id === state.editingOneProfileId)
     : null
@@ -3445,7 +3505,7 @@ function saveOneProfile() {
     grade,
     personality,
     habit,
-    template,
+    template: template || (oldProfile && oldProfile.template) || DEFAULT_TEMPLATE,
     updatedAt: Date.now()
   }
 
@@ -3537,7 +3597,7 @@ async function generateFeedback() {
 
     formData.append('payload', JSON.stringify(payload))
     if (file) formData.append('courseware', file)
-    if (exitTestFile) formData.append('exitTest', exitTestFile)
+    if (exitTestFile && payload.exitTest) formData.append('exitTest', exitTestFile)
 
     const response = await fetch('/api/generate-feedback', {
       method: 'POST',
@@ -3612,7 +3672,7 @@ function buildGeneratePayload() {
     const homework = els.homeworkInput ? els.homeworkInput.value.trim() : ''
     const schedule = buildClassSchedulePayload()
     const exitTest = buildExitTestPayload(selectedClass)
-    if (!exitTest) return null
+    if (exitTest === false) return null
     const lectureNote = selectedLecture
       ? `教材讲次：${selectedLecture.title || '所选讲次'}（第 ${selectedLecture.startPage}-${selectedLecture.endPage} 页）`
       : ''
@@ -3625,7 +3685,7 @@ function buildGeneratePayload() {
         }]
       : selectedClass.students.map((student) => ({
           ...student,
-          exitTestScore: getExitTestScoreText(exitTest, student.name)
+          exitTestScore: exitTest ? getExitTestScoreText(exitTest, student.name) : ''
         }))
 
     return {
@@ -3651,7 +3711,7 @@ function buildGeneratePayload() {
         .join('\n'),
       classRemark,
       homework,
-      exitTest,
+      ...(exitTest ? { exitTest } : {}),
       materialId: hasStoredMaterial ? selectedClass.textbook.id : '',
       selectedPdfPages: selectedLecture ? buildPageRange(selectedLecture.startPage, selectedLecture.endPage) : [],
       students: classStudents
@@ -3673,14 +3733,25 @@ function buildGeneratePayload() {
   const currentTemplate = els.oneProfileTemplateInput.value.trim()
     || selectedProfile.template
     || DEFAULT_TEMPLATE
+  const schedule = buildClassSchedulePayload()
+  const feedbackFormat = els.feedbackFormatSelect ? els.feedbackFormatSelect.value : 'text'
 
   return {
     mode: 'oneOnOne',
+    feedbackScope: 'individual',
+    feedbackFormat,
     className: `${selectedProfile.name} 一对一`,
     grade: selectedProfile.grade,
     template: currentTemplate,
     lessonTitle,
-    courseNote,
+    lessonDate: schedule.date,
+    lessonDateText: schedule.dateText,
+    timeSlot: schedule.timeSlot,
+    courseNote: [
+      schedule.dateText ? `上课日期：${schedule.dateText}` : '',
+      schedule.timeSlot ? `上课时段：${schedule.timeSlot}` : '',
+      courseNote
+    ].filter(Boolean).join('\n'),
     students: [{
       id: selectedProfile.id,
       name: selectedProfile.name,
@@ -4383,10 +4454,19 @@ function buildExitTestPayload(classInfo) {
   const totalScore = Math.max(1, Number(els.exitTestTotalInput && els.exitTestTotalInput.value || state.exitTest.totalScore || 100))
   const file = els.exitTestInput && els.exitTestInput.files ? els.exitTestInput.files[0] : null
   const selectedLecture = getSelectedExitTestLecture()
+  const hasAnyScoreInput = students.some((student) => {
+    const saved = state.exitTest.scores[student.id] || {}
+    return mode === 'grade'
+      ? Boolean(String(saved.grade || '').trim() || String(saved.note || '').trim())
+      : Boolean(String(saved.score ?? '').trim() || String(saved.note || '').trim())
+  })
+  const hasExitTestData = Boolean(file || hasAnyScoreInput)
+
+  if (!hasExitTestData) return null
 
   if (file && state.exitTest.lectures.length > 1 && !selectedLecture) {
     showToast('请选择出门测文件中的讲次')
-    return null
+    return false
   }
 
   if (!students.length) {
@@ -4414,7 +4494,7 @@ function buildExitTestPayload(classInfo) {
   const missing = rows.find((row) => mode === 'grade' ? !row.grade : row.score === null)
   if (missing) {
     showToast(`请填写 ${missing.name} 的出门测${mode === 'grade' ? '等级' : '成绩'}`)
-    return null
+    return false
   }
 
   const sortedStudents = rows.slice().sort((left, right) => compareExitTestRows(left, right, mode))
