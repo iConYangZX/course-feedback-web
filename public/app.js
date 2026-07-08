@@ -1064,7 +1064,7 @@ async function recognizeQuestions() {
       method: 'POST',
       body: formData
     })
-    const data = await response.json()
+    const data = await readJsonResponse(response, '题目识别失败')
 
     if (response.status === 401) {
       updateAccessState({ authenticated: false })
@@ -1145,7 +1145,7 @@ async function appendPdfQuestionPages(formData, file, startIndex) {
     state.rearrange.status = `正在读取 PDF 第 ${pageNumber}/${pageTotal} 页`
     renderRearrange()
     const page = await pdf.getPage(pageNumber)
-    const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1800, quality: 0.78 })
+    const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.7 })
     formData.append('rearrangePageImage', blob, `${file.name}-page-${startIndex + pageNumber}.jpg`)
   }
 
@@ -1161,7 +1161,7 @@ async function appendImageQuestionPage(formData, file, pageIndex) {
 
 async function imageFileToJpegBlob(file) {
   const image = await loadImageFromUrl(URL.createObjectURL(file))
-  const scale = Math.min(1, 1800 / Math.max(image.naturalWidth, image.naturalHeight, 1))
+  const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight, 1))
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
   canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
@@ -1169,7 +1169,22 @@ async function imageFileToJpegBlob(file) {
   context.fillStyle = '#ffffff'
   context.fillRect(0, 0, canvas.width, canvas.height)
   context.drawImage(image, 0, 0, canvas.width, canvas.height)
-  return canvasToBlob(canvas, 'image/jpeg', 0.8)
+  return canvasToBlob(canvas, 'image/jpeg', 0.72)
+}
+
+async function readJsonResponse(response, fallbackMessage) {
+  const text = await response.text()
+
+  try {
+    return JSON.parse(text)
+  } catch (error) {
+    const isHtml = /^\s*</.test(text)
+    const message = isHtml
+      ? `${fallbackMessage}：测试版后端接口没有返回 JSON，请确认部署已更新为 Node 后端服务。`
+      : `${fallbackMessage}：${text.slice(0, 160) || '接口返回为空'}`
+
+    return { error: message }
+  }
 }
 
 function loadImageFromUrl(url) {

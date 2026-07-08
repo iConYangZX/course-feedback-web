@@ -42,6 +42,7 @@ const ACCESS_CODE = trim(process.env.ACCESS_CODE)
 const DAILY_LIMIT = parseDailyLimit(process.env.DAILY_LIMIT)
 const SESSION_COOKIE = 'course_feedback_session'
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
+const QUESTION_RECOGNITION_BATCH_SIZE = 2
 const DEFAULT_ACCOUNTS = [
   {
     id: 'admin-iconyang',
@@ -332,20 +333,14 @@ app.post('/api/rearrange/recognize', requireAccessMiddleware, upload.fields([
     }
 
     const aiConfig = getAIConfig()
-    const pages = pageFiles.map((file, index) => ({
-      pageIndex: index,
-      name: file.originalname || `page-${index + 1}.jpg`,
-      mime: getMimeType(file.originalname || 'page.jpg', file.mimetype || 'image/jpeg'),
-      dataUrl: `data:${getMimeType(file.originalname || 'page.jpg', file.mimetype || 'image/jpeg')};base64,${file.buffer.toString('base64')}`
-    }))
+    const pages = await buildQuestionPageInputs(pageFiles)
     const docTexts = sourceFiles.map((file) => extractQuestionSourceText(file)).filter((item) => item.text)
 
     let questions
     if (!aiConfig.apiKey) {
       questions = buildDemoQuestions(payload, docTexts)
     } else {
-      const aiResponse = await requestQuestionRecognition(payload, pages, docTexts, aiConfig)
-      questions = parseQuestionRecognitionResponse(aiResponse, aiConfig.provider).questions
+      questions = await recognizeQuestionList(payload, pages, docTexts, aiConfig)
     }
 
     const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
@@ -1480,6 +1475,80 @@ function buildChatCompatibleUserContent(payload, courseware, options = {}) {
   ]
 }
 
+async function buildQuestionPageInputs(pageFiles) {
+  const pages = []
+
+  for (const [index, file] of pageFiles.entries()) {
+    const name = file.originalname || `page-${index + 1}.jpg`
+    const mime = getMimeType(name, file.mimetype || 'image/jpeg')
+    const ocrText = await extractImageText(file.buffer, name)
+
+    pages.push({
+      pageIndex: index,
+      name,
+      mime,
+      ocrText,
+      dataUrl: `data:${mime};base64,${file.buffer.toString('base64')}`
+    })
+  }
+
+  return pages
+}
+
+async function recognizeQuestionList(payload, pages, docTexts, aiConfig) {
+  const pageOcrTexts = pages
+    .filter((page) => page.ocrText)
+    .map((page) => ({
+      name: page.name,
+      text: truncateText(page.ocrText)
+    }))
+  const baseDocTexts = [...docTexts, ...pageOcrTexts]
+
+  if (!pages.length) {
+    const aiResponse = await requestQuestionRecognition(payload, [], baseDocTexts, aiConfig)
+    return parseQuestionRecognitionResponse(aiResponse, aiConfig.provider).questions
+  }
+
+  const allQuestions = []
+  const batches = chunkArray(pages, QUESTION_RECOGNITION_BATCH_SIZE)
+
+  for (const [batchIndex, batchPages] of batches.entries()) {
+    const batchPayload = {
+      ...payload,
+      pageBatchLabel: `第 ${batchIndex + 1}/${batches.length} 批`,
+      pageBatchNames: batchPages.map((page) => page.name)
+    }
+    const batchDocTexts = [
+      ...docTexts,
+      ...batchPages
+        .filter((page) => page.ocrText)
+        .map((page) => ({
+          name: page.name,
+          text: truncateText(page.ocrText)
+        }))
+    ]
+    const aiResponse = await requestQuestionRecognitionWithFallback(batchPayload, batchPages, batchDocTexts, aiConfig)
+    const parsed = parseQuestionRecognitionResponse(aiResponse, aiConfig.provider)
+
+    if (Array.isArray(parsed.questions)) {
+      allQuestions.push(...parsed.questions)
+    }
+  }
+
+  return allQuestions
+}
+
+async function requestQuestionRecognitionWithFallback(payload, pages, docTexts, aiConfig) {
+  try {
+    return await requestQuestionRecognition(payload, pages, docTexts, aiConfig)
+  } catch (error) {
+    const hasTextFallback = Array.isArray(docTexts) && docTexts.some((item) => item && item.text)
+    if (!pages.length || !hasTextFallback || !isLikelyImageRequestError(error)) throw error
+
+    return requestQuestionRecognition(payload, [], docTexts, aiConfig)
+  }
+}
+
 async function requestQuestionRecognition(payload, pages, docTexts, aiConfig) {
   if (aiConfig.provider === 'openai') {
     return requestOpenAIQuestionRecognition(payload, pages, docTexts, aiConfig)
@@ -1520,7 +1589,7 @@ async function requestOpenAIQuestionRecognition(payload, pages, docTexts, aiConf
     body: JSON.stringify(body)
   }))
   const text = await response.text()
-  const parsed = JSON.parse(text)
+  const parsed = parseProviderResponseJson(text, 'AI')
   if (!response.ok) {
     const message = parsed.error && parsed.error.message ? parsed.error.message : text
     throw new Error(`AI 请求失败：${message}`)
@@ -1558,7 +1627,7 @@ async function requestChatQuestionRecognition(payload, pages, docTexts, aiConfig
     body: JSON.stringify(body)
   }))
   const text = await response.text()
-  const parsed = JSON.parse(text)
+  const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
   if (!response.ok) {
     const message = parsed.error && parsed.error.message ? parsed.error.message : text
     throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
@@ -1581,6 +1650,8 @@ function buildQuestionRecognitionContent(payload, pages, docTexts, target) {
   const text = [
     `试卷标题：${payload.title || '未命名试卷'}`,
     `上传文件：${Array.isArray(payload.files) ? payload.files.map((file) => file.name).join('、') : '未填写'}`,
+    `当前识别批次：${payload.pageBatchLabel || '全部页面'}`,
+    `当前发送页面：${Array.isArray(payload.pageBatchNames) && payload.pageBatchNames.length ? payload.pageBatchNames.join('、') : (pages.length ? pages.map((page) => page.name).join('、') : '无')}`,
     '',
     '识别要求：',
     '1. 将试卷拆分成独立题目。',
@@ -1701,6 +1772,17 @@ function extractQuestionSourceText(file) {
     name,
     text: ''
   }
+}
+
+function chunkArray(list, size) {
+  const chunkSize = Math.max(1, Number(size) || 1)
+  const chunks = []
+
+  for (let index = 0; index < list.length; index += chunkSize) {
+    chunks.push(list.slice(index, index + chunkSize))
+  }
+
+  return chunks
 }
 
 function normalizeQuestions(questions) {
@@ -2034,11 +2116,57 @@ function parseJsonText(text) {
     .replace(/```$/i, '')
     .trim()
 
-  try {
-    return JSON.parse(cleanText)
-  } catch (error) {
-    return { feedbacks: [] }
+  const parsed = tryParseJson(cleanText)
+  if (parsed) return parsed
+
+  const jsonText = extractFirstJsonObject(cleanText)
+  if (jsonText) {
+    const extracted = tryParseJson(jsonText)
+    if (extracted) return extracted
   }
+
+  return { feedbacks: [], questions: [] }
+}
+
+function parseProviderResponseJson(text, providerLabel) {
+  const parsed = tryParseJson(text)
+  if (parsed) return parsed
+
+  throw new Error(buildNonJsonAIResponseMessage(text, providerLabel))
+}
+
+function tryParseJson(text) {
+  try {
+    return JSON.parse(String(text || '').trim())
+  } catch (error) {
+    return null
+  }
+}
+
+function extractFirstJsonObject(text) {
+  const source = String(text || '')
+  const start = source.indexOf('{')
+  const end = source.lastIndexOf('}')
+
+  if (start < 0 || end <= start) return ''
+  return source.slice(start, end + 1)
+}
+
+function buildNonJsonAIResponseMessage(text, providerLabel) {
+  const rawText = String(text || '')
+  const plainText = rawText
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const snippet = (plainText || rawText).slice(0, 160)
+
+  if (/^\s*</.test(rawText)) {
+    return `${providerLabel} 接口没有返回 JSON，通常是 API 地址、模型渠道或图片识别能力不匹配。请检查测试版 AI 配置，或减少 PDF 页数后重试。`
+  }
+
+  return `${providerLabel} 返回无法解析：${snippet || '空响应'}`
 }
 
 function normalizeFeedbacks(feedbacks, students, payload = {}) {
@@ -2317,7 +2445,7 @@ async function runOcrOnImageFile(imagePath) {
 }
 
 function getOcrCommand() {
-  if (fs.existsSync(OCR_BINARY_PATH)) {
+  if (process.platform === 'darwin' && fs.existsSync(OCR_BINARY_PATH)) {
     return {
       command: OCR_BINARY_PATH,
       args: []
