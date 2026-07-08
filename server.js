@@ -1639,7 +1639,8 @@ function buildQuestionRecognitionSystemPrompt() {
   return [
     '你是一名严谨的试卷题目结构化助手。',
     '你要从老师上传的试卷页面或 Word 文本中识别题目，并整理成可重新排版的结构化 JSON。',
-    '数学公式必须用标准 LaTeX 表达，并放在 $...$ 或 $$...$$ 中；不要把分式、根号、上下标只写成普通文字。',
+    '数学公式优先使用稳定的数学字符文本，例如 x²、aₙ、√(3)、(x²-1)/(x-1)、≤、≥；不要输出容易破坏 JSON 的单反斜杠 LaTeX 命令。',
+    '如果确实必须使用 LaTeX，JSON 字符串里的反斜杠必须写成双反斜杠，例如 $\\\\frac{x^2-1}{x-1}$，不能写成 $\\frac{x^2-1}{x-1}$。',
     '必须尽量保留原题文字、数学符号、编号、选项顺序和题目含义。',
     '如果页面中有图形、表格、函数图像、几何图或统计图，请在 figureNote 中用简短中文描述，并在 figureSvg 中生成一个安全、简洁的 SVG 草图。',
     'figureSvg 只允许使用 svg、g、path、line、polyline、polygon、rect、circle、ellipse、text 这些基础元素；不要使用 script、foreignObject、image、style、外链或事件属性。',
@@ -1664,7 +1665,7 @@ function buildQuestionRecognitionContent(payload, pages, docTexts, target) {
     '2. 每道题返回 number、stemMarkdown、options、optionLayout、figureNote、figureSvg、answer、analysis。',
     '3. 选择题选项放入 options 数组，每个选项保留 A. / B. / C. / D. 等标记。',
     '4. optionLayout 根据原卷选项排版填写 inline、two-column 或 one-column；非选择题 options 为空数组，optionLayout 填 one-column。',
-    '5. stemMarkdown 和 options 中的数学内容必须用 LaTeX，例如 $\\frac{x^2-1}{x-1}$、$\\sqrt{3}$、$a_n$、$x^2$。',
+    '5. stemMarkdown 和 options 中的数学内容优先写成可直接显示的数学字符，例如 x²、aₙ、√(3)、(x²-1)/(x-1)；如使用 LaTeX，必须双重转义反斜杠。',
     '6. stemMarkdown 必须保留原卷换行：条件、分小问（1）（2）、表格前后、解答空行不要合并成一段。',
     '7. 如果题目跨页，请合并成一道题。',
     '8. 如果原题有图，figureSvg 必须画出可理解的简化图；如果没有图，figureSvg 为空字符串。',
@@ -1675,7 +1676,7 @@ function buildQuestionRecognitionContent(payload, pages, docTexts, target) {
       : '无',
     '',
     '请严格返回 JSON，格式为：',
-    '{"questions":[{"id":"q1","number":"1","stemMarkdown":"题干第一行，公式写作 $x^2+1$\\n（1）第一小问\\n（2）第二小问","options":["A. $x=1$","B. $x=2$"],"optionLayout":"inline","figureNote":"","figureSvg":"","answer":"","analysis":""}],"warnings":[]}'
+    '{"questions":[{"id":"q1","number":"1","stemMarkdown":"题干第一行，公式写作 x²+1\\n（1）第一小问\\n（2）第二小问","options":["A. x=1","B. x=2"],"optionLayout":"inline","figureNote":"","figureSvg":"","answer":"","analysis":""}],"warnings":[]}'
   ].join('\n')
 
   if (target === 'responses') {
@@ -1825,7 +1826,7 @@ function normalizeSvgMarkup(value) {
 }
 
 function normalizeQuestionLayoutText(value) {
-  let text = trim(value)
+  let text = repairBrokenMathText(trim(value))
   if (!text) return ''
 
   text = text
@@ -1836,7 +1837,7 @@ function normalizeQuestionLayoutText(value) {
   if (!text.includes('\n')) {
     text = text
       .replace(/\s*(?=（[一二三四五六七八九十\d]+）)/g, '\n')
-      .replace(/\s*(?=\([一二三四五六七八九十\d]+\))/g, '\n')
+      .replace(/\s*(?=\([一二三四五六七八九十]+\))/g, '\n')
       .replace(/\s*(?=[①②③④⑤⑥⑦⑧⑨⑩])/g, '\n')
       .replace(/\s*(?=(?:解|证明|求证|分析)[:：])/g, '\n')
   }
@@ -1844,6 +1845,50 @@ function normalizeQuestionLayoutText(value) {
   return text
     .replace(/\n{3,}/g, '\n\n')
     .replace(/^\n+|\n+$/g, '')
+}
+
+function repairBrokenMathText(value) {
+  let text = String(value || '')
+  if (!text) return ''
+
+  const controlRepairs = [
+    ['\f', 'rac', '\\frac'],
+    ['\f', 'rac ', '\\frac '],
+    ['\t', 'heta', '\\theta'],
+    ['\t', 'imes', '\\times'],
+    ['\t', 'an', '\\tan'],
+    ['\t', 'ext', '\\text'],
+    ['\r', 'ight', '\\right'],
+    ['\r', 'angle', '\\rangle'],
+    ['\b', 'eta', '\\beta']
+  ]
+
+  controlRepairs.forEach(([control, suffix, replacement]) => {
+    text = text.split(`${control}${suffix}`).join(replacement)
+  })
+
+  text = text
+    .replace(/\u000c/g, '\\f')
+    .replace(/\u000b/g, '')
+    .replace(/\\frac/g, '\\frac')
+    .replace(/\\sqrt/g, '\\sqrt')
+
+  return convertLatexToDisplayText(text)
+}
+
+function convertLatexToDisplayText(value) {
+  let text = String(value || '')
+
+  text = text.replace(/\$\$([\s\S]*?)\$\$/g, (match, formula) => latexToReadableMath(formula))
+  text = text.replace(/\$(.*?)\$/g, (match, formula) => latexToReadableMath(formula))
+  text = text.replace(/\\\((.*?)\\\)/g, (match, formula) => latexToReadableMath(formula))
+  text = text.replace(/\\\[(.*?)\\\]/g, (match, formula) => latexToReadableMath(formula))
+
+  if (/\\(?:frac|sqrt|times|cdot|leq|geq|neq|approx|theta|alpha|beta|gamma|Delta|pi|sum|int)|[\^_][{A-Za-z0-9]/.test(text)) {
+    text = latexToReadableMath(text)
+  }
+
+  return text
 }
 
 function normalizeOptionLayout(value, options = []) {
@@ -2550,16 +2595,24 @@ function parseJsonText(text) {
     .replace(/```$/i, '')
     .trim()
 
-  const parsed = tryParseJson(cleanText)
+  const repairedText = repairJsonLatexBackslashes(cleanText)
+  const parsed = tryParseJson(cleanText) || tryParseJson(repairedText)
   if (parsed) return parsed
 
   const jsonText = extractFirstJsonObject(cleanText)
   if (jsonText) {
-    const extracted = tryParseJson(jsonText)
+    const extracted = tryParseJson(jsonText) || tryParseJson(repairJsonLatexBackslashes(jsonText))
     if (extracted) return extracted
   }
 
   return { feedbacks: [], questions: [] }
+}
+
+function repairJsonLatexBackslashes(text) {
+  return String(text || '').replace(
+    /(^|[^\\])\\(frac|dfrac|tfrac|sqrt|left|right|times|cdot|leq|le|geq|ge|neq|approx|infty|pi|theta|alpha|beta|gamma|Delta|sum|int|tan|sin|cos|log|ln|text|overline|angle|parallel|perp|rangle|langle|begin|end)/g,
+    '$1\\\\$2'
+  )
 }
 
 function parseProviderResponseJson(text, providerLabel) {
