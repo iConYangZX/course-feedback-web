@@ -813,6 +813,10 @@ textarea:focus {
   margin-bottom: 14px;
 }
 
+.pdf-lecture-picker {
+  margin-bottom: 14px;
+}
+
 .pdf-page-grid {
   margin-bottom: 18px;
 }
