@@ -997,6 +997,10 @@ function renderQuestionEditor() {
         <span>选项（每行一个）</span>
         <textarea data-question-field="options" rows="4">${escapeHtml((question.options || []).join('\n'))}</textarea>
       </label>
+      <label class="field">
+        <span>图形 SVG（AI生成，可选）</span>
+        <textarea data-question-field="figureSvg" rows="4" placeholder="<svg viewBox=&quot;0 0 320 200&quot;>...</svg>">${escapeHtml(question.figureSvg || '')}</textarea>
+      </label>
     </article>
   `).join('')
 }
@@ -1020,9 +1024,70 @@ function renderQuestionPreview() {
           </div>
         ` : ''}
         ${question.figureNote ? `<div class="preview-note">图形说明：${escapeHtml(question.figureNote)}</div>` : ''}
+        ${renderSafeQuestionSvg(question.figureSvg)}
       </article>
     `)
   ].join('')
+
+  renderQuestionMath()
+}
+
+function renderSafeQuestionSvg(svgText) {
+  const svg = sanitizeQuestionSvg(svgText)
+  if (!svg) return ''
+  return `<div class="question-figure">${svg}</div>`
+}
+
+function sanitizeQuestionSvg(svgText) {
+  const source = String(svgText || '').trim()
+  if (!source || !source.toLowerCase().startsWith('<svg')) return ''
+
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(source, 'image/svg+xml')
+    const svg = doc.querySelector('svg')
+    if (!svg || doc.querySelector('parsererror')) return ''
+
+    const allowedTags = new Set(['svg', 'g', 'path', 'line', 'polyline', 'polygon', 'rect', 'circle', 'ellipse', 'text'])
+    const allowedAttrs = new Set([
+      'xmlns', 'viewBox', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r', 'rx', 'ry',
+      'd', 'points', 'width', 'height', 'fill', 'stroke', 'stroke-width', 'stroke-linecap',
+      'stroke-linejoin', 'font-size', 'font-family', 'text-anchor', 'dominant-baseline',
+      'transform', 'opacity'
+    ])
+
+    Array.from(svg.querySelectorAll('*')).forEach((node) => {
+      if (!allowedTags.has(node.tagName)) {
+        node.remove()
+        return
+      }
+
+      Array.from(node.attributes).forEach((attr) => {
+        if (attr.name.startsWith('on') || !allowedAttrs.has(attr.name)) {
+          node.removeAttribute(attr.name)
+        }
+      })
+    })
+
+    Array.from(svg.attributes).forEach((attr) => {
+      if (attr.name.startsWith('on') || !allowedAttrs.has(attr.name)) {
+        svg.removeAttribute(attr.name)
+      }
+    })
+
+    if (!svg.getAttribute('xmlns')) svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', '0 0 320 200')
+
+    return new XMLSerializer().serializeToString(svg)
+  } catch (error) {
+    return ''
+  }
+}
+
+function renderQuestionMath() {
+  if (!window.MathJax || !window.MathJax.typesetPromise || !els.questionPreviewPaper) return
+
+  window.MathJax.typesetPromise([els.questionPreviewPaper]).catch(() => {})
 }
 
 function updateQuestionFromEditor(event) {
@@ -1272,6 +1337,7 @@ function normalizeQuestion(question, index = 0) {
       ? item.options.map((option) => String(option || '').trim()).filter(Boolean)
       : [],
     figureNote: String(item.figureNote || item.figureDescription || '').trim(),
+    figureSvg: String(item.figureSvg || item.svg || item.figure || '').trim(),
     answer: String(item.answer || '').trim(),
     analysis: String(item.analysis || '').trim()
   }

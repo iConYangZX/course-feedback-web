@@ -813,6 +813,18 @@ textarea:focus {
   font-size: 13px;
 }
 
+.question-figure {
+  margin: 10px 0 4px 28px;
+  width: min(300px, 88%);
+}
+
+.question-figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 210px;
+}
+
 .student-toolbar {
   margin: 4px 0 12px;
   padding-top: 6px;

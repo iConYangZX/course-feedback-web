@@ -1639,8 +1639,11 @@ function buildQuestionRecognitionSystemPrompt() {
   return [
     '你是一名严谨的试卷题目结构化助手。',
     '你要从老师上传的试卷页面或 Word 文本中识别题目，并整理成可重新排版的结构化 JSON。',
+    '数学公式必须用标准 LaTeX 表达，并放在 $...$ 或 $$...$$ 中；不要把分式、根号、上下标只写成普通文字。',
     '必须尽量保留原题文字、数学符号、编号、选项顺序和题目含义。',
-    '如果页面中有图形、表格、函数图像、几何图或统计图，请在 figureNote 中用简短中文描述，不要编造图中没有的信息。',
+    '如果页面中有图形、表格、函数图像、几何图或统计图，请在 figureNote 中用简短中文描述，并在 figureSvg 中生成一个安全、简洁的 SVG 草图。',
+    'figureSvg 只允许使用 svg、g、path、line、polyline、polygon、rect、circle、ellipse、text 这些基础元素；不要使用 script、foreignObject、image、style、外链或事件属性。',
+    'figureSvg 的 viewBox 建议使用 0 0 320 200，线条用黑色或灰色，必要时标注坐标轴、点、角、长度、函数趋势。',
     '如果无法确定答案或解析，可以留空。',
     '只返回 JSON，不要使用 Markdown，不要解释。'
   ].join('\n')
@@ -1655,11 +1658,12 @@ function buildQuestionRecognitionContent(payload, pages, docTexts, target) {
     '',
     '识别要求：',
     '1. 将试卷拆分成独立题目。',
-    '2. 每道题返回 number、stemMarkdown、options、figureNote、answer、analysis。',
+    '2. 每道题返回 number、stemMarkdown、options、figureNote、figureSvg、answer、analysis。',
     '3. 选择题选项放入 options 数组，每个选项保留 A. / B. / C. / D. 等标记。',
     '4. 非选择题 options 为空数组。',
-    '5. stemMarkdown 可以包含简单 LaTeX 或普通数学符号，但不要添加题目里没有的内容。',
+    '5. stemMarkdown 和 options 中的数学内容必须用 LaTeX，例如 $\\frac{x^2-1}{x-1}$、$\\sqrt{3}$、$a_n$、$x^2$。',
     '6. 如果题目跨页，请合并成一道题。',
+    '7. 如果原题有图，figureSvg 必须画出可理解的简化图；如果没有图，figureSvg 为空字符串。',
     '',
     'Word 文本内容：',
     docTexts.length
@@ -1667,7 +1671,7 @@ function buildQuestionRecognitionContent(payload, pages, docTexts, target) {
       : '无',
     '',
     '请严格返回 JSON，格式为：',
-    '{"questions":[{"id":"q1","number":"1","stemMarkdown":"题干","options":["A. ...","B. ..."],"figureNote":"","answer":"","analysis":""}],"warnings":[]}'
+    '{"questions":[{"id":"q1","number":"1","stemMarkdown":"题干，公式写作 $x^2+1$","options":["A. $x=1$","B. $x=2$"],"figureNote":"","figureSvg":"","answer":"","analysis":""}],"warnings":[]}'
   ].join('\n')
 
   if (target === 'responses') {
@@ -1714,10 +1718,11 @@ function getQuestionRecognitionJsonSchema() {
               items: { type: 'string' }
             },
             figureNote: { type: 'string' },
+            figureSvg: { type: 'string' },
             answer: { type: 'string' },
             analysis: { type: 'string' }
           },
-          required: ['id', 'number', 'stemMarkdown', 'options', 'figureNote', 'answer', 'analysis']
+          required: ['id', 'number', 'stemMarkdown', 'options', 'figureNote', 'figureSvg', 'answer', 'analysis']
         }
       },
       warnings: {
@@ -1785,6 +1790,32 @@ function chunkArray(list, size) {
   return chunks
 }
 
+function normalizeSvgMarkup(value) {
+  let svg = trim(value)
+  if (!svg || !/^<svg[\s>]/i.test(svg)) return ''
+
+  svg = svg
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, '')
+    .replace(/<image[\s\S]*?>/gi, '')
+    .replace(/\sstyle\s*=\s*"[^"]*"/gi, '')
+    .replace(/\sstyle\s*=\s*'[^']*'/gi, '')
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
+    .replace(/\s(?:href|xlink:href)\s*=\s*"[^"]*"/gi, '')
+    .replace(/\s(?:href|xlink:href)\s*=\s*'[^']*'/gi, '')
+
+  if (!/^<svg[^>]+xmlns=/i.test(svg)) {
+    svg = svg.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"')
+  }
+
+  if (!/^<svg[^>]+viewBox=/i.test(svg)) {
+    svg = svg.replace(/^<svg/i, '<svg viewBox="0 0 320 200"')
+  }
+
+  return svg
+}
+
 function normalizeQuestions(questions) {
   const list = Array.isArray(questions) ? questions : []
   return list.map((question, index) => {
@@ -1799,10 +1830,11 @@ function normalizeQuestions(questions) {
       stemMarkdown: trim(item.stemMarkdown || item.stem),
       options,
       figureNote: trim(item.figureNote || item.figureDescription),
+      figureSvg: normalizeSvgMarkup(item.figureSvg || item.svg || item.figure),
       answer: trim(item.answer),
       analysis: trim(item.analysis)
     }
-  }).filter((question) => question.stemMarkdown || question.options.length || question.figureNote)
+  }).filter((question) => question.stemMarkdown || question.options.length || question.figureNote || question.figureSvg)
 }
 
 function buildDemoQuestions(payload, docTexts) {
@@ -1814,6 +1846,7 @@ function buildDemoQuestions(payload, docTexts) {
       stemMarkdown: text.slice(0, 180),
       options: [],
       figureNote: '',
+      figureSvg: '',
       answer: '',
       analysis: ''
     }]
@@ -1823,8 +1856,9 @@ function buildDemoQuestions(payload, docTexts) {
     id: 'demo-q1',
     number: '1',
     stemMarkdown: `${payload.title || '本试卷'}示例题：请根据上传页面识别题干内容。`,
-    options: ['A. 选项一', 'B. 选项二', 'C. 选项三', 'D. 选项四'],
-    figureNote: '演示模式未调用 AI。',
+    options: ['A. $x=1$', 'B. $x=2$', 'C. $x=3$', 'D. $x=4$'],
+    figureNote: '演示模式未调用 AI，以下为示例坐标图。',
+    figureSvg: '<svg viewBox="0 0 320 200" xmlns="http://www.w3.org/2000/svg"><line x1="35" y1="165" x2="285" y2="165" stroke="#111" stroke-width="2"/><line x1="55" y1="180" x2="55" y2="25" stroke="#111" stroke-width="2"/><path d="M65 145 C110 95 155 72 210 48" fill="none" stroke="#111" stroke-width="3"/><text x="286" y="160" font-size="16">x</text><text x="62" y="28" font-size="16">y</text></svg>',
     answer: '',
     analysis: ''
   }]
@@ -1832,17 +1866,34 @@ function buildDemoQuestions(payload, docTexts) {
 
 function buildQuestionDocx(title, questions) {
   const zip = new AdmZip()
+  const figures = buildQuestionFigureResources(questions)
 
-  zip.addFile('[Content_Types].xml', Buffer.from(buildDocxContentTypes(), 'utf8'))
+  zip.addFile('[Content_Types].xml', Buffer.from(buildDocxContentTypes(figures), 'utf8'))
   zip.addFile('_rels/.rels', Buffer.from(buildDocxRootRels(), 'utf8'))
-  zip.addFile('word/_rels/document.xml.rels', Buffer.from(buildDocxDocumentRels(), 'utf8'))
+  zip.addFile('word/_rels/document.xml.rels', Buffer.from(buildDocxDocumentRels(figures), 'utf8'))
   zip.addFile('word/styles.xml', Buffer.from(buildQuestionStylesXml(), 'utf8'))
-  zip.addFile('word/document.xml', Buffer.from(buildQuestionDocumentXml(title, questions), 'utf8'))
+  zip.addFile('word/document.xml', Buffer.from(buildQuestionDocumentXml(title, questions, figures), 'utf8'))
+  figures.forEach((figure) => {
+    zip.addFile(`word/media/${figure.fileName}`, Buffer.from(figure.svg, 'utf8'))
+  })
 
   return zip.toBuffer()
 }
 
-function buildQuestionDocumentXml(title, questions) {
+function buildQuestionFigureResources(questions) {
+  return questions
+    .map((question, index) => ({
+      questionIndex: index,
+      relId: `rIdFigure${index + 1}`,
+      docPrId: index + 10,
+      fileName: `question-figure-${index + 1}.svg`,
+      svg: normalizeSvgMarkup(question.figureSvg)
+    }))
+    .filter((figure) => figure.svg)
+}
+
+function buildQuestionDocumentXml(title, questions, figures = []) {
+  const figureByQuestionIndex = new Map(figures.map((figure) => [figure.questionIndex, figure]))
   const paragraphs = [
     buildDocxParagraph(title || '题卷重排', {
       style: 'Title',
@@ -1886,6 +1937,14 @@ function buildQuestionDocumentXml(title, questions) {
       }))
     }
 
+    const figure = figureByQuestionIndex.get(index)
+    if (figure) {
+      paragraphs.push(buildDocxSvgFigure(figure, {
+        indent: 420,
+        after: 120
+      }))
+    }
+
     if (question.answer) {
       paragraphs.push(buildDocxParagraph(`答案：${cleanQuestionDocText(question.answer)}`, {
         indent: 420,
@@ -1906,7 +1965,12 @@ function buildQuestionDocumentXml(title, questions) {
   })
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
   <w:body>
     ${paragraphs.join('\n    ')}
     <w:sectPr>
@@ -1927,7 +1991,60 @@ function buildDocxParagraph(text, options = {}) {
     return `<w:p>${paragraphProperties}</w:p>`
   }
 
-  return `<w:p>${paragraphProperties}<w:r>${buildDocxRunProperties(options)}<w:t xml:space="preserve">${escapeDocxXml(cleanText)}</w:t></w:r></w:p>`
+  return `<w:p>${paragraphProperties}${buildDocxRunsWithMath(cleanText, options)}</w:p>`
+}
+
+function buildDocxRunsWithMath(text, options = {}) {
+  return splitMathSegments(text)
+    .map((segment) => {
+      if (segment.type === 'math') return buildDocxMath(segment.value)
+      return buildDocxTextRun(segment.value, options)
+    })
+    .join('')
+}
+
+function buildDocxTextRun(text, options = {}) {
+  if (!text) return ''
+  return `<w:r>${buildDocxRunProperties(options)}<w:t xml:space="preserve">${escapeDocxXml(text)}</w:t></w:r>`
+}
+
+function buildDocxMath(latex) {
+  const mathText = latexToReadableMath(latex)
+  if (!mathText) return ''
+
+  return `<m:oMath><m:r><m:rPr><m:nor/></m:rPr><m:t>${escapeDocxXml(mathText)}</m:t></m:r></m:oMath>`
+}
+
+function buildDocxSvgFigure(figure, options = {}) {
+  const paragraphProperties = buildDocxParagraphProperties(options)
+  const cx = 3600000
+  const cy = 2250000
+
+  return `<w:p>${paragraphProperties}<w:r><w:drawing>
+    <wp:inline distT="0" distB="0" distL="0" distR="0">
+      <wp:extent cx="${cx}" cy="${cy}"/>
+      <wp:docPr id="${figure.docPrId}" name="${escapeDocxXml(figure.fileName)}"/>
+      <wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>
+      <a:graphic>
+        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:pic>
+            <pic:nvPicPr>
+              <pic:cNvPr id="${figure.docPrId}" name="${escapeDocxXml(figure.fileName)}"/>
+              <pic:cNvPicPr/>
+            </pic:nvPicPr>
+            <pic:blipFill>
+              <a:blip r:embed="${escapeDocxXml(figure.relId)}"/>
+              <a:stretch><a:fillRect/></a:stretch>
+            </pic:blipFill>
+            <pic:spPr>
+              <a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>
+              <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+            </pic:spPr>
+          </pic:pic>
+        </a:graphicData>
+      </a:graphic>
+    </wp:inline>
+  </w:drawing></w:r></w:p>`
 }
 
 function buildDocxParagraphProperties(options = {}) {
@@ -1984,11 +2101,168 @@ function escapeDocxXml(value) {
     .replace(/'/g, '&apos;')
 }
 
-function buildDocxContentTypes() {
+function splitMathSegments(text) {
+  const segments = []
+  const source = String(text || '')
+  let index = 0
+
+  while (index < source.length) {
+    const marker = findNextMathMarker(source, index)
+
+    if (!marker) {
+      segments.push({ type: 'text', value: source.slice(index) })
+      break
+    }
+
+    if (marker.start > index) {
+      segments.push({ type: 'text', value: source.slice(index, marker.start) })
+    }
+
+    segments.push({ type: 'math', value: marker.value })
+    index = marker.end
+  }
+
+  return segments
+}
+
+function findNextMathMarker(source, fromIndex) {
+  const markers = [
+    { open: '$$', close: '$$' },
+    { open: '$', close: '$' },
+    { open: '\\(', close: '\\)' },
+    { open: '\\[', close: '\\]' }
+  ]
+  let best = null
+
+  markers.forEach((marker) => {
+    const start = source.indexOf(marker.open, fromIndex)
+    if (start < 0) return
+    const valueStart = start + marker.open.length
+    const end = source.indexOf(marker.close, valueStart)
+    if (end < 0) return
+    if (!best || start < best.start) {
+      best = {
+        start,
+        end: end + marker.close.length,
+        value: source.slice(valueStart, end)
+      }
+    }
+  })
+
+  return best
+}
+
+function latexToReadableMath(latex) {
+  let text = String(latex || '').trim()
+
+  text = text
+    .replace(/\\left/g, '')
+    .replace(/\\right/g, '')
+    .replace(/\\dfrac/g, '\\frac')
+    .replace(/\\tfrac/g, '\\frac')
+
+  text = replaceLatexCommandWithTwoArgs(text, 'frac', (top, bottom) => `(${latexToReadableMath(top)})/(${latexToReadableMath(bottom)})`)
+  text = replaceLatexCommandWithOneArg(text, 'sqrt', (value) => `√(${latexToReadableMath(value)})`)
+
+  const replacements = {
+    '\\\\cdot': '·',
+    '\\\\times': '×',
+    '\\\\div': '÷',
+    '\\\\leq?': '≤',
+    '\\\\geq?': '≥',
+    '\\\\neq': '≠',
+    '\\\\approx': '≈',
+    '\\\\infty': '∞',
+    '\\\\pi': 'π',
+    '\\\\theta': 'θ',
+    '\\\\alpha': 'α',
+    '\\\\beta': 'β',
+    '\\\\gamma': 'γ',
+    '\\\\Delta': 'Δ',
+    '\\\\sum': '∑',
+    '\\\\int': '∫'
+  }
+
+  Object.entries(replacements).forEach(([pattern, value]) => {
+    text = text.replace(new RegExp(pattern, 'g'), value)
+  })
+
+  return text
+    .replace(/[{}]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function replaceLatexCommandWithOneArg(text, command, replacer) {
+  const pattern = new RegExp(`\\\\${command}\\s*\\{`, 'g')
+  let result = ''
+  let index = 0
+  let match
+
+  while ((match = pattern.exec(text))) {
+    const arg = readBalancedGroup(text, pattern.lastIndex - 1)
+    if (!arg) continue
+    result += text.slice(index, match.index) + replacer(arg.value)
+    index = arg.end
+    pattern.lastIndex = arg.end
+  }
+
+  return result + text.slice(index)
+}
+
+function replaceLatexCommandWithTwoArgs(text, command, replacer) {
+  const pattern = new RegExp(`\\\\${command}\\s*\\{`, 'g')
+  let result = ''
+  let index = 0
+  let match
+
+  while ((match = pattern.exec(text))) {
+    const first = readBalancedGroup(text, pattern.lastIndex - 1)
+    if (!first) continue
+    const secondStart = skipWhitespace(text, first.end)
+    if (text[secondStart] !== '{') continue
+    const second = readBalancedGroup(text, secondStart)
+    if (!second) continue
+
+    result += text.slice(index, match.index) + replacer(first.value, second.value)
+    index = second.end
+    pattern.lastIndex = second.end
+  }
+
+  return result + text.slice(index)
+}
+
+function readBalancedGroup(text, openIndex) {
+  if (text[openIndex] !== '{') return null
+
+  let depth = 0
+  for (let index = openIndex; index < text.length; index += 1) {
+    const char = text[index]
+    if (char === '{') depth += 1
+    if (char === '}') depth -= 1
+    if (depth === 0) {
+      return {
+        value: text.slice(openIndex + 1, index),
+        end: index + 1
+      }
+    }
+  }
+
+  return null
+}
+
+function skipWhitespace(text, index) {
+  let current = index
+  while (/\s/.test(text[current] || '')) current += 1
+  return current
+}
+
+function buildDocxContentTypes(figures = []) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
+  ${figures.length ? '<Default Extension="svg" ContentType="image/svg+xml"/>' : ''}
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
 </Types>`
@@ -2001,10 +2275,11 @@ function buildDocxRootRels() {
 </Relationships>`
 }
 
-function buildDocxDocumentRels() {
+function buildDocxDocumentRels(figures = []) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  ${figures.map((figure) => `<Relationship Id="${escapeDocxXml(figure.relId)}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${escapeDocxXml(figure.fileName)}"/>`).join('\n  ')}
 </Relationships>`
 }
 
