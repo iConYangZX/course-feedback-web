@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 20 * 1024 * 1024
+    fileSize: 60 * 1024 * 1024
   }
 })
 
@@ -26,6 +26,9 @@ const ENV_PATH = path.join(__dirname, '.env')
 const DATA_DIR = path.join(__dirname, 'data')
 const USAGE_PATH = path.join(DATA_DIR, 'usage.json')
 const ACCOUNTS_PATH = path.join(DATA_DIR, 'accounts.json')
+const TEACHING_DATA_PATH = path.join(DATA_DIR, 'teaching-data.json')
+const MATERIAL_INDEX_PATH = path.join(DATA_DIR, 'materials.json')
+const MATERIAL_DIR = path.join(DATA_DIR, 'materials')
 const OCR_BINARY_PATH = path.join(__dirname, 'scripts', 'ocr_image')
 const OCR_SCRIPT_PATH = path.join(__dirname, 'scripts', 'ocr_image.swift')
 const PDFTOPPM_PATHS = [
@@ -65,8 +68,10 @@ const DEFAULT_ACCOUNTS = [
 ]
 const usageState = readUsageState()
 const accountState = readAccountState()
+const teachingDataState = readTeachingDataState()
+const materialState = readMaterialState()
 
-app.use(express.json({ limit: '5mb' }))
+app.use(express.json({ limit: '8mb' }))
 app.use(express.static(path.join(__dirname, 'public')))
 
 app.get('/api/health', (req, res) => {
@@ -200,6 +205,132 @@ app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, (req, r
   }
 })
 
+app.get('/api/teaching-data', requireAccessMiddleware, (req, res) => {
+  const ownerId = getTeachingOwnerId(req.accessSession)
+  res.json({
+    data: getTeachingDataForOwner(ownerId),
+    ownerId
+  })
+})
+
+app.put('/api/teaching-data', requireAccessMiddleware, (req, res) => {
+  try {
+    const ownerId = getTeachingOwnerId(req.accessSession)
+    const data = normalizeTeachingData(req.body && req.body.data)
+    data.updatedAt = Date.now()
+    teachingDataState[ownerId] = data
+    writeTeachingDataState()
+    res.json({
+      ok: true,
+      data
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '保存教学数据失败' })
+  }
+})
+
+app.post('/api/materials', requireAccessMiddleware, upload.single('material'), (req, res) => {
+  try {
+    if (!req.file) throw new Error('请先上传教材文件')
+
+    const ownerId = getTeachingOwnerId(req.accessSession)
+    const material = saveUploadedMaterial(ownerId, req.file, req.body || {})
+    res.json({
+      ok: true,
+      material: getSafeMaterial(material)
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '上传教材失败' })
+  }
+})
+
+app.post('/api/teaching-data/ai-polish', requireAccessMiddleware, async (req, res) => {
+  try {
+    const usageClientId = getUsageClientId(req.accessSession)
+    const usageInfo = getUsageInfoForSession(req.accessSession)
+    if (!usageInfo.unlimited && usageInfo.remaining <= 0) {
+      res.status(429).json({
+        error: `今天的生成次数已用完。每日最多 ${usageInfo.limit} 次，请联系管理员或明天再试。`,
+        usage: usageInfo
+      })
+      return
+    }
+
+    const text = trim(req.body && req.body.text)
+    const context = trim(req.body && req.body.context)
+    if (!text) throw new Error('请先输入需要润色的内容')
+
+    const aiConfig = getAIConfig()
+    let result
+    let demo = false
+    if (!aiConfig.apiKey) {
+      demo = true
+      result = buildDemoPolishText(text)
+    } else {
+      result = await requestTeachingTextAI(buildPolishPrompt(text, context), aiConfig)
+    }
+
+    const usage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    res.json({
+      ok: true,
+      demo,
+      text: result,
+      usage
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({ error: getUserFacingError(error) })
+  }
+})
+
+app.post('/api/teaching-data/ai-analysis', requireAccessMiddleware, async (req, res) => {
+  try {
+    const usageClientId = getUsageClientId(req.accessSession)
+    const usageInfo = getUsageInfoForSession(req.accessSession)
+    if (!usageInfo.unlimited && usageInfo.remaining <= 0) {
+      res.status(429).json({
+        error: `今天的生成次数已用完。每日最多 ${usageInfo.limit} 次，请联系管理员或明天再试。`,
+        usage: usageInfo
+      })
+      return
+    }
+
+    const subject = trim(req.body && req.body.subject)
+    const target = trim(req.body && req.body.target)
+    const analysisType = trim(req.body && req.body.analysisType) || 'student'
+    const records = Array.isArray(req.body && req.body.records) ? req.body.records : []
+    const profile = req.body && req.body.profile && typeof req.body.profile === 'object' ? req.body.profile : null
+    if (!records.length && !profile) throw new Error('暂无可分析的数据')
+
+    const aiConfig = getAIConfig()
+    let result
+    let demo = false
+    if (!aiConfig.apiKey) {
+      demo = true
+      result = buildDemoAnalysisText(target || '学生', records)
+    } else {
+      result = await requestTeachingTextAI(buildAnalysisPrompt({
+        subject,
+        target,
+        analysisType,
+        records,
+        profile
+      }), aiConfig)
+    }
+
+    const usage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    res.json({
+      ok: true,
+      demo,
+      text: result,
+      usage
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({ error: getUserFacingError(error) })
+  }
+})
+
 app.get('/api/config', (req, res) => {
   const aiConfig = getAIConfig()
 
@@ -268,10 +399,14 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     }
 
     const payload = parsePayload(req.body.payload)
-    validatePayload(payload, Boolean(coursewareFile))
+    const storedMaterialFile = !coursewareFile && payload.materialId
+      ? getStoredMaterialFile(session, payload.materialId)
+      : null
+    validatePayload(payload, Boolean(coursewareFile || storedMaterialFile))
 
     const aiConfig = getAIConfig()
-    const courseware = coursewareFile ? await normalizeCourseware(coursewareFile, {
+    const sourceCoursewareFile = coursewareFile || storedMaterialFile
+    const courseware = sourceCoursewareFile ? await normalizeCourseware(sourceCoursewareFile, {
       clientPdfText: payload.clientPdfText,
       pdfPageImages,
       selectedPdfPages: payload.selectedPdfPages
@@ -951,6 +1086,489 @@ function cleanupUsageState(today) {
   })
 }
 
+function getTeachingOwnerId(session) {
+  if (session && session.accountId) return `account:${session.accountId}`
+  if (session && session.clientId) return `client:${session.clientId}`
+  return 'client:anonymous'
+}
+
+function getTeachingDataForOwner(ownerId) {
+  const data = teachingDataState[ownerId]
+  const normalized = normalizeTeachingData(data)
+  if (!data) {
+    teachingDataState[ownerId] = normalized
+    writeTeachingDataState()
+  }
+  return normalized
+}
+
+function readTeachingDataState() {
+  try {
+    const raw = fs.existsSync(TEACHING_DATA_PATH) ? fs.readFileSync(TEACHING_DATA_PATH, 'utf8') : '{}'
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch (error) {
+    return {}
+  }
+}
+
+function writeTeachingDataState() {
+  fs.mkdirSync(DATA_DIR, { recursive: true })
+  fs.writeFileSync(TEACHING_DATA_PATH, `${JSON.stringify(teachingDataState, null, 2)}\n`)
+}
+
+function readMaterialState() {
+  try {
+    const raw = fs.existsSync(MATERIAL_INDEX_PATH) ? fs.readFileSync(MATERIAL_INDEX_PATH, 'utf8') : '{"items":[]}'
+    const parsed = JSON.parse(raw)
+    return parsed && Array.isArray(parsed.items) ? parsed : { items: [] }
+  } catch (error) {
+    return { items: [] }
+  }
+}
+
+function writeMaterialState() {
+  fs.mkdirSync(DATA_DIR, { recursive: true })
+  fs.writeFileSync(MATERIAL_INDEX_PATH, `${JSON.stringify(materialState, null, 2)}\n`)
+}
+
+function saveUploadedMaterial(ownerId, file, input = {}) {
+  const originalName = file.originalname || 'material.pdf'
+  const lowerName = originalName.toLowerCase()
+  if (!/\.(pdf|docx|pptx|txt|md)$/i.test(lowerName)) {
+    throw new Error('整本教材目前支持 PDF、Word、PPT 或文本文件')
+  }
+
+  const id = `mat-${crypto.randomUUID()}`
+  const ownerDir = path.join(MATERIAL_DIR, safePathSegment(ownerId))
+  const extension = path.extname(originalName) || '.bin'
+  const storedName = `${id}${extension.toLowerCase()}`
+  const storedPath = path.join(ownerDir, storedName)
+  const lectures = parseMaterialLectures(input.lectures)
+
+  fs.mkdirSync(ownerDir, { recursive: true })
+  fs.writeFileSync(storedPath, file.buffer)
+
+  const material = {
+    id,
+    ownerId,
+    originalName,
+    storedPath,
+    mime: getMimeType(originalName, file.mimetype || 'application/octet-stream'),
+    size: file.size,
+    lectures,
+    createdAt: Date.now()
+  }
+
+  materialState.items = materialState.items.filter((item) => item.id !== id)
+  materialState.items.push(material)
+  writeMaterialState()
+  return material
+}
+
+function parseMaterialLectures(rawLectures) {
+  if (!rawLectures) return []
+  const source = typeof rawLectures === 'string' ? parseJsonText(rawLectures) : rawLectures
+  const list = Array.isArray(source) ? source : []
+
+  return list.map((lecture, index) => ({
+    key: trim(lecture && lecture.key) || `lecture-${index + 1}`,
+    title: trim(lecture && lecture.title) || `第 ${index + 1} 讲`,
+    startPage: Math.max(1, Number(lecture && lecture.startPage) || 1),
+    endPage: Math.max(1, Number(lecture && lecture.endPage) || Number(lecture && lecture.startPage) || 1)
+  }))
+}
+
+function getStoredMaterialFile(session, materialId) {
+  const ownerId = getTeachingOwnerId(session)
+  const material = materialState.items.find((item) => item.id === materialId && item.ownerId === ownerId)
+
+  if (!material || !material.storedPath || !fs.existsSync(material.storedPath)) {
+    throw new Error('没有找到班级教材，请重新上传')
+  }
+
+  return {
+    originalname: material.originalName,
+    mimetype: material.mime,
+    buffer: fs.readFileSync(material.storedPath)
+  }
+}
+
+function getSafeMaterial(material) {
+  return {
+    id: material.id,
+    name: material.originalName,
+    mime: material.mime,
+    size: material.size,
+    lectures: Array.isArray(material.lectures) ? material.lectures : [],
+    createdAt: material.createdAt
+  }
+}
+
+function safePathSegment(value) {
+  return String(value || 'default').replace(/[^A-Za-z0-9_.:-]+/g, '_')
+}
+
+function normalizeTeachingData(input) {
+  const source = input && typeof input === 'object' ? input : {}
+  const quickOptions = source.quickOptions && typeof source.quickOptions === 'object'
+    ? source.quickOptions
+    : {}
+
+  return {
+    classes: normalizeTeachingClasses(source.classes),
+    courseModules: normalizeCourseModules(source.courseModules),
+    scoreRecords: normalizeScoreRecords(source.scoreRecords),
+    feedbackHistory: normalizeFeedbackHistory(source.feedbackHistory),
+    oneProfiles: normalizeTeachingOneProfiles(source.oneProfiles),
+    quickOptions: {
+      performance: normalizeStringList(quickOptions.performance, [
+        '主动发言',
+        '回答质量高',
+        '笔记认真',
+        '思路清晰',
+        '步骤规范',
+        '课堂练习完成度高',
+        '注意力波动',
+        '反应较慢',
+        '参与度待提高',
+        '预习不充分',
+        '作业质量不稳定',
+        '计算细节易错'
+      ]),
+      classPerformance: normalizeStringList(quickOptions.classPerformance, [
+        '互动积极',
+        '回答问题踊跃',
+        '小组讨论热烈',
+        '笔记整理认真',
+        '思维活跃有深度',
+        '课前预习充分',
+        '课堂练习完成度高',
+        '个别学生走神',
+        '部分学生反应较慢',
+        '互动参与度有待提高',
+        '课前预习不充分',
+        '纪律偶有松散',
+        '作业完成质量参差不齐'
+      ]),
+      homework: normalizeStringList(quickOptions.homework, [
+        '完成课本对应章节习题',
+        '预习下一节内容',
+        '整理课堂笔记',
+        '完成同步练习对应章节',
+        '重点复习课堂难点',
+        '完成预习导学案'
+      ]),
+      teaching: normalizeStringList(quickOptions.teaching, [
+        '下次课先做错题回顾',
+        '加强计算规范训练',
+        '增加同类型题变式练习',
+        '用口述方式检查知识理解'
+      ])
+    },
+    updatedAt: Number(source.updatedAt || Date.now())
+  }
+}
+
+function normalizeTeachingClasses(classes) {
+  return Array.isArray(classes) ? classes.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `class-${crypto.randomUUID()}`,
+      name: trim(source.name) || '未命名班级',
+      grade: trim(source.grade) || '高一',
+      template: trim(source.template),
+      note: trim(source.note),
+      students: normalizeTeachingStudents(source.students),
+      updatedAt: Number(source.updatedAt || Date.now())
+    }
+  }) : []
+}
+
+function normalizeTeachingStudents(students) {
+  return Array.isArray(students) ? students
+    .map((student) => {
+      if (typeof student === 'string') {
+        return {
+          id: `stu-${crypto.randomUUID()}`,
+          name: trim(student),
+          note: ''
+        }
+      }
+      const source = student && typeof student === 'object' ? student : {}
+      return {
+        id: trim(source.id) || `stu-${crypto.randomUUID()}`,
+        name: trim(source.name),
+        note: trim(source.note)
+      }
+    })
+    .filter((student) => student.name) : []
+}
+
+function normalizeTeachingOneProfiles(profiles) {
+  return Array.isArray(profiles) ? profiles.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `one-${crypto.randomUUID()}`,
+      name: trim(source.name) || '未命名学生',
+      grade: trim(source.grade) || '高一',
+      personality: trim(source.personality),
+      habit: trim(source.habit),
+      template: trim(source.template),
+      note: trim(source.note),
+      updatedAt: Number(source.updatedAt || Date.now())
+    }
+  }) : []
+}
+
+function normalizeCourseModules(modules) {
+  return Array.isArray(modules) ? modules.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `module-${crypto.randomUUID()}`,
+      name: trim(source.name) || '未命名模块',
+      lectures: normalizeLectures(source.lectures),
+      chapters: normalizeChapters(source.chapters),
+      updatedAt: Number(source.updatedAt || Date.now())
+    }
+  }) : []
+}
+
+function normalizeLectures(lectures) {
+  return Array.isArray(lectures) ? lectures.map((item, index) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `lecture-${crypto.randomUUID()}`,
+      lecture: Number(source.lecture || index + 1),
+      title: trim(source.title) || `第 ${index + 1} 讲`,
+      content: trim(source.content),
+      keyPoints: trim(source.keyPoints),
+      notes: trim(source.notes)
+    }
+  }) : []
+}
+
+function normalizeChapters(chapters) {
+  return Array.isArray(chapters) ? chapters.map((item, index) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `chapter-${crypto.randomUUID()}`,
+      chapter: Number(source.chapter || index + 1),
+      title: trim(source.title) || `第 ${index + 1} 章`,
+      sections: normalizeSections(source.sections)
+    }
+  }) : []
+}
+
+function normalizeSections(sections) {
+  return Array.isArray(sections) ? sections.map((item, index) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `section-${crypto.randomUUID()}`,
+      section: Number(source.section || index + 1),
+      title: trim(source.title) || `第 ${index + 1} 节`,
+      lessons: normalizeLessons(source.lessons)
+    }
+  }) : []
+}
+
+function normalizeLessons(lessons) {
+  return Array.isArray(lessons) ? lessons.map((item, index) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `lesson-${crypto.randomUUID()}`,
+      lesson: Number(source.lesson || index + 1),
+      title: trim(source.title) || `第 ${index + 1} 课时`,
+      content: trim(source.content),
+      keyPoints: trim(source.keyPoints),
+      notes: trim(source.notes)
+    }
+  }) : []
+}
+
+function normalizeScoreRecords(records) {
+  return Array.isArray(records) ? records.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    const mode = trim(source.mode) === 'grade' ? 'grade' : 'percent'
+    return {
+      id: trim(source.id) || `score-${crypto.randomUUID()}`,
+      scope: trim(source.scope) === 'oneOnOne' ? 'oneOnOne' : 'class',
+      classId: trim(source.classId),
+      className: trim(source.className),
+      profileId: trim(source.profileId),
+      studentName: trim(source.studentName),
+      title: trim(source.title) || '课堂测评',
+      subject: trim(source.subject),
+      date: trim(source.date) || getTodayKey(),
+      mode,
+      totalScore: mode === 'grade' ? null : Math.max(1, Number(source.totalScore || 100)),
+      students: Array.isArray(source.students) ? source.students.map((student) => {
+        const studentSource = student && typeof student === 'object' ? student : {}
+        return {
+          name: trim(studentSource.name),
+          score: studentSource.score === '' || studentSource.score === null ? null : Number(studentSource.score),
+          grade: trim(studentSource.grade),
+          note: trim(studentSource.note)
+        }
+      }).filter((student) => student.name) : [],
+      createdAt: Number(source.createdAt || Date.now())
+    }
+  }) : []
+}
+
+function normalizeFeedbackHistory(history) {
+  return Array.isArray(history) ? history.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `history-${crypto.randomUUID()}`,
+      mode: trim(source.mode) === 'oneOnOne' ? 'oneOnOne' : 'class',
+      className: trim(source.className),
+      studentName: trim(source.studentName),
+      lessonTitle: trim(source.lessonTitle),
+      courseNote: trim(source.courseNote),
+      feedbacks: Array.isArray(source.feedbacks) ? source.feedbacks.map((feedback) => ({
+        studentId: trim(feedback && feedback.studentId),
+        name: trim(feedback && feedback.name),
+        feedback: trim(feedback && feedback.feedback)
+      })).filter((feedback) => feedback.name || feedback.feedback) : [],
+      createdAt: Number(source.createdAt || Date.now())
+    }
+  }) : []
+}
+
+function normalizeStringList(list, fallback = []) {
+  const source = Array.isArray(list) && list.length ? list : fallback
+  return source.map((item) => trim(item)).filter(Boolean).slice(0, 60)
+}
+
+async function requestTeachingTextAI(prompt, aiConfig) {
+  if (aiConfig.provider === 'openai') {
+    return requestOpenAIText(prompt, aiConfig)
+  }
+
+  return requestChatText(prompt, aiConfig, {
+    providerLabel: aiConfig.provider === 'deepseek' ? 'DeepSeek' : 'AI'
+  })
+}
+
+async function requestOpenAIText(prompt, aiConfig) {
+  const body = {
+    model: aiConfig.model,
+    instructions: '你是一名专业、温和、具体的教学分析助手。请直接输出中文正文，不要使用 Markdown 表格。',
+    input: prompt
+  }
+
+  const response = await fetch(`${aiConfig.baseUrl}/responses`, withProxy({
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiConfig.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  }))
+
+  const text = await response.text()
+  const parsed = parseProviderResponseJson(text, 'AI')
+  if (!response.ok) {
+    const message = parsed.error && parsed.error.message ? parsed.error.message : text
+    throw new Error(`AI 请求失败：${message}`)
+  }
+
+  if (parsed.output_text) return trim(parsed.output_text)
+
+  const output = Array.isArray(parsed.output) ? parsed.output : []
+  return trim(output.flatMap((item) => Array.isArray(item.content) ? item.content : [])
+    .map((part) => part.text || '')
+    .filter(Boolean)
+    .join('\n')) || 'AI 暂未返回内容'
+}
+
+async function requestChatText(prompt, aiConfig, options = {}) {
+  if (!aiConfig.baseUrl) {
+    throw new Error('请先填写 API 端点 URL')
+  }
+
+  const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiConfig.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: aiConfig.model,
+      messages: [
+        {
+          role: 'system',
+          content: '你是一名专业、温和、具体的教学分析助手。请直接输出中文正文，不要使用 Markdown 表格。'
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      temperature: 0.35,
+      max_tokens: 1200,
+      stream: false
+    })
+  }))
+
+  const text = await response.text()
+  const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
+  if (!response.ok) {
+    const message = parsed.error && parsed.error.message ? parsed.error.message : text
+    throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
+  }
+
+  return trim(parsed.choices && parsed.choices[0] && parsed.choices[0].message
+    ? parsed.choices[0].message.content
+    : '') || 'AI 暂未返回内容'
+}
+
+function buildPolishPrompt(text, context) {
+  return [
+    '请把下面老师记录的课堂表现或教学建议润色成可直接写进家长反馈的中文表达。',
+    '要求：保留原意，不夸大，不编造；语气专业、温和、具体；输出 120-220 字左右。',
+    context ? `课程/学生背景：${context}` : '',
+    '',
+    '原始内容：',
+    text
+  ].filter(Boolean).join('\n')
+}
+
+function buildAnalysisPrompt(input) {
+  const recordsText = JSON.stringify(input.records || [], null, 2).slice(0, 12000)
+  const profileText = input.profile ? JSON.stringify(input.profile, null, 2) : '无'
+
+  return [
+    `请对${input.target || '学生/班级'}做教学分析。`,
+    `分析类型：${input.analysisType === 'class' ? '班级整体' : '单个学生/一对一长期档案'}`,
+    `科目/模块：${input.subject || '未填写'}`,
+    '',
+    '学生长期档案：',
+    profileText,
+    '',
+    '成绩与反馈记录 JSON：',
+    recordsText,
+    '',
+    '请输出：1. 整体表现判断；2. 成绩趋势；3. 可能薄弱点；4. 下次课建议；5. 可布置的具体任务。控制在 300 字以内。'
+  ].join('\n')
+}
+
+function buildDemoPolishText(text) {
+  return [
+    '课堂表现整体较稳定，能够跟随老师完成主要学习任务。',
+    `老师记录的重点情况是：${text}`,
+    '后续建议继续保持课堂参与度，并在课后通过错题整理和同类题复盘巩固关键方法。'
+  ].join('')
+}
+
+function buildDemoAnalysisText(target, records = []) {
+  return [
+    `${target} 近期共有 ${records.length} 条记录。整体看，学习状态需要结合课堂表现和测评结果持续观察。`,
+    '建议下次课先回顾最近一次薄弱点，再安排 2-3 道同类变式题检查迁移能力；课后以错题复盘和基础概念口述为主，避免只做机械刷题。'
+  ].join('')
+}
+
 function safeEqual(left, right) {
   const leftBuffer = Buffer.from(String(left || ''))
   const rightBuffer = Buffer.from(String(right || ''))
@@ -967,8 +1585,11 @@ async function normalizeCourseware(file, options = {}) {
   const selectedPdfPages = normalizePageNumbers(options.selectedPdfPages)
   const clientPdfText = trim(options.clientPdfText)
   const shouldUseSelectedPdfPages = isPdf && (selectedPdfPages.length || pdfPageImages.length || clientPdfText)
+  const canExtractServerSelectedPages = isPdf && selectedPdfPages.length && !pdfPageImages.length && !clientPdfText
   const extraction = shouldUseSelectedPdfPages
-    ? { text: '', source: 'pdf-selected-pages', pageCount: selectedPdfPages.length || pdfPageImages.length }
+    ? (canExtractServerSelectedPages
+        ? await extractPdfSelectedPagesText(file.buffer, selectedPdfPages)
+        : { text: '', source: 'pdf-selected-pages', pageCount: selectedPdfPages.length || pdfPageImages.length })
     : (isImage
         ? { text: await extractImageText(file.buffer, originalName), source: 'image-ocr', pageCount: 1 }
         : await extractCoursewareText(file.buffer, originalName))
@@ -1245,6 +1866,8 @@ function buildSystemPrompt() {
     '不能编造课件或课堂中没有依据的细节；课件信息不足时，用课程主题和老师备注生成稳妥反馈。',
     '每个学生反馈建议 120 到 220 个汉字。',
     '每一条反馈必须包含：1 个本节课/课件里的具体知识点，1 个该学生的课堂表现等级，若老师填写了备注则必须自然写入备注。',
+    '如果反馈类型是班级整体反馈，请面向整个班级生成课堂表现总结，不要写成单个学生逐条反馈。',
+    '如果反馈呈现形式是图片报告文案，请语言更适合放入报告里的“课堂表现”段落，结构清晰、少寒暄。',
     '一对一反馈里如果包含 personality 或 habit，要把它们作为长期档案背景，用自然、克制的方式融入建议，不要写得像诊断。',
     '不同学生的反馈必须根据 performance、remark、personality 和 habit 明显区分，不允许只替换姓名。'
   ].join('\n')
@@ -1256,6 +1879,8 @@ function buildUserContent(payload, courseware) {
       type: 'input_text',
       text: [
         `课程类型：${payload.mode === 'oneOnOne' ? '一对一' : '班课'}`,
+        `反馈类型：${payload.feedbackScope === 'class' ? '班级整体反馈' : '个性化学生反馈'}`,
+        `反馈呈现形式：${payload.feedbackFormat === 'image' ? '图片报告文案' : '文字反馈'}`,
         `班级/课程：${payload.className || '未填写'}`,
         `年级：${payload.grade || '未填写'}`,
         `课程主题：${payload.lessonTitle || '未填写'}`,
@@ -1270,6 +1895,8 @@ function buildUserContent(payload, courseware) {
         '',
         '学生表现数据 JSON：',
         JSON.stringify(payload.students, null, 2),
+        payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
+        payload.homework ? `课后作业：${payload.homework}` : '',
         '',
         '请严格返回 JSON，字段为 feedbacks，每项包含 studentId、name、feedback、templateFields。',
         'templateFields 必须包含 courseContent、courseKnowledgePoint、performanceText、personalizedRemark、learningSuggestion，用于程序填入老师模板。',
@@ -1355,6 +1982,8 @@ function buildPlainPrompt(payload, courseware, options = {}) {
 
   return [
     `课程类型：${payload.mode === 'oneOnOne' ? '一对一' : '班课'}`,
+    `反馈类型：${payload.feedbackScope === 'class' ? '班级整体反馈' : '个性化学生反馈'}`,
+    `反馈呈现形式：${payload.feedbackFormat === 'image' ? '图片报告文案' : '文字反馈'}`,
     `班级/课程：${payload.className || '未填写'}`,
     `年级：${payload.grade || '未填写'}`,
     `课程主题：${payload.lessonTitle || '未填写'}`,
@@ -1372,6 +2001,8 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     '',
     '学生表现数据 JSON：',
     JSON.stringify(payload.students, null, 2),
+    payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
+    payload.homework ? `课后作业：${payload.homework}` : '',
     '',
     '请严格返回 JSON，且只能返回 JSON，不要解释，不要使用 Markdown。',
     'JSON 格式必须是：{"feedbacks":[{"studentId":"...","name":"...","feedback":"...","templateFields":{"courseContent":"...","courseKnowledgePoint":"...","performanceText":"...","personalizedRemark":"...","learningSuggestion":"..."}}]}',
@@ -2905,6 +3536,70 @@ async function extractPdfImageText(buffer) {
     return {
       text: '',
       pageCount: 0
+    }
+  } finally {
+    fs.rmSync(tempDir, {
+      recursive: true,
+      force: true
+    })
+  }
+}
+
+async function extractPdfSelectedPagesText(buffer, selectedPages) {
+  const pdftoppmPath = getPdftoppmPath()
+  const ocrCommand = getOcrCommand()
+  const pages = normalizePageNumbers(selectedPages)
+
+  if (!pages.length || !pdftoppmPath || !ocrCommand) {
+    return {
+      text: '',
+      source: 'pdf-selected-pages',
+      pageCount: pages.length
+    }
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-feedback-selected-pdf-'))
+  const pdfPath = path.join(tempDir, 'courseware.pdf')
+  const pageTexts = []
+
+  try {
+    fs.writeFileSync(pdfPath, buffer)
+
+    for (const pageNumber of pages) {
+      const outputPrefix = path.join(tempDir, `page-${pageNumber}`)
+      await execFileAsync(pdftoppmPath, [
+        '-png',
+        '-singlefile',
+        '-r',
+        '180',
+        '-f',
+        String(pageNumber),
+        '-l',
+        String(pageNumber),
+        pdfPath,
+        outputPrefix
+      ], {
+        timeout: 25000,
+        maxBuffer: 1024 * 1024
+      })
+
+      const pagePath = `${outputPrefix}.png`
+      if (!fs.existsSync(pagePath)) continue
+
+      const text = await runOcrOnImageFile(pagePath)
+      if (text) pageTexts.push(`第${pageNumber}页：${text}`)
+    }
+
+    return {
+      text: truncateText(pageTexts.join('\n\n')),
+      source: 'pdf-selected-pages',
+      pageCount: pages.length
+    }
+  } catch (error) {
+    return {
+      text: '',
+      source: 'pdf-selected-pages',
+      pageCount: pages.length
     }
   } finally {
     fs.rmSync(tempDir, {

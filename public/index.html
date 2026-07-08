@@ -53,6 +53,7 @@
         <div class="mode-switch" role="tablist" aria-label="课程类型">
           <button class="mode-button active" data-mode="class" type="button">班课</button>
           <button class="mode-button" data-mode="oneOnOne" type="button">一对一</button>
+          <button class="mode-button" data-mode="teaching" type="button">教学数据</button>
           <button class="mode-button" data-mode="rearrange" type="button">题卷重排</button>
           <button class="mode-button admin-entry hidden" data-mode="admin" type="button">账户</button>
         </div>
@@ -110,6 +111,32 @@
           </div>
 
           <div class="admin-user-list" id="adminUserList"></div>
+        </section>
+
+        <section class="teaching-panel hidden" id="teachingPanel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Teaching Data</p>
+              <h1>教学数据工作台</h1>
+            </div>
+            <div class="panel-actions compact-actions">
+              <button class="secondary-button compact-button" id="teachingRefreshBtn" type="button">刷新</button>
+              <button class="secondary-button compact-button" id="teachingPrintBtn" type="button">打印 / 另存 PDF</button>
+              <button class="secondary-button compact-button" id="teachingScreenshotBtn" type="button">截图导出</button>
+            </div>
+          </div>
+
+          <div class="teaching-tabs" role="tablist" aria-label="教学数据功能">
+            <button class="teaching-tab active" data-teaching-tab="roster" type="button">花名册</button>
+            <button class="teaching-tab" data-teaching-tab="courses" type="button">课程库</button>
+            <button class="teaching-tab" data-teaching-tab="scores" type="button">成绩</button>
+            <button class="teaching-tab" data-teaching-tab="history" type="button">历史反馈</button>
+            <button class="teaching-tab" data-teaching-tab="one" type="button">一对一档案</button>
+            <button class="teaching-tab" data-teaching-tab="backup" type="button">备份恢复</button>
+          </div>
+
+          <div class="teaching-content" id="teachingContent"></div>
+          <input class="hidden" id="teachingRestoreInput" type="file" accept=".json,application/json" />
         </section>
 
         <section class="config-panel" id="configPanel">
@@ -182,6 +209,21 @@
               </select>
             </label>
           </div>
+
+          <div class="form-grid two">
+            <label class="field">
+              <span>教材/讲义方式</span>
+              <select id="classMaterialModeSelect">
+                <option value="lesson" selected>每节课单独上传讲义</option>
+                <option value="book">上传整本教材，反馈时选择讲次</option>
+              </select>
+            </label>
+            <label class="field class-textbook-field hidden" id="classTextbookField">
+              <span>上传整本教材</span>
+              <input id="classTextbookInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md" />
+            </label>
+          </div>
+          <div class="upload-hint hidden" id="classTextbookStatus">选择 PDF 后会自动检测第几讲；其他文档会作为整本教材保存。</div>
 
           <label class="field">
             <span>导入学生名单</span>
@@ -267,6 +309,45 @@
             </label>
           </div>
 
+          <div class="form-grid two class-only">
+            <label class="field hidden" id="classLectureField">
+              <span>整本教材讲次</span>
+              <select id="classLectureSelect"></select>
+            </label>
+            <label class="field">
+              <span>反馈呈现形式</span>
+              <select id="feedbackFormatSelect">
+                <option value="text" selected>文字反馈</option>
+                <option value="image">图片反馈报告</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="form-grid two class-only">
+            <label class="field">
+              <span>反馈类型</span>
+              <select id="feedbackScopeSelect">
+                <option value="individual" selected>个性化反馈</option>
+                <option value="class">班级反馈</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>课后作业</span>
+              <input id="homeworkInput" type="text" placeholder="例如：完成第3讲易优精练，预习下一节内容" />
+            </label>
+          </div>
+
+          <div class="class-feedback-options class-only" id="classFeedbackOptions">
+            <div>
+              <div class="field-label">班级关键词</div>
+              <div class="keyword-chip-list" id="classKeywordList"></div>
+            </div>
+            <label class="field">
+              <span>班级/共性备注</span>
+              <textarea id="classRemarkInput" rows="3" placeholder="例如：整体配合度较高，但不等式证明步骤仍需加强"></textarea>
+            </label>
+          </div>
+
           <div class="pdf-page-selection hidden" id="pdfPageSelectionBar">
             <span id="pdfPageSelectionText">PDF 页面未选择</span>
             <button class="secondary-button compact-button" id="pdfPageSelectBtn" type="button">选择页面</button>
@@ -300,6 +381,16 @@
           </div>
           <div id="debugSummary" class="debug-summary hidden"></div>
           <div id="resultList" class="result-list"></div>
+          <section class="image-report-panel hidden" id="imageReportPanel">
+            <div class="result-head">
+              <div class="result-name-group">
+                <span class="result-index">图</span>
+                <div class="result-name">图片反馈报告</div>
+              </div>
+              <button class="secondary-button compact-button" id="downloadImageReportBtn" type="button">导出图片</button>
+            </div>
+            <div id="imageReportPreview" class="image-report-preview"></div>
+          </section>
         </section>
 
         <section class="rearrange-panel hidden" id="rearrangePanel">
@@ -372,6 +463,7 @@
       </div>
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
     <script src="/app.js"></script>
   </body>
