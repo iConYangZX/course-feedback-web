@@ -1699,6 +1699,8 @@ function cancelPdfPageSelection() {
 }
 
 function confirmPdfPageSelection() {
+  syncPdfPageRangeInputs()
+
   if (!state.pdfSelection.selectedPages.length) {
     showToast('请至少选择 1 页 PDF')
     return
@@ -1714,19 +1716,29 @@ function selectAllPdfPages() {
 }
 
 function clearPdfPages() {
-  state.pdfSelection.selectedPages = []
+  state.pdfSelection.selectedPages = state.pdfSelection.pageCount ? [1] : []
   renderPdfPageSelection()
 }
 
 function updatePdfPageSelectionFromGrid(event) {
-  if (!event.target.matches('[data-pdf-page]')) return
+  if (!event.target.matches('[data-pdf-range-field]')) return
 
-  state.pdfSelection.selectedPages = Array.from(els.pdfPageGrid.querySelectorAll('[data-pdf-page]:checked'))
-    .map((input) => Number(input.dataset.pdfPage))
-    .filter((pageNumber) => Number.isFinite(pageNumber))
-    .sort((left, right) => left - right)
-
+  syncPdfPageRangeInputs()
   renderPdfPageSelection()
+}
+
+function syncPdfPageRangeInputs() {
+  const startInput = els.pdfPageGrid.querySelector('[data-pdf-range-field="start"]')
+  const endInput = els.pdfPageGrid.querySelector('[data-pdf-range-field="end"]')
+  if (!startInput || !endInput) return
+
+  const pageCount = state.pdfSelection.pageCount
+  const startPage = clampPageNumber(startInput && startInput.value, pageCount)
+  const endPage = clampPageNumber(endInput && endInput.value, pageCount)
+  const left = Math.min(startPage, endPage)
+  const right = Math.max(startPage, endPage)
+
+  state.pdfSelection.selectedPages = buildPageRange(left, right)
 }
 
 function renderPdfPageSelection() {
@@ -1742,7 +1754,7 @@ function renderPdfPageSelection() {
     const totalCount = state.pdfSelection.pageCount
     const summary = state.pdfSelection.loading
       ? `${file.name}：正在读取页面...`
-      : `${file.name}：已选 ${selectedCount}/${totalCount || '?'} 页${selectedCount ? `（${formatPageRanges(state.pdfSelection.selectedPages)}）` : ''}`
+      : `${file.name}：${selectedCount ? `读取第 ${formatPageRanges(state.pdfSelection.selectedPages)} 页（${selectedCount}/${totalCount || '?'} 页）` : '未选择页面'}`
 
     els.pdfPageSelectionText.textContent = summary
     els.pdfPageSelectBtn.disabled = state.pdfSelection.loading
@@ -1760,7 +1772,7 @@ function renderPdfPageModal() {
   els.pdfPageModalTitle.textContent = selection.fileName || '选择 PDF 页面'
   els.pdfPageModalMeta.textContent = selection.loading
     ? '正在读取 PDF...'
-    : (selection.error || `共 ${selection.pageCount} 页，已选 ${selection.selectedPages.length} 页`)
+    : (selection.error || `共 ${selection.pageCount} 页，当前读取第 ${formatPageRanges(selection.selectedPages)} 页（${selection.selectedPages.length} 页）`)
 
   els.pdfPageSelectAllBtn.disabled = selection.loading || !selection.pageCount
   els.pdfPageSelectNoneBtn.disabled = selection.loading || !selection.pageCount
@@ -1776,16 +1788,20 @@ function renderPdfPageModal() {
     return
   }
 
-  const selectedPages = new Set(selection.selectedPages)
-  els.pdfPageGrid.innerHTML = Array.from({ length: selection.pageCount }, (item, index) => {
-    const pageNumber = index + 1
-    return `
-      <label class="pdf-page-option">
-        <input data-pdf-page="${pageNumber}" type="checkbox" ${selectedPages.has(pageNumber) ? 'checked' : ''} />
-        <span>第 ${pageNumber} 页</span>
+  const startPage = selection.selectedPages[0] || 1
+  const endPage = selection.selectedPages[selection.selectedPages.length - 1] || selection.pageCount || 1
+  els.pdfPageGrid.innerHTML = `
+    <div class="pdf-page-range">
+      <label class="field pdf-page-range-field">
+        <span>开始页</span>
+        <input data-pdf-range-field="start" type="number" min="1" max="${selection.pageCount}" value="${startPage}" />
       </label>
-    `
-  }).join('')
+      <label class="field pdf-page-range-field">
+        <span>结束页</span>
+        <input data-pdf-range-field="end" type="number" min="1" max="${selection.pageCount}" value="${endPage}" />
+      </label>
+    </div>
+  `
 }
 
 function getSelectedPdfPages(file, pageCount) {
@@ -1796,6 +1812,17 @@ function getSelectedPdfPages(file, pageCount) {
   }
 
   return Array.from({ length: pageCount }, (item, index) => index + 1)
+}
+
+function clampPageNumber(value, pageCount) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return 1
+  return Math.min(Math.max(1, Math.floor(number)), Math.max(1, pageCount))
+}
+
+function buildPageRange(startPage, endPage) {
+  const length = Math.max(0, endPage - startPage + 1)
+  return Array.from({ length }, (item, index) => startPage + index)
 }
 
 function formatPageRanges(pages) {
