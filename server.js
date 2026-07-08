@@ -1938,16 +1938,12 @@ function buildDemoQuestions(payload, docTexts) {
 
 function buildQuestionDocx(title, questions) {
   const zip = new AdmZip()
-  const figures = buildQuestionFigureResources(questions)
 
-  zip.addFile('[Content_Types].xml', Buffer.from(buildDocxContentTypes(figures), 'utf8'))
+  zip.addFile('[Content_Types].xml', Buffer.from(buildDocxContentTypes(), 'utf8'))
   zip.addFile('_rels/.rels', Buffer.from(buildDocxRootRels(), 'utf8'))
-  zip.addFile('word/_rels/document.xml.rels', Buffer.from(buildDocxDocumentRels(figures), 'utf8'))
+  zip.addFile('word/_rels/document.xml.rels', Buffer.from(buildDocxDocumentRels(), 'utf8'))
   zip.addFile('word/styles.xml', Buffer.from(buildQuestionStylesXml(), 'utf8'))
-  zip.addFile('word/document.xml', Buffer.from(buildQuestionDocumentXml(title, questions, figures), 'utf8'))
-  figures.forEach((figure) => {
-    zip.addFile(`word/media/${figure.fileName}`, Buffer.from(figure.svg, 'utf8'))
-  })
+  zip.addFile('word/document.xml', Buffer.from(buildQuestionDocumentXml(title, questions), 'utf8'))
 
   return zip.toBuffer()
 }
@@ -1964,8 +1960,7 @@ function buildQuestionFigureResources(questions) {
     .filter((figure) => figure.svg)
 }
 
-function buildQuestionDocumentXml(title, questions, figures = []) {
-  const figureByQuestionIndex = new Map(figures.map((figure) => [figure.questionIndex, figure]))
+function buildQuestionDocumentXml(title, questions) {
   const paragraphs = [
     buildDocxParagraph(title || '题卷重排', {
       style: 'Title',
@@ -2003,11 +1998,11 @@ function buildQuestionDocumentXml(title, questions, figures = []) {
       }))
     }
 
-    const figure = figureByQuestionIndex.get(index)
-    if (figure) {
-      paragraphs.push(buildDocxSvgFigure(figure, {
+    if (question.figureSvg && !question.figureNote) {
+      paragraphs.push(buildDocxParagraph('图形说明：此题含图形，WPS 兼容导出已保留题干和公式；请结合原图核对。', {
         indent: 420,
-        after: 120
+        color: '666666',
+        after: 80
       }))
     }
 
@@ -2032,11 +2027,7 @@ function buildQuestionDocumentXml(title, questions, figures = []) {
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-  xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
-  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
-  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
-  xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <w:body>
     ${paragraphs.join('\n    ')}
     <w:sectPr>
@@ -2063,7 +2054,7 @@ function buildDocxParagraph(text, options = {}) {
 function buildDocxRunsWithMath(text, options = {}) {
   return splitMathSegments(text)
     .map((segment) => {
-      if (segment.type === 'math') return buildDocxMath(segment.value)
+      if (segment.type === 'math') return buildDocxTextRun(latexToReadableMath(segment.value), options)
       return buildDocxTextRun(segment.value, options)
     })
     .join('')
@@ -2072,13 +2063,6 @@ function buildDocxRunsWithMath(text, options = {}) {
 function buildDocxTextRun(text, options = {}) {
   if (!text) return ''
   return `<w:r>${buildDocxRunProperties(options)}<w:t xml:space="preserve">${escapeDocxXml(text)}</w:t></w:r>`
-}
-
-function buildDocxMath(latex) {
-  const mathText = latexToReadableMath(latex)
-  if (!mathText) return ''
-
-  return `<m:oMath><m:r><m:rPr><m:nor/></m:rPr><m:t>${escapeDocxXml(mathText)}</m:t></m:r></m:oMath>`
 }
 
 function buildDocxSvgFigure(figure, options = {}) {
@@ -2283,10 +2267,94 @@ function latexToReadableMath(latex) {
     text = text.replace(new RegExp(pattern, 'g'), value)
   })
 
+  text = convertLatexScripts(text)
+
   return text
     .replace(/[{}]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+function convertLatexScripts(text) {
+  let result = String(text || '')
+
+  result = result.replace(/\^\{([^{}]+)\}/g, (match, value) => toSuperscript(value) || `^(${value})`)
+  result = result.replace(/_\{([^{}]+)\}/g, (match, value) => toSubscript(value) || `_(${value})`)
+  result = result.replace(/\^([A-Za-z0-9+\-=()])/g, (match, value) => toSuperscript(value) || `^${value}`)
+  result = result.replace(/_([A-Za-z0-9+\-=()])/g, (match, value) => toSubscript(value) || `_${value}`)
+
+  return result
+}
+
+function toSuperscript(value) {
+  const map = {
+    0: '⁰',
+    1: '¹',
+    2: '²',
+    3: '³',
+    4: '⁴',
+    5: '⁵',
+    6: '⁶',
+    7: '⁷',
+    8: '⁸',
+    9: '⁹',
+    '+': '⁺',
+    '-': '⁻',
+    '=': '⁼',
+    '(': '⁽',
+    ')': '⁾',
+    n: 'ⁿ',
+    i: 'ⁱ'
+  }
+
+  return mapScriptCharacters(value, map)
+}
+
+function toSubscript(value) {
+  const map = {
+    0: '₀',
+    1: '₁',
+    2: '₂',
+    3: '₃',
+    4: '₄',
+    5: '₅',
+    6: '₆',
+    7: '₇',
+    8: '₈',
+    9: '₉',
+    '+': '₊',
+    '-': '₋',
+    '=': '₌',
+    '(': '₍',
+    ')': '₎',
+    a: 'ₐ',
+    e: 'ₑ',
+    h: 'ₕ',
+    i: 'ᵢ',
+    j: 'ⱼ',
+    k: 'ₖ',
+    l: 'ₗ',
+    m: 'ₘ',
+    n: 'ₙ',
+    o: 'ₒ',
+    p: 'ₚ',
+    r: 'ᵣ',
+    s: 'ₛ',
+    t: 'ₜ',
+    u: 'ᵤ',
+    v: 'ᵥ',
+    x: 'ₓ'
+  }
+
+  return mapScriptCharacters(value, map)
+}
+
+function mapScriptCharacters(value, map) {
+  const chars = String(value || '').split('')
+  if (!chars.length) return ''
+
+  const converted = chars.map((char) => map[char])
+  return converted.every(Boolean) ? converted.join('') : ''
 }
 
 function replaceLatexCommandWithOneArg(text, command, replacer) {
@@ -2353,12 +2421,11 @@ function skipWhitespace(text, index) {
   return current
 }
 
-function buildDocxContentTypes(figures = []) {
+function buildDocxContentTypes() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
-  ${figures.length ? '<Default Extension="svg" ContentType="image/svg+xml"/>' : ''}
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
 </Types>`
@@ -2371,11 +2438,10 @@ function buildDocxRootRels() {
 </Relationships>`
 }
 
-function buildDocxDocumentRels(figures = []) {
+function buildDocxDocumentRels() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-  ${figures.map((figure) => `<Relationship Id="${escapeDocxXml(figure.relId)}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${escapeDocxXml(figure.fileName)}"/>`).join('\n  ')}
 </Relationships>`
 }
 
