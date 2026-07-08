@@ -230,11 +230,6 @@
             <textarea id="studentListInput" rows="5" placeholder="每行一个学生，也可以用逗号、顿号分隔&#10;例如：张三、李四、王五"></textarea>
           </label>
 
-          <label class="field">
-            <span>反馈模板</span>
-            <textarea id="templateInput" rows="7"></textarea>
-          </label>
-
           <div class="panel-actions">
             <button class="primary-button" id="saveClassBtn" type="button">保存班级</button>
           </div>
@@ -303,17 +298,17 @@
               <span>课程主题</span>
               <input id="lessonTitleInput" type="text" placeholder="例如：导数单调性与极值" />
             </label>
-            <label class="field file-field">
+            <label class="field file-field" id="coursewareField">
               <span>导入当节课课件</span>
               <input id="coursewareInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" />
+            </label>
+            <label class="field hidden" id="classLectureField">
+              <span>选择章节/讲次</span>
+              <select id="classLectureSelect"></select>
             </label>
           </div>
 
           <div class="form-grid two class-only">
-            <label class="field hidden" id="classLectureField">
-              <span>整本教材讲次</span>
-              <select id="classLectureSelect"></select>
-            </label>
             <label class="field">
               <span>反馈呈现形式</span>
               <select id="feedbackFormatSelect">
@@ -337,9 +332,36 @@
             </label>
           </div>
 
+          <label class="field class-only" id="classFeedbackTemplateField">
+            <span>反馈模板</span>
+            <textarea id="templateInput" rows="7"></textarea>
+          </label>
+
+          <section class="image-format-preview class-only hidden" id="imageFormatPreview">
+            <div class="field-label">图片反馈预览</div>
+            <div class="mini-report-preview">
+              <div class="mini-report-head">
+                <strong>数学课程反馈报告</strong>
+                <span>升学帮</span>
+              </div>
+              <div class="mini-report-line"></div>
+              <div class="mini-report-block short"></div>
+              <div class="mini-report-block"></div>
+              <div class="mini-report-table">
+                <span></span><span></span><span></span>
+                <span></span><span></span><span></span>
+                <span></span><span></span><span></span>
+              </div>
+            </div>
+          </section>
+
           <div class="class-feedback-options class-only" id="classFeedbackOptions">
-            <div>
-              <div class="field-label">班级关键词</div>
+            <div class="keyword-group">
+              <div class="field-label">班级亮点关键词</div>
+              <div class="keyword-chip-list" id="classPositiveKeywordList"></div>
+            </div>
+            <div class="keyword-group">
+              <div class="field-label">班级需改进关键词</div>
               <div class="keyword-chip-list" id="classKeywordList"></div>
             </div>
             <label class="field">

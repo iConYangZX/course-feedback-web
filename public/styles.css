@@ -1017,6 +1017,18 @@ textarea:focus {
   font-weight: 800;
 }
 
+.keyword-chip.positive {
+  border-color: #b8ddd2;
+  background: #f3fbf8;
+  color: var(--success);
+}
+
+.keyword-chip.negative {
+  border-color: #f0c2ca;
+  background: var(--red-soft);
+  color: var(--red);
+}
+
 .keyword-chip.active,
 .teaching-pill.active {
   border-color: var(--green);
@@ -1024,8 +1036,76 @@ textarea:focus {
   color: var(--green-dark);
 }
 
-.student-table.compact-disabled .student-row {
-  opacity: 0.58;
+.keyword-group {
+  display: grid;
+  gap: 8px;
+}
+
+.image-format-preview {
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfbff;
+}
+
+.mini-report-preview {
+  width: min(420px, 100%);
+  padding: 18px;
+  border: 1px solid #d8d2c6;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #242424;
+  box-shadow: 0 12px 26px rgba(61, 64, 120, 0.05);
+}
+
+.mini-report-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.mini-report-head span {
+  color: #1552d1;
+  font-size: 12px;
+}
+
+.mini-report-line {
+  height: 1px;
+  margin: 9px 0 12px;
+  background: #d9d1c2;
+}
+
+.mini-report-block {
+  height: 34px;
+  margin-top: 9px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #eee9df 0 28%, #f7f5f0 28% 100%);
+}
+
+.mini-report-block.short {
+  width: 72%;
+}
+
+.mini-report-table {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 12px;
+  border-top: 1px solid #d4d4d4;
+  border-left: 1px solid #d4d4d4;
+}
+
+.mini-report-table span {
+  height: 22px;
+  border-right: 1px solid #d4d4d4;
+  border-bottom: 1px solid #d4d4d4;
+}
+
+.mini-report-table span:nth-child(-n + 3) {
+  background: #eee9df;
 }
 
 .teaching-tabs {

@@ -1214,6 +1214,39 @@ function normalizeTeachingData(input) {
   const quickOptions = source.quickOptions && typeof source.quickOptions === 'object'
     ? source.quickOptions
     : {}
+  const performancePositiveFallback = [
+    '主动发言',
+    '回答质量高',
+    '笔记认真',
+    '思路清晰',
+    '步骤规范',
+    '课堂练习完成度高'
+  ]
+  const performanceNegativeFallback = [
+    '注意力波动',
+    '反应较慢',
+    '参与度待提高',
+    '预习不充分',
+    '作业质量不稳定',
+    '计算细节易错'
+  ]
+  const classPerformancePositiveFallback = [
+    '互动积极',
+    '回答问题踊跃',
+    '小组讨论热烈',
+    '笔记整理认真',
+    '思维活跃有深度',
+    '课前预习充分',
+    '课堂练习完成度高'
+  ]
+  const classPerformanceNegativeFallback = [
+    '个别学生走神',
+    '部分学生反应较慢',
+    '互动参与度有待提高',
+    '课前预习不充分',
+    '纪律偶有松散',
+    '作业完成质量参差不齐'
+  ]
 
   return {
     classes: normalizeTeachingClasses(source.classes),
@@ -1222,35 +1255,12 @@ function normalizeTeachingData(input) {
     feedbackHistory: normalizeFeedbackHistory(source.feedbackHistory),
     oneProfiles: normalizeTeachingOneProfiles(source.oneProfiles),
     quickOptions: {
-      performance: normalizeStringList(quickOptions.performance, [
-        '主动发言',
-        '回答质量高',
-        '笔记认真',
-        '思路清晰',
-        '步骤规范',
-        '课堂练习完成度高',
-        '注意力波动',
-        '反应较慢',
-        '参与度待提高',
-        '预习不充分',
-        '作业质量不稳定',
-        '计算细节易错'
-      ]),
-      classPerformance: normalizeStringList(quickOptions.classPerformance, [
-        '互动积极',
-        '回答问题踊跃',
-        '小组讨论热烈',
-        '笔记整理认真',
-        '思维活跃有深度',
-        '课前预习充分',
-        '课堂练习完成度高',
-        '个别学生走神',
-        '部分学生反应较慢',
-        '互动参与度有待提高',
-        '课前预习不充分',
-        '纪律偶有松散',
-        '作业完成质量参差不齐'
-      ]),
+      performancePositive: normalizeStringList(quickOptions.performancePositive, performancePositiveFallback),
+      performanceNegative: normalizeStringList(quickOptions.performanceNegative, performanceNegativeFallback),
+      performance: normalizeStringList(quickOptions.performance, [...performancePositiveFallback, ...performanceNegativeFallback]),
+      classPerformancePositive: normalizeStringList(quickOptions.classPerformancePositive, classPerformancePositiveFallback),
+      classPerformanceNegative: normalizeStringList(quickOptions.classPerformanceNegative, classPerformanceNegativeFallback),
+      classPerformance: normalizeStringList(quickOptions.classPerformance, [...classPerformancePositiveFallback, ...classPerformanceNegativeFallback]),
       homework: normalizeStringList(quickOptions.homework, [
         '完成课本对应章节习题',
         '预习下一节内容',

@@ -13,14 +13,16 @@ const DEFAULT_TEMPLATE = [
 ].join('\n')
 
 const performanceOptions = ['表现优秀', '表现良好', '表现较差']
-const classKeywordOptions = [
+const classKeywordPositiveOptions = [
   '互动积极',
   '回答问题踊跃',
   '小组讨论热烈',
   '笔记整理认真',
   '思维活跃有深度',
   '课前预习充分',
-  '课堂练习完成度高',
+  '课堂练习完成度高'
+]
+const classKeywordNegativeOptions = [
   '个别学生走神',
   '部分学生反应较慢',
   '互动参与度有待提高',
@@ -28,13 +30,16 @@ const classKeywordOptions = [
   '纪律偶有松散',
   '作业完成质量参差不齐'
 ]
-const studentKeywordOptions = [
+const classKeywordOptions = [...classKeywordPositiveOptions, ...classKeywordNegativeOptions]
+const studentKeywordPositiveOptions = [
   '主动发言',
   '回答质量高',
   '笔记认真',
   '思路清晰',
   '步骤规范',
-  '课堂练习完成度高',
+  '课堂练习完成度高'
+]
+const studentKeywordNegativeOptions = [
   '注意力波动',
   '反应较慢',
   '参与度待提高',
@@ -42,6 +47,7 @@ const studentKeywordOptions = [
   '作业质量不稳定',
   '计算细节易错'
 ]
+const studentKeywordOptions = [...studentKeywordPositiveOptions, ...studentKeywordNegativeOptions]
 const performanceClasses = {
   表现优秀: 'performance-excellent',
   表现良好: 'performance-good',
@@ -117,7 +123,11 @@ function createEmptyTeachingData() {
     oneProfiles: [],
     quickOptions: {
       performance: studentKeywordOptions,
+      performancePositive: studentKeywordPositiveOptions,
+      performanceNegative: studentKeywordNegativeOptions,
       classPerformance: classKeywordOptions,
+      classPerformancePositive: classKeywordPositiveOptions,
+      classPerformanceNegative: classKeywordNegativeOptions,
       homework: ['完成课本对应章节习题', '预习下一节内容', '整理课堂笔记', '完成同步练习对应章节', '重点复习课堂难点', '完成预习导学案'],
       teaching: ['下次课先做错题回顾', '加强计算规范训练', '增加同类型题变式练习', '用口述方式检查知识理解']
     },
@@ -203,12 +213,16 @@ function bindElements() {
     workspaceEyebrow: document.querySelector('#workspaceEyebrow'),
     workspaceTitle: document.querySelector('#workspaceTitle'),
     lessonTitleInput: document.querySelector('#lessonTitleInput'),
+    coursewareField: document.querySelector('#coursewareField'),
     coursewareInput: document.querySelector('#coursewareInput'),
     classLectureField: document.querySelector('#classLectureField'),
     classLectureSelect: document.querySelector('#classLectureSelect'),
     feedbackFormatSelect: document.querySelector('#feedbackFormatSelect'),
     feedbackScopeSelect: document.querySelector('#feedbackScopeSelect'),
+    classFeedbackTemplateField: document.querySelector('#classFeedbackTemplateField'),
+    imageFormatPreview: document.querySelector('#imageFormatPreview'),
     classFeedbackOptions: document.querySelector('#classFeedbackOptions'),
+    classPositiveKeywordList: document.querySelector('#classPositiveKeywordList'),
     classKeywordList: document.querySelector('#classKeywordList'),
     classRemarkInput: document.querySelector('#classRemarkInput'),
     homeworkInput: document.querySelector('#homeworkInput'),
@@ -227,6 +241,7 @@ function bindElements() {
     pdfPageConfirmBtn: document.querySelector('#pdfPageConfirmBtn'),
     pdfPageModalCloseBtn: document.querySelector('#pdfPageModalCloseBtn'),
     courseNoteInput: document.querySelector('#courseNoteInput'),
+    studentToolbar: document.querySelector('.student-toolbar'),
     studentCount: document.querySelector('#studentCount'),
     studentTable: document.querySelector('#studentTable'),
     generateBtn: document.querySelector('#generateBtn'),
@@ -320,6 +335,7 @@ function bindEvents() {
   if (els.classTextbookInput) els.classTextbookInput.addEventListener('change', handleClassTextbookChange)
   if (els.feedbackScopeSelect) els.feedbackScopeSelect.addEventListener('change', renderFeedbackModeControls)
   if (els.feedbackFormatSelect) els.feedbackFormatSelect.addEventListener('change', renderFeedbackModeControls)
+  if (els.classPositiveKeywordList) els.classPositiveKeywordList.addEventListener('click', handleClassKeywordClick)
   if (els.classKeywordList) els.classKeywordList.addEventListener('click', handleClassKeywordClick)
   if (els.downloadImageReportBtn) els.downloadImageReportBtn.addEventListener('click', downloadImageReport)
   els.pdfPageSelectBtn.addEventListener('click', openPdfPageSelection)
@@ -914,8 +930,14 @@ function renderTeachingRoster() {
       </section>
       <section class="teaching-card">
         <div class="teaching-title">常用课堂关键词</div>
-        <label class="field"><span>班级关键词</span><textarea data-teaching-quick="classPerformance" rows="4">${escapeHtml((data.quickOptions.classPerformance || classKeywordOptions).join('\n'))}</textarea></label>
-        <label class="field"><span>个性化关键词</span><textarea data-teaching-quick="performance" rows="4">${escapeHtml((data.quickOptions.performance || studentKeywordOptions).join('\n'))}</textarea></label>
+        <div class="form-grid two">
+          <label class="field"><span>班级亮点关键词</span><textarea data-teaching-quick="classPerformancePositive" rows="4">${escapeHtml((data.quickOptions.classPerformancePositive || classKeywordPositiveOptions).join('\n'))}</textarea></label>
+          <label class="field"><span>班级需改进关键词</span><textarea data-teaching-quick="classPerformanceNegative" rows="4">${escapeHtml((data.quickOptions.classPerformanceNegative || classKeywordNegativeOptions).join('\n'))}</textarea></label>
+        </div>
+        <div class="form-grid two">
+          <label class="field"><span>个性化亮点关键词</span><textarea data-teaching-quick="performancePositive" rows="4">${escapeHtml((data.quickOptions.performancePositive || studentKeywordPositiveOptions).join('\n'))}</textarea></label>
+          <label class="field"><span>个性化需改进关键词</span><textarea data-teaching-quick="performanceNegative" rows="4">${escapeHtml((data.quickOptions.performanceNegative || studentKeywordNegativeOptions).join('\n'))}</textarea></label>
+        </div>
       </section>
     </div>
     <div class="teaching-list">
@@ -1909,9 +1931,16 @@ function renderStudentTable() {
       </select>
       <select data-index="${index}" data-field="keyword">
         <option value="">选择关键词</option>
-        ${getStudentKeywordOptions().map((option) => `
-          <option value="${option}">${option}</option>
-        `).join('')}
+        <optgroup label="好的关键词">
+          ${getStudentKeywordGroups().positive.map((option) => `
+            <option value="${option}">${option}</option>
+          `).join('')}
+        </optgroup>
+        <optgroup label="需改进关键词">
+          ${getStudentKeywordGroups().negative.map((option) => `
+            <option value="${option}">${option}</option>
+          `).join('')}
+        </optgroup>
       </select>
       <textarea data-index="${index}" data-field="remark" placeholder="备注特殊情况">${escapeHtml(student.remark || '')}</textarea>
       <span></span>
@@ -2577,13 +2606,18 @@ function getFileTypeFromName(name) {
 function renderClassMaterialControls() {
   if (!els.classMaterialModeSelect) return
 
-  const isBook = els.classMaterialModeSelect.value === 'book'
-  if (els.classTextbookField) els.classTextbookField.classList.toggle('hidden', !isBook)
-  if (els.classTextbookStatus) els.classTextbookStatus.classList.toggle('hidden', !isBook)
-
   const selectedClass = getSelectedClass()
+  const isBookSetup = els.classMaterialModeSelect.value === 'book'
+  const isBookFeedback = state.mode === 'class'
+    && selectedClass
+    && selectedClass.materialMode === 'book'
+    && selectedClass.textbook
+
+  if (els.classTextbookField) els.classTextbookField.classList.toggle('hidden', !isBookSetup)
+  if (els.classTextbookStatus) els.classTextbookStatus.classList.toggle('hidden', !isBookSetup)
+  if (els.coursewareField) els.coursewareField.classList.toggle('hidden', Boolean(isBookFeedback))
   if (els.coursewareInput) {
-    els.coursewareInput.disabled = state.mode === 'class' && isBook && selectedClass && selectedClass.textbook
+    els.coursewareInput.disabled = Boolean(isBookFeedback)
   }
   renderClassLectureSelect()
 }
@@ -2673,11 +2707,19 @@ function renderFeedbackModeControls() {
   const isImageFormat = state.mode === 'class' && els.feedbackFormatSelect && els.feedbackFormatSelect.value === 'image'
 
   const studentTable = els.studentTable
-  if (studentTable) studentTable.classList.toggle('compact-disabled', isClassScope)
+  if (els.studentToolbar) els.studentToolbar.classList.toggle('hidden', isClassScope)
+  if (studentTable) studentTable.classList.toggle('hidden', isClassScope)
+  if (els.classFeedbackTemplateField) els.classFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'class' || isImageFormat)
+  if (els.imageFormatPreview) els.imageFormatPreview.classList.toggle('hidden', state.mode !== 'class' || !isImageFormat)
   if (els.classFeedbackOptions) els.classFeedbackOptions.classList.toggle('hidden', !isClassScope)
+  if (els.classPositiveKeywordList) {
+    els.classPositiveKeywordList.innerHTML = getClassKeywordGroups().positive.map((keyword) => (
+      `<button class="keyword-chip positive" data-keyword="${escapeHtml(keyword)}" type="button">${escapeHtml(keyword)}</button>`
+    )).join('')
+  }
   if (els.classKeywordList) {
-    els.classKeywordList.innerHTML = getClassKeywordOptions().map((keyword) => (
-      `<button class="keyword-chip" data-keyword="${escapeHtml(keyword)}" type="button">${escapeHtml(keyword)}</button>`
+    els.classKeywordList.innerHTML = getClassKeywordGroups().negative.map((keyword) => (
+      `<button class="keyword-chip negative" data-keyword="${escapeHtml(keyword)}" type="button">${escapeHtml(keyword)}</button>`
     )).join('')
   }
   if (els.imageReportPanel) {
@@ -2686,14 +2728,24 @@ function renderFeedbackModeControls() {
   if (isImageFormat && state.feedbacks.length) renderImageReport()
 }
 
-function getClassKeywordOptions() {
-  const dataOptions = state.teaching.data.quickOptions && state.teaching.data.quickOptions.classPerformance
-  return Array.isArray(dataOptions) && dataOptions.length ? dataOptions : classKeywordOptions
+function getClassKeywordGroups() {
+  const quickOptions = state.teaching.data.quickOptions || {}
+  return {
+    positive: getKeywordList(quickOptions.classPerformancePositive, classKeywordPositiveOptions),
+    negative: getKeywordList(quickOptions.classPerformanceNegative, classKeywordNegativeOptions)
+  }
 }
 
-function getStudentKeywordOptions() {
-  const dataOptions = state.teaching.data.quickOptions && state.teaching.data.quickOptions.performance
-  return Array.isArray(dataOptions) && dataOptions.length ? dataOptions : studentKeywordOptions
+function getStudentKeywordGroups() {
+  const quickOptions = state.teaching.data.quickOptions || {}
+  return {
+    positive: getKeywordList(quickOptions.performancePositive, studentKeywordPositiveOptions),
+    negative: getKeywordList(quickOptions.performanceNegative, studentKeywordNegativeOptions)
+  }
+}
+
+function getKeywordList(list, fallback) {
+  return Array.isArray(list) && list.length ? list : fallback
 }
 
 function handleClassKeywordClick(event) {
@@ -2802,11 +2854,6 @@ async function saveClass() {
     return
   }
 
-  if (!template) {
-    showToast('请输入反馈模板')
-    return
-  }
-
   const oldClass = state.editingClassId
     ? state.classes.find((item) => item.id === state.editingClassId)
     : null
@@ -2851,7 +2898,7 @@ async function saveClass() {
     name,
     grade,
     students,
-    template,
+    template: template || (oldClass && oldClass.template) || DEFAULT_TEMPLATE,
     materialMode,
     textbook: materialMode === 'book' ? textbook : null,
     updatedAt: Date.now()
