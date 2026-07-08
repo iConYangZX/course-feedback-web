@@ -23,9 +23,12 @@ const upload = multer({
 const PORT = Number(process.env.PORT || 5177)
 const DEFAULT_PROVIDER = 'openai'
 const ENV_PATH = path.join(__dirname, '.env')
-const DATA_DIR = path.join(__dirname, 'data')
+const LEGACY_DATA_DIR = path.join(__dirname, 'data')
+const DATA_DIR = resolveDataDir()
 const USAGE_PATH = path.join(DATA_DIR, 'usage.json')
 const ACCOUNTS_PATH = path.join(DATA_DIR, 'accounts.json')
+const LEGACY_USAGE_PATH = path.join(LEGACY_DATA_DIR, 'usage.json')
+const LEGACY_ACCOUNTS_PATH = path.join(LEGACY_DATA_DIR, 'accounts.json')
 const OCR_BINARY_PATH = path.join(__dirname, 'scripts', 'ocr_image')
 const OCR_SCRIPT_PATH = path.join(__dirname, 'scripts', 'ocr_image.swift')
 const PDFTOPPM_PATHS = [
@@ -82,6 +85,10 @@ app.get('/api/health', (req, res) => {
     accessRequired: isAccessRequired(),
     authenticated: Boolean(session),
     dailyLimit: getSessionDailyLimit(session),
+    storage: {
+      dataDir: DATA_DIR,
+      persistent: DATA_DIR !== LEGACY_DATA_DIR
+    },
     user: session ? getSafeSessionUser(session) : null,
     usage: session ? getUsageInfoForSession(session) : null
   })
@@ -444,6 +451,7 @@ function writeEnvMap(envMap) {
     'ACCESS_CODE',
     'DAILY_LIMIT',
     'SESSION_SECRET',
+    'DATA_DIR',
     'AI_PROVIDER',
     'CUSTOM_API_KEY',
     'CUSTOM_MODEL',
@@ -472,6 +480,27 @@ function writeEnvMap(envMap) {
   })
 
   fs.writeFileSync(ENV_PATH, `${lines.join('\n')}\n`)
+}
+
+function resolveDataDir() {
+  const configuredDir = trim(process.env.DATA_DIR || process.env.RENDER_DATA_DIR)
+  if (configuredDir) return path.resolve(configuredDir)
+
+  if (process.env.RENDER && isWritableDirectory('/var/data')) {
+    return '/var/data'
+  }
+
+  return LEGACY_DATA_DIR
+}
+
+function isWritableDirectory(dirPath) {
+  try {
+    if (!fs.existsSync(dirPath)) return false
+    fs.accessSync(dirPath, fs.constants.W_OK)
+    return true
+  } catch (error) {
+    return false
+  }
 }
 
 function isAccessRequired() {
@@ -646,17 +675,22 @@ function getRequestFingerprint(req) {
 
 function readAccountState() {
   try {
-    const raw = fs.existsSync(ACCOUNTS_PATH) ? fs.readFileSync(ACCOUNTS_PATH, 'utf8') : ''
+    const { raw, migrated } = readStateFile(ACCOUNTS_PATH, LEGACY_ACCOUNTS_PATH)
     const parsed = raw ? JSON.parse(raw) : null
     const state = parsed && Array.isArray(parsed.users) ? parsed : { users: [] }
-    mergeDefaultAccounts(state)
+    const changed = mergeDefaultAccounts(state)
+    if (migrated || changed) writeJsonState(ACCOUNTS_PATH, state)
     return state
   } catch (error) {
-    return { users: DEFAULT_ACCOUNTS.map((account) => ({ ...account })) }
+    const state = { users: DEFAULT_ACCOUNTS.map((account) => ({ ...account })) }
+    writeJsonState(ACCOUNTS_PATH, state)
+    return state
   }
 }
 
 function mergeDefaultAccounts(state) {
+  let changed = false
+
   DEFAULT_ACCOUNTS.forEach((defaultAccount) => {
     const existed = state.users.find((account) => account.username === defaultAccount.username)
     if (!existed) {
@@ -665,13 +699,15 @@ function mergeDefaultAccounts(state) {
         createdAt: Date.now(),
         updatedAt: Date.now()
       })
+      changed = true
     }
   })
+
+  return changed
 }
 
 function writeAccountState() {
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(ACCOUNTS_PATH, `${JSON.stringify(accountState, null, 2)}\n`)
+  writeJsonState(ACCOUNTS_PATH, accountState)
 }
 
 function findAccountByUsername(username) {
@@ -855,17 +891,44 @@ function getTodayKey() {
 
 function readUsageState() {
   try {
-    const raw = fs.existsSync(USAGE_PATH) ? fs.readFileSync(USAGE_PATH, 'utf8') : '{}'
+    const { raw, migrated } = readStateFile(USAGE_PATH, LEGACY_USAGE_PATH, '{}')
     const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' ? parsed : {}
+    const state = parsed && typeof parsed === 'object' ? parsed : {}
+    if (migrated) writeJsonState(USAGE_PATH, state)
+    return state
   } catch (error) {
     return {}
   }
 }
 
 function writeUsageState() {
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(USAGE_PATH, `${JSON.stringify(usageState, null, 2)}\n`)
+  writeJsonState(USAGE_PATH, usageState)
+}
+
+function readStateFile(primaryPath, legacyPath, emptyValue = '') {
+  if (fs.existsSync(primaryPath)) {
+    return {
+      raw: fs.readFileSync(primaryPath, 'utf8'),
+      migrated: false
+    }
+  }
+
+  if (primaryPath !== legacyPath && fs.existsSync(legacyPath)) {
+    return {
+      raw: fs.readFileSync(legacyPath, 'utf8'),
+      migrated: true
+    }
+  }
+
+  return {
+    raw: emptyValue,
+    migrated: false
+  }
+}
+
+function writeJsonState(filePath, state) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`)
 }
 
 function cleanupUsageState(today) {
