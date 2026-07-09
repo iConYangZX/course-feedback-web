@@ -1987,9 +1987,23 @@ textarea:focus {
   font-size: 13px;
 }
 
+.image-report-preview-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .image-report-preview-head strong {
   color: var(--text);
   font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-report-preview-head .compact-button {
+  flex: 0 0 auto;
 }
 
 .report-sheet {

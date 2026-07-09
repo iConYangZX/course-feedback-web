@@ -283,6 +283,8 @@ function bindElements() {
     classLectureSelect: document.querySelector('#classLectureSelect'),
     feedbackFormatSelect: document.querySelector('#feedbackFormatSelect'),
     feedbackScopeSelect: document.querySelector('#feedbackScopeSelect'),
+    scoreDisplayField: document.querySelector('#scoreDisplayField'),
+    showAllScoresSelect: document.querySelector('#showAllScoresSelect'),
     classFeedbackTemplateField: document.querySelector('#classFeedbackTemplateField'),
     classFeedbackOptions: document.querySelector('#classFeedbackOptions'),
     classPositiveKeywordList: document.querySelector('#classPositiveKeywordList'),
@@ -425,6 +427,9 @@ function bindEvents() {
     renderFeedbackModeControls()
     renderResults()
   })
+  if (els.showAllScoresSelect) els.showAllScoresSelect.addEventListener('change', () => {
+    if (isImageFeedbackMode() && state.feedbacks.length) renderImageReport()
+  })
   if (els.classPositiveKeywordList) els.classPositiveKeywordList.addEventListener('click', handleClassKeywordClick)
   if (els.classKeywordList) els.classKeywordList.addEventListener('click', handleClassKeywordClick)
   ;[
@@ -436,6 +441,7 @@ function bindEvents() {
     if (list) list.addEventListener('click', handleOneProfileKeywordClick)
   })
   if (els.downloadImageReportBtn) els.downloadImageReportBtn.addEventListener('click', downloadImageReport)
+  if (els.imageReportPreview) els.imageReportPreview.addEventListener('click', handleImageReportPreviewClick)
   if (els.exitTestModeSelect) els.exitTestModeSelect.addEventListener('change', handleExitTestModeChange)
   if (els.exitTestTotalInput) els.exitTestTotalInput.addEventListener('input', () => {
     state.exitTest.totalScore = Number(els.exitTestTotalInput.value || 100)
@@ -3721,12 +3727,13 @@ function renderImageReport(payload = null) {
 
   els.imageReportPreview.innerHTML = reportItems.map((item, index) => `
     <div class="image-report-preview-item">
-      ${reportItems.length > 1 ? `
-        <div class="image-report-preview-head">
-          <span>第 ${index + 1} 张</span>
+      <div class="image-report-preview-head">
+        <div class="image-report-preview-title">
+          <span>${reportItems.length > 1 ? `第 ${index + 1} 张` : '图片反馈'}</span>
           <strong>${escapeHtml(item.name || `报告${index + 1}`)}</strong>
         </div>
-      ` : ''}
+        <button class="secondary-button compact-button" data-action="copy-image-report" data-report-index="${index}" type="button">复制图片</button>
+      </div>
       ${renderImageReportSheet({
         item,
         index,
@@ -3760,12 +3767,17 @@ function renderImageReportSheet(options) {
   const focusText = reportSections.studyFocus || ''
   const performanceText = reportSections.performance || item.feedback || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
   const isIndividual = item.scope !== 'class'
+  const showAllScores = isIndividual
+    && state.mode === 'class'
+    && (reportPayload.showAllScoresInIndividualReports || (els.showAllScoresSelect && els.showAllScoresSelect.value === 'all'))
   const scoreRows = isIndividual
-    ? reportScores.filter((score) => {
-        if (item.studentId && score.studentId) return score.studentId === item.studentId
-        return score.name === item.name
-      })
-    : reportScores
+    ? (showAllScores
+        ? sortReportScoreRows(reportScores)
+        : reportScores.filter((score) => {
+            if (item.studentId && score.studentId) return score.studentId === item.studentId
+            return score.name === item.name
+          }))
+    : sortReportScoreRows(reportScores)
   const hasScoreRows = scoreRows.length > 0
   const numericScores = scoreRows.map((score) => Number(score.score)).filter(Number.isFinite)
   const avg = numericScores.length
@@ -3812,7 +3824,7 @@ function renderImageReportSheet(options) {
         <div class="report-paragraph">${formatReportText(homeworkText)}</div>
       </section>` : ''}
       ${hasScoreRows ? `<section>
-        <h3>【学生成绩记录】</h3>
+        <h3>【出门测成绩${showAllScores ? '（全班）' : ''}】</h3>
         <table class="report-table">
           <thead><tr><th>姓名</th><th>成绩</th><th>正确率</th></tr></thead>
           <tbody>
@@ -3915,6 +3927,34 @@ function buildReportScoreRows(students, exitTest = null) {
   return []
 }
 
+function sortReportScoreRows(rows) {
+  const gradeRank = {
+    A: 4,
+    B: 3,
+    C: 2,
+    D: 1
+  }
+
+  return [...rows].sort((left, right) => {
+    const leftScore = Number(left.score)
+    const rightScore = Number(right.score)
+    const leftHasScore = Number.isFinite(leftScore)
+    const rightHasScore = Number.isFinite(rightScore)
+
+    if (leftHasScore || rightHasScore) {
+      if (!leftHasScore) return 1
+      if (!rightHasScore) return -1
+      return rightScore - leftScore
+    }
+
+    const leftGrade = gradeRank[String(left.displayScore || '').trim().toUpperCase()] || 0
+    const rightGrade = gradeRank[String(right.displayScore || '').trim().toUpperCase()] || 0
+    if (leftGrade !== rightGrade) return rightGrade - leftGrade
+
+    return String(left.name || '').localeCompare(String(right.name || ''), 'zh-Hans-CN')
+  })
+}
+
 async function downloadImageReport() {
   const sheets = Array.from(document.querySelectorAll('[data-image-report-sheet]'))
   if (!sheets.length) {
@@ -3937,6 +3977,56 @@ async function downloadImageReport() {
         resolve()
       }, 'image/png')
     })
+  }
+}
+
+async function handleImageReportPreviewClick(event) {
+  const button = event.target.closest('[data-action="copy-image-report"]')
+  if (!button) return
+
+  const item = button.closest('.image-report-preview-item')
+  const sheet = item ? item.querySelector('[data-image-report-sheet]') : null
+  await copyImageReport(sheet, button)
+}
+
+async function copyImageReport(sheet, button = null) {
+  if (!sheet) {
+    showToast('还没有可复制的图片反馈')
+    return
+  }
+
+  if (!window.html2canvas) {
+    showToast('截图组件未加载，请刷新后重试')
+    return
+  }
+
+  if (!navigator.clipboard || !navigator.clipboard.write || !window.ClipboardItem) {
+    showToast('当前浏览器不支持直接复制图片，请先导出图片')
+    return
+  }
+
+  const originalText = button ? button.textContent : ''
+  if (button) {
+    button.disabled = true
+    button.textContent = '复制中'
+  }
+
+  try {
+    const canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff' })
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+    if (!blob) throw new Error('图片生成失败')
+
+    await navigator.clipboard.write([
+      new window.ClipboardItem({ 'image/png': blob })
+    ])
+    showToast('图片已复制')
+  } catch (error) {
+    showToast(error.message || '复制图片失败，请先导出图片')
+  } finally {
+    if (button) {
+      button.disabled = false
+      button.textContent = originalText || '复制图片'
+    }
   }
 }
 
@@ -4552,10 +4642,12 @@ function renderFeedbackModeControls() {
 
   const isClassScope = state.mode === 'class' && els.feedbackScopeSelect.value === 'class'
   const isImageFormat = isImageFeedbackMode()
+  const isClassIndividualImage = state.mode === 'class' && !isClassScope && isImageFormat
 
   const studentTable = els.studentTable
   if (els.studentToolbar) els.studentToolbar.classList.toggle('hidden', isClassScope)
   if (studentTable) studentTable.classList.toggle('hidden', isClassScope)
+  if (els.scoreDisplayField) els.scoreDisplayField.classList.toggle('hidden', !isClassIndividualImage)
   if (els.classFeedbackTemplateField) els.classFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'class' || isImageFormat)
   if (els.oneFeedbackTemplateField) els.oneFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'oneOnOne' || isImageFormat)
   if (els.classFeedbackOptions) els.classFeedbackOptions.classList.toggle('hidden', !isClassScope)
@@ -4994,6 +5086,7 @@ function buildGeneratePayload() {
     const currentTemplate = els.templateInput.value.trim() || selectedClass.template
     const feedbackScope = els.feedbackScopeSelect ? els.feedbackScopeSelect.value : 'individual'
     const feedbackFormat = els.feedbackFormatSelect ? els.feedbackFormatSelect.value : 'text'
+    const showAllScoresInIndividualReports = els.showAllScoresSelect && els.showAllScoresSelect.value === 'all'
     const classRemark = els.classRemarkInput ? els.classRemarkInput.value.trim() : ''
     const homework = els.homeworkInput ? els.homeworkInput.value.trim() : ''
     const schedule = buildClassSchedulePayload()
@@ -5018,6 +5111,7 @@ function buildGeneratePayload() {
       mode: 'class',
       feedbackScope,
       feedbackFormat,
+      showAllScoresInIndividualReports,
       className: selectedClass.name,
       grade: selectedClass.grade,
       template: currentTemplate,
