@@ -63,6 +63,9 @@ const performanceClasses = {
 }
 const REARRANGE_MAX_FILES = 3
 const REARRANGE_MAX_PAGE_IMAGES = 8
+const PAPER_ANALYSIS_MAX_PAGE_IMAGES = 24
+const PAPER_SCORE_MAX_PAGE_IMAGES = 8
+const paperExamTypeOptions = ['出门测', '中段考试', '期中考试', '期末考试', '月考', '周测']
 
 const state = {
   mode: 'class',
@@ -130,12 +133,34 @@ const state = {
     selectedScoreStudent: '',
     selectedOneProfileId: '',
     scoreMode: 'percent',
+    paper: createEmptyPaperState(),
     aiResult: '',
     aiBusy: false
   }
 }
 
 const els = {}
+
+function createEmptyPaperState() {
+  return {
+    scope: 'class',
+    file: null,
+    fileName: '',
+    fileKey: '',
+    busy: false,
+    status: '等待上传试卷',
+    analysis: null,
+    selectedClassId: '',
+    selectedProfileId: '',
+    singleStudentName: '',
+    examType: '出门测',
+    excludedStudentIds: [],
+    scoreImageStatus: {},
+    scores: {},
+    selectedReportStudentId: '',
+    report: null
+  }
+}
 
 function createEmptyTeachingData() {
   return {
@@ -144,6 +169,7 @@ function createEmptyTeachingData() {
     scoreRecords: [],
     feedbackHistory: [],
     oneProfiles: [],
+    paperAnalyses: [],
     quickOptions: {
       performance: studentKeywordOptions,
       performancePositive: studentKeywordPositiveOptions,
@@ -960,6 +986,7 @@ function normalizeTeachingDataClient(input) {
     scoreRecords: Array.isArray(source.scoreRecords) ? source.scoreRecords : [],
     feedbackHistory: Array.isArray(source.feedbackHistory) ? source.feedbackHistory : [],
     oneProfiles: Array.isArray(source.oneProfiles) ? source.oneProfiles : [],
+    paperAnalyses: Array.isArray(source.paperAnalyses) ? source.paperAnalyses : [],
     quickOptions: {
       ...fallback.quickOptions,
       ...quickOptions
@@ -1004,12 +1031,28 @@ function mergePrimaryIntoTeachingData() {
 function renderTeachingPanel() {
   if (!els.teachingPanel || !els.teachingContent) return
 
+  const isPaperTool = state.mode === 'paperAnalysis'
+  const headingEyebrow = els.teachingPanel.querySelector('.panel-heading .eyebrow')
+  const headingTitle = els.teachingPanel.querySelector('.panel-heading h1')
+  const tabsBar = els.teachingPanel.querySelector('.teaching-tabs')
+
+  if (headingEyebrow) headingEyebrow.textContent = isPaperTool ? 'Paper Analysis' : 'Teaching Data'
+  if (headingTitle) headingTitle.textContent = isPaperTool ? '试卷分析' : '教学数据工作台'
+  if (tabsBar) tabsBar.classList.toggle('hidden', isPaperTool)
+  if (els.teachingPrintBtn) els.teachingPrintBtn.classList.toggle('hidden', isPaperTool)
+  if (els.teachingScreenshotBtn) els.teachingScreenshotBtn.classList.toggle('hidden', isPaperTool)
+
   els.teachingTabs.forEach((button) => {
     button.classList.toggle('active', button.dataset.teachingTab === state.teaching.tab)
   })
 
   if (state.teaching.loading) {
     els.teachingContent.innerHTML = '<div class="student-empty">正在读取教学数据...</div>'
+    return
+  }
+
+  if (isPaperTool) {
+    renderTeachingPaperAnalysis()
     return
   }
 
@@ -1197,6 +1240,707 @@ function renderClassStats(classInfo, records) {
   `
 }
 
+function renderTeachingPaperAnalysis() {
+  const paper = getTeachingPaperState()
+  const classes = getPaperAvailableClasses()
+  const profiles = state.teaching.data.oneProfiles || []
+  const selectedClass = getPaperSelectedClass()
+  const selectedProfile = getPaperSelectedProfile()
+  const questions = getPaperQuestions()
+  const allStudents = getPaperAllStudents()
+  const students = getPaperStudents(allStudents)
+
+  els.teachingContent.innerHTML = `
+    <div class="teaching-grid two">
+      <section class="teaching-card paper-setup-card">
+        <div class="result-head">
+          <div>
+            <div class="teaching-title">试卷分析</div>
+            <div class="teaching-meta">上传试卷后，AI 会识别题号、分值、难度和知识点。</div>
+          </div>
+          <button class="secondary-button compact-button paper-sync-button" data-teaching-action="sync-primary" type="button">同步档案</button>
+        </div>
+        <div class="paper-target-grid">
+          <label class="field">
+            <span>分析对象</span>
+            <select data-paper-field="scope">
+              <option value="class" ${paper.scope === 'class' ? 'selected' : ''}>班课</option>
+              <option value="one" ${paper.scope === 'one' ? 'selected' : ''}>一对一</option>
+              <option value="single" ${paper.scope === 'single' ? 'selected' : ''}>单独建档</option>
+            </select>
+          </label>
+          <label class="field ${paper.scope === 'class' ? '' : 'hidden'}">
+            <span>选择班级</span>
+            <select data-paper-field="classId">
+              ${classes.length ? classes.map((classInfo) => `<option value="${escapeHtml(classInfo.id)}" ${selectedClass && selectedClass.id === classInfo.id ? 'selected' : ''}>${escapeHtml(classInfo.name)} · ${escapeHtml(classInfo.grade || '')}</option>`).join('') : '<option value="">暂无班级</option>'}
+            </select>
+          </label>
+          <label class="field">
+            <span>考试类型</span>
+            <select data-paper-field="examType">
+              ${paperExamTypeOptions.map((type) => `<option value="${escapeHtml(type)}" ${paper.examType === type ? 'selected' : ''}>${escapeHtml(type)}</option>`).join('')}
+            </select>
+          </label>
+          <label class="field ${paper.scope === 'one' ? '' : 'hidden'}">
+            <span>选择学生档案</span>
+            <select data-paper-field="profileId">
+              ${profiles.length ? profiles.map((profile) => `<option value="${escapeHtml(profile.id)}" ${selectedProfile && selectedProfile.id === profile.id ? 'selected' : ''}>${escapeHtml(profile.name)} · ${escapeHtml(profile.grade || '')}</option>`).join('') : '<option value="">暂无一对一档案</option>'}
+            </select>
+          </label>
+          <label class="field ${paper.scope === 'single' ? '' : 'hidden'}">
+            <span>学生姓名</span>
+            <input data-paper-field="singleStudentName" type="text" value="${escapeHtml(paper.singleStudentName)}" placeholder="例如：王同学" />
+          </label>
+        </div>
+        ${renderPaperStudentPreview(allStudents, students, paper.scope)}
+        <label class="field paper-file-field">
+          <span>上传试卷</span>
+          <input class="hidden" data-paper-field="file" type="file" accept=".pdf,.docx,.pptx,.txt,.md,image/*" />
+          <div class="paper-file-control">
+            <span class="paper-file-button">选择文件</span>
+            <span class="paper-file-name">${escapeHtml(paper.fileName || '未选择文件')}</span>
+          </div>
+        </label>
+        <div class="paper-upload-status">
+          <span>${escapeHtml(paper.status || '')}</span>
+        </div>
+        <div class="panel-actions">
+          <button class="primary-button" data-teaching-action="analyze-paper" type="button" ${paper.busy || !paper.file ? 'disabled' : ''}>${paper.busy ? 'AI 分析中...' : 'AI 深度分析试卷'}</button>
+          <button class="secondary-button" data-teaching-action="reset-paper" type="button">清空本次分析</button>
+        </div>
+      </section>
+      <section class="teaching-card">
+        ${renderPaperAnalysisSummary(paper.analysis, questions)}
+      </section>
+    </div>
+    ${paper.analysis ? renderPaperScoreEntry(students, questions) : ''}
+    ${paper.report ? renderPaperReportArea() : ''}
+  `
+}
+
+function renderPaperAnalysisSummary(analysis, questions) {
+  if (!analysis) {
+    return `
+      <div class="teaching-title">分析结果</div>
+      <div class="student-empty">试卷上传并分析后，会在这里显示题型结构、总分、知识点和录分入口。</div>
+    `
+  }
+
+  const totalScore = getPaperTotalScore(questions)
+  const sections = Array.isArray(analysis.sections) ? analysis.sections : []
+  return `
+    <div class="result-head">
+      <div>
+        <div class="teaching-title">${escapeHtml(analysis.title || '未命名试卷')}</div>
+        <div class="teaching-meta">${sections.length} 个题型 · ${questions.length} 道题 · 卷面分 ${formatPaperNumber(totalScore)}</div>
+      </div>
+    </div>
+    <div class="paper-section-list">
+      ${sections.map((section) => `
+        <div class="paper-section-item">
+          <strong>${escapeHtml(section.title || '未命名题型')}</strong>
+          <span>${Array.isArray(section.questions) ? section.questions.length : 0} 题</span>
+        </div>
+      `).join('')}
+    </div>
+    <div class="teaching-analysis">${escapeHtml(analysis.summary || 'AI 已完成试卷结构识别，请在下方录入学生得分。')}</div>
+  `
+}
+
+function renderPaperStudentPreview(allStudents, activeStudents, scope) {
+  if (scope !== 'class') return ''
+  const activeIds = new Set(activeStudents.map((student) => student.id))
+
+  return `
+    <div class="paper-student-preview">
+      <div class="paper-student-preview-head">
+        <strong>学生名单</strong>
+        <span>参与 ${activeStudents.length} / ${allStudents.length} 人</span>
+      </div>
+      ${allStudents.length
+        ? `<div class="paper-student-chip-list">${allStudents.map((student) => {
+            const active = activeIds.has(student.id)
+            return `<button class="paper-student-chip ${active ? 'active' : 'excluded'}" data-teaching-action="toggle-paper-student" data-student-id="${escapeHtml(student.id)}" type="button">${escapeHtml(student.name)}</button>`
+          }).join('')}</div>`
+        : '<div class="student-empty compact-empty">当前班级暂无学生，请先在班级档案里添加学生，或点击“同步现有档案”。</div>'}
+    </div>
+  `
+}
+
+function renderPaperScoreEntry(students, questions) {
+  if (!students.length) {
+    return '<section class="teaching-card"><div class="student-empty">请先选择班级/一对一档案，或填写单独建档学生姓名。</div></section>'
+  }
+
+  if (!questions.length) {
+    return '<section class="teaching-card"><div class="student-empty">AI 暂未识别到题目，请换一份更清晰的试卷重试。</div></section>'
+  }
+
+  return `
+    <section class="teaching-card">
+      <div class="result-head">
+        <div>
+          <div class="teaching-title">逐题得分录入</div>
+          <div class="teaching-meta">${students.length} 名学生 · ${questions.length} 道题；下拉选项由 AI 识别的题分自动生成。</div>
+        </div>
+        <button class="primary-button compact-button" data-teaching-action="generate-paper-report" type="button">生成 PDF 文档</button>
+      </div>
+      <div class="paper-score-scroll">
+        <table class="paper-score-table">
+          <thead>
+            <tr>
+              <th class="paper-sticky-col">学生</th>
+              ${questions.map((question) => `<th title="${escapeHtml(question.knowledge || '')}">${escapeHtml(question.number)}<small>${formatPaperNumber(question.score)}分</small></th>`).join('')}
+              <th>批改图</th>
+              <th>总分</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${students.map((student) => `
+              <tr>
+                <td class="paper-sticky-col">${escapeHtml(student.name)}</td>
+                ${questions.map((question) => `
+                  <td>
+                    <select data-paper-score data-student-id="${escapeHtml(student.id)}" data-question-key="${escapeHtml(question.key)}" aria-label="${escapeHtml(student.name)}第${escapeHtml(question.number)}题得分">
+                      ${renderPaperScoreOptions(question, getPaperScoreValue(student.id, question.key))}
+                    </select>
+                  </td>
+                `).join('')}
+                <td class="paper-score-image-cell">
+                  <label class="paper-score-upload">
+                    <input class="hidden" data-paper-score-image data-student-id="${escapeHtml(student.id)}" type="file" accept=".pdf,image/*" />
+                    <span>上传</span>
+                  </label>
+                  <small>${escapeHtml(getPaperScoreImageStatus(student.id))}</small>
+                </td>
+                <td class="paper-total-cell">${formatPaperNumber(getPaperStudentTotal(student.id, questions))}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `
+}
+
+function renderPaperReportArea() {
+  const paper = getTeachingPaperState()
+  const reports = Array.isArray(paper.report && paper.report.students) ? paper.report.students : []
+  const isClass = paper.report && paper.report.scope === 'class'
+
+  if (isClass) {
+    return `
+      <section class="teaching-card">
+        <div class="result-head">
+          <div>
+            <div class="teaching-title">学生 PDF 文档已准备</div>
+            <div class="teaching-meta">班课会为每个学生生成一份单独的试卷分析 PDF，不合并成全班预览。</div>
+          </div>
+        </div>
+        <div class="paper-pdf-ready">
+          <strong>${escapeHtml(paper.report.title || '试卷分析')}</strong>
+          <span>${escapeHtml(paper.report.targetName || '')} · ${reports.length} 份学生文档 · 卷面分 ${formatPaperNumber(paper.report.totalScore)}</span>
+          <div>点击学生姓名按钮会直接下载该学生的 PDF 文件。</div>
+          <div class="paper-pdf-doc-list">
+            ${reports.map((studentReport) => `
+              <button class="secondary-button compact-button" data-teaching-action="export-paper-pdf" data-student-id="${escapeHtml(studentReport.id)}" type="button">${escapeHtml(studentReport.name)} PDF</button>
+            `).join('')}
+          </div>
+        </div>
+      </section>
+    `
+  }
+
+  return `
+    <section class="teaching-card">
+      <div class="result-head">
+        <div>
+          <div class="teaching-title">PDF 文档已准备</div>
+          <div class="teaching-meta">${reports.length} 名学生 · ${isClass ? '班课 PDF 已包含每题平均分' : '一对一/单独分析不显示班级平均分'}。</div>
+        </div>
+        <button class="primary-button compact-button" data-teaching-action="export-paper-pdf" type="button">下载 PDF</button>
+      </div>
+      <div class="paper-pdf-ready">
+        <strong>${escapeHtml(paper.report.title || '试卷分析')}</strong>
+        <span>${escapeHtml(paper.report.targetName || '')} · 卷面分 ${formatPaperNumber(paper.report.totalScore)}</span>
+        <div>点击右上角按钮会直接下载 PDF 文件。</div>
+      </div>
+    </section>
+  `
+}
+
+function renderPaperClassOverview(report) {
+  const rows = (report.students || [])
+    .slice()
+    .sort((left, right) => right.total - left.total)
+
+  return `
+    <div class="paper-class-overview">
+      <div>
+        <strong>${escapeHtml(report.targetName || '班级')} 试卷总览</strong>
+        <span>平均分 ${formatPaperNumber(report.classAverageTotal)} / ${formatPaperNumber(report.totalScore)}</span>
+      </div>
+      <div class="paper-rank-list">
+        ${rows.map((row, index) => `<span>${index + 1}. ${escapeHtml(row.name)} ${formatPaperNumber(row.total)}</span>`).join('')}
+      </div>
+    </div>
+  `
+}
+
+function renderPaperStudentReport(studentReport, report) {
+  const showAverage = report.scope === 'class'
+  const colSpan = showAverage ? 7 : 6
+  const percent = report.totalScore ? Math.round((studentReport.total / report.totalScore) * 100) : 0
+
+  return `
+    <article class="paper-analysis-sheet">
+      <header class="paper-sheet-head">
+        <div>
+          <p>${escapeHtml(report.title || '试卷分析')}</p>
+          <h2>${escapeHtml(studentReport.name)} 试卷分析</h2>
+        </div>
+        <div class="paper-score-badge">
+          <strong>${formatPaperNumber(studentReport.total)}</strong>
+          <span>/ ${formatPaperNumber(report.totalScore)} 分 · ${percent}%</span>
+        </div>
+      </header>
+      <table class="paper-analysis-table">
+        <thead>
+          <tr>
+            <th>题号</th>
+            <th>难度系数</th>
+            <th>详细知识点</th>
+            <th>题分</th>
+            <th>得分</th>
+            ${showAverage ? '<th>平均分</th>' : ''}
+            <th>卷面分</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${report.sections.map((section) => `
+            <tr class="paper-section-row"><td colspan="${colSpan}">${escapeHtml(section.title)}</td></tr>
+            ${section.questions.map((question) => renderPaperReportQuestionRow(question, studentReport, report, showAverage)).join('')}
+          `).join('')}
+        </tbody>
+      </table>
+      ${renderPaperWrongAdvice(studentReport)}
+      <div class="paper-final-summary">
+        <h3>最终试卷总结分析</h3>
+        <p>${escapeHtml(studentReport.summary)}</p>
+      </div>
+    </article>
+  `
+}
+
+function renderPaperReportQuestionRow(question, studentReport, report, showAverage) {
+  const score = getPaperScoreFromReport(studentReport, question.key)
+  const average = showAverage ? report.questionAverages[question.key] : null
+  const scoreClass = Number(score) >= Number(question.score || 0) ? 'full' : (Number(score) > 0 ? 'partial' : 'empty')
+
+  return `
+    <tr>
+      <td class="paper-question-number">${escapeHtml(question.number)}</td>
+      <td>${escapeHtml(formatPaperDifficulty(question.difficulty))}</td>
+      <td class="paper-knowledge-cell">${escapeHtml(question.knowledge || '待补充')}</td>
+      <td>${formatPaperNumber(question.score)}</td>
+      <td class="paper-earned ${scoreClass}">${formatPaperNumber(score)}</td>
+      ${showAverage ? `<td class="paper-average-cell">${formatPaperNumber(average)}</td>` : ''}
+      <td>${formatPaperNumber(report.totalScore)}</td>
+    </tr>
+  `
+}
+
+function renderPaperWrongAdvice(studentReport) {
+  const wrongItems = studentReport.wrongQuestions || []
+  if (!wrongItems.length) {
+    return `
+      <div class="paper-wrong-advice">
+        <h3>错题分析与改进方案</h3>
+        <p>本次录入结果没有明显失分题，后续可以用同类变式题保持手感。</p>
+      </div>
+    `
+  }
+
+  return `
+    <div class="paper-wrong-advice">
+      <h3>错题分析与改进方案</h3>
+      ${wrongItems.map((item) => `
+        <div class="paper-wrong-item">
+          <strong>第 ${escapeHtml(item.number)} 题：${escapeHtml(item.knowledge || '相关知识点')}</strong>
+          <p>${escapeHtml(item.analysis || '该题反映出对应知识点掌握还不够稳定。')}</p>
+          <p><b>改进：</b>${escapeHtml(item.improvement || '建议先回看本题涉及的概念和关键步骤，再完成 2-3 道同类题进行巩固。')}</p>
+        </div>
+      `).join('')}
+    </div>
+  `
+}
+
+function renderPaperHistoryCard(item) {
+  const createdAt = formatDateTime(item.createdAt)
+  const students = Array.isArray(item.students) ? item.students : []
+  return `
+    <article class="teaching-card compact-card">
+      <div class="result-head">
+        <div>
+          <div class="teaching-title">${escapeHtml(item.title || '试卷分析')}</div>
+          <div class="teaching-meta">${createdAt} · ${escapeHtml(item.targetName || '')} · ${students.length} 名学生</div>
+        </div>
+        <button class="secondary-button compact-button" data-teaching-action="restore-paper-report" data-id="${escapeHtml(item.id)}" type="button">${item.scope === 'class' ? '打开列表' : '导出 PDF'}</button>
+      </div>
+    </article>
+  `
+}
+
+function getTeachingPaperState() {
+  if (!state.teaching.paper) state.teaching.paper = createEmptyPaperState()
+  const paper = state.teaching.paper
+  const classes = getPaperAvailableClasses()
+  const profiles = state.teaching.data.oneProfiles || []
+
+  if (paper.scope === 'class' && classes[0] && !classes.some((classInfo) => classInfo.id === paper.selectedClassId)) {
+    paper.selectedClassId = classes[0].id
+  }
+  if (paper.scope === 'one' && !paper.selectedProfileId && profiles[0]) {
+    paper.selectedProfileId = profiles[0].id
+  }
+
+  return paper
+}
+
+function getPaperAvailableClasses() {
+  const primaryClasses = normalizePaperClassOptions(state.classes || [])
+  if (primaryClasses.length) return primaryClasses
+  return normalizePaperClassOptions(state.teaching.data.classes || [])
+}
+
+function normalizePaperClassOptions(classes) {
+  const seen = new Set()
+  return (Array.isArray(classes) ? classes : [])
+    .map((classInfo) => {
+      const source = classInfo && typeof classInfo === 'object' ? classInfo : {}
+      const name = trimText(source.name)
+      const grade = trimText(source.grade)
+      const students = Array.isArray(source.students) ? source.students : []
+      return {
+        ...source,
+        id: trimText(source.id) || `${name}-${grade}`,
+        name,
+        grade,
+        students
+      }
+    })
+    .filter((classInfo) => classInfo.name && classInfo.students.length)
+    .filter((classInfo) => !/出门测|流程测试/i.test(classInfo.name))
+    .filter((classInfo) => {
+      const key = `${classInfo.name}::${classInfo.grade}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
+function getPaperSelectedClass() {
+  const paper = getTeachingPaperState()
+  const classes = getPaperAvailableClasses()
+  return classes.find((item) => item.id === paper.selectedClassId) || classes[0] || null
+}
+
+function getPaperSelectedProfile() {
+  const paper = getTeachingPaperState()
+  const profiles = state.teaching.data.oneProfiles || []
+  return profiles.find((item) => item.id === paper.selectedProfileId) || profiles[0] || null
+}
+
+function getPaperAllStudents() {
+  const paper = getTeachingPaperState()
+  if (paper.scope === 'class') {
+    const classInfo = getPaperSelectedClass()
+    return classInfo && Array.isArray(classInfo.students)
+      ? classInfo.students.map((student, index) => ({
+          id: student.id || `class-student-${index + 1}`,
+          name: student.name
+        })).filter((student) => student.name)
+      : []
+  }
+
+  if (paper.scope === 'one') {
+    const profile = getPaperSelectedProfile()
+    return profile ? [{ id: profile.id, name: profile.name }] : []
+  }
+
+  const name = trimText(paper.singleStudentName) || '单独学生'
+  return [{ id: 'single-paper-student', name }]
+}
+
+function getPaperStudents(allStudents = getPaperAllStudents()) {
+  const paper = getTeachingPaperState()
+  const excluded = new Set(Array.isArray(paper.excludedStudentIds) ? paper.excludedStudentIds : [])
+  return allStudents.filter((student) => !excluded.has(student.id))
+}
+
+function getPaperQuestions(analysis = getTeachingPaperState().analysis) {
+  if (!analysis) return []
+  const sections = Array.isArray(analysis.sections) ? analysis.sections : []
+  return sections.flatMap((section, sectionIndex) => (
+    (Array.isArray(section.questions) ? section.questions : []).map((question, questionIndex) => ({
+      ...question,
+      sectionTitle: section.title || `题型 ${sectionIndex + 1}`,
+      key: question.key || question.id || `${sectionIndex + 1}-${question.number || questionIndex + 1}`,
+      number: question.number || String(questionIndex + 1),
+      score: normalizePaperScore(question.score)
+    }))
+  ))
+}
+
+function getPaperSectionsWithQuestions(analysis) {
+  const sections = Array.isArray(analysis && analysis.sections) ? analysis.sections : []
+  return sections.map((section, sectionIndex) => ({
+    title: section.title || `题型 ${sectionIndex + 1}`,
+    questions: (Array.isArray(section.questions) ? section.questions : []).map((question, questionIndex) => ({
+      ...question,
+      sectionTitle: section.title || `题型 ${sectionIndex + 1}`,
+      key: question.key || question.id || `${sectionIndex + 1}-${question.number || questionIndex + 1}`,
+      number: question.number || String(questionIndex + 1),
+      score: normalizePaperScore(question.score)
+    }))
+  })).filter((section) => section.questions.length)
+}
+
+function normalizePaperScore(value) {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? number : 1
+}
+
+function getPaperTotalScore(questions = getPaperQuestions()) {
+  return questions.reduce((sum, question) => sum + normalizePaperScore(question.score), 0)
+}
+
+function getPaperScoreValue(studentId, questionKey) {
+  const paper = getTeachingPaperState()
+  const studentScores = paper.scores && paper.scores[studentId]
+  const value = studentScores ? studentScores[questionKey] : ''
+  if (value === undefined || value === null || value === '') {
+    const question = getPaperQuestions().find((item) => item.key === questionKey)
+    return question && shouldDefaultPaperQuestionFull(question) ? formatPaperNumber(question.score) : ''
+  }
+  return String(value)
+}
+
+function shouldDefaultPaperQuestionFull(question) {
+  return /选择|单选|多选|填空/.test(String(question && question.sectionTitle || ''))
+}
+
+function getPaperStudentTotal(studentId, questions = getPaperQuestions()) {
+  return questions.reduce((sum, question) => {
+    const value = Number(getPaperScoreValue(studentId, question.key))
+    return sum + (Number.isFinite(value) ? value : 0)
+  }, 0)
+}
+
+function renderPaperScoreOptions(question, selectedValue) {
+  const maxScore = normalizePaperScore(question.score)
+  const step = maxScore <= 10 && !Number.isInteger(maxScore) ? 0.5 : 1
+  const options = ['<option value="">-</option>']
+  const values = []
+
+  for (let value = 0; value <= maxScore + 0.0001; value += step) {
+    values.push(Number(value.toFixed(2)))
+  }
+  if (!values.includes(maxScore)) values.push(maxScore)
+
+  Array.from(new Set(values)).sort((left, right) => left - right).forEach((value) => {
+    const text = formatPaperNumber(value)
+    options.push(`<option value="${text}" ${String(selectedValue) === text ? 'selected' : ''}>${text}</option>`)
+  })
+
+  return options.join('')
+}
+
+function generatePaperReport() {
+  const paper = getTeachingPaperState()
+  if (!paper.analysis) {
+    showToast('请先让 AI 分析试卷')
+    return
+  }
+
+  const students = getPaperStudents()
+  const sections = getPaperSectionsWithQuestions(paper.analysis)
+  const questions = sections.flatMap((section) => section.questions)
+
+  if (!students.length || !questions.length) {
+    showToast('请先选择学生并确认试卷题目')
+    return
+  }
+
+  const totalScore = getPaperTotalScore(questions)
+  const questionAverages = {}
+
+  questions.forEach((question) => {
+    const values = students
+      .map((student) => Number(getPaperScoreValue(student.id, question.key)))
+      .filter(Number.isFinite)
+    questionAverages[question.key] = values.length
+      ? values.reduce((sum, value) => sum + value, 0) / values.length
+      : 0
+  })
+
+  const classAverageTotal = students.length
+    ? students.reduce((sum, student) => sum + getPaperStudentTotal(student.id, questions), 0) / students.length
+    : 0
+
+  const report = {
+    id: createId('paper-report'),
+    scope: paper.scope,
+    examType: paper.examType || '出门测',
+    title: `${paper.examType || '出门测'} · ${paper.analysis.title || paper.fileName || '试卷分析'}`,
+    fileName: paper.fileName,
+    targetName: getPaperTargetName(),
+    totalScore,
+    classAverageTotal,
+    sections,
+    questionAverages,
+    summary: paper.analysis.summary || '',
+    students: students.map((student) => buildPaperStudentReport(student, sections, totalScore)),
+    createdAt: Date.now()
+  }
+
+  paper.report = report
+  savePaperReportHistory(report)
+  renderTeachingPanel()
+  if (report.scope === 'class') {
+    showToast('每个学生的单独 PDF 文档已生成')
+  } else {
+    exportPaperReportPdf(report)
+    showToast('PDF 文档已生成，可在打印窗口里另存为 PDF')
+  }
+}
+
+function buildPaperStudentReport(student, sections, totalScore) {
+  const questions = sections.flatMap((section) => section.questions)
+  const scores = {}
+  questions.forEach((question) => {
+    const value = Number(getPaperScoreValue(student.id, question.key))
+    scores[question.key] = Number.isFinite(value) ? value : 0
+  })
+
+  const total = questions.reduce((sum, question) => sum + scores[question.key], 0)
+  const wrongQuestions = questions
+    .filter((question) => scores[question.key] < normalizePaperScore(question.score))
+    .map((question) => ({
+      number: question.number,
+      knowledge: question.knowledge,
+      score: scores[question.key],
+      maxScore: normalizePaperScore(question.score),
+      analysis: question.analysis,
+      improvement: question.improvement
+    }))
+
+  return {
+    id: student.id,
+    name: student.name,
+    total,
+    totalScore,
+    scores,
+    wrongQuestions,
+    summary: buildPaperFinalSummary(student.name, total, totalScore, wrongQuestions)
+  }
+}
+
+function buildPaperFinalSummary(studentName, total, totalScore, wrongQuestions) {
+  const rate = totalScore ? total / totalScore : 0
+  const level = rate >= 0.9
+    ? '整体掌握较扎实'
+    : (rate >= 0.75 ? '基础掌握较稳定，但仍有局部漏洞' : (rate >= 0.6 ? '基础框架已有，但关键题型还需要加强' : '本次试卷暴露出较多基础和方法问题'))
+  const weakText = wrongQuestions.length
+    ? `主要失分集中在${wrongQuestions.slice(0, 4).map((item) => `第${item.number}题`).join('、')}，建议按知识点先补概念，再做同类变式。`
+    : '本次没有明显失分题，建议继续保持审题和书写规范，并适当做拓展题。'
+
+  return `${studentName}本次得分 ${formatPaperNumber(total)}/${formatPaperNumber(totalScore)}，${level}。${weakText}`
+}
+
+function savePaperReportHistory(report) {
+  if (!report) return
+  const historyItem = {
+    id: report.id,
+    title: report.title,
+    examType: report.examType,
+    fileName: report.fileName,
+    scope: report.scope,
+    targetName: report.targetName,
+    totalScore: report.totalScore,
+    classAverageTotal: report.classAverageTotal,
+    sections: report.sections,
+    questionAverages: report.questionAverages,
+    students: report.students,
+    summary: report.summary,
+    createdAt: report.createdAt
+  }
+  state.teaching.data.paperAnalyses = [
+    historyItem,
+    ...(state.teaching.data.paperAnalyses || []).filter((item) => item.id !== historyItem.id)
+  ].slice(0, 80)
+  saveTeachingData({ silent: true })
+}
+
+function restorePaperReport(id) {
+  const item = (state.teaching.data.paperAnalyses || []).find((history) => history.id === id)
+  if (!item) return
+  const paper = getTeachingPaperState()
+  paper.report = {
+    ...item,
+    sections: Array.isArray(item.sections) ? item.sections : [],
+    questionAverages: item.questionAverages || {},
+    students: Array.isArray(item.students) ? item.students : []
+  }
+  paper.analysis = {
+    title: item.title,
+    sections: paper.report.sections,
+    summary: item.summary
+  }
+  renderTeachingPanel()
+  if (paper.report.scope === 'class') {
+    showToast('已打开学生 PDF 列表')
+  } else {
+    exportPaperReportPdf(paper.report)
+  }
+}
+
+function getPaperTargetName() {
+  const paper = getTeachingPaperState()
+  if (paper.scope === 'class') {
+    const classInfo = getPaperSelectedClass()
+    return classInfo ? classInfo.name : '班级'
+  }
+  if (paper.scope === 'one') {
+    const profile = getPaperSelectedProfile()
+    return profile ? profile.name : '一对一学生'
+  }
+  return trimText(paper.singleStudentName) || '单独学生'
+}
+
+function getPaperScoreFromReport(studentReport, questionKey) {
+  const scores = studentReport && studentReport.scores ? studentReport.scores : {}
+  const value = Number(scores[questionKey])
+  return Number.isFinite(value) ? value : 0
+}
+
+function formatPaperDifficulty(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '-'
+  if (number > 1) return (number / 100).toFixed(2)
+  return number.toFixed(2)
+}
+
+function formatPaperNumber(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '-'
+  return Number.isInteger(number) ? String(number) : number.toFixed(1).replace(/\.0$/, '')
+}
+
+function trimText(value) {
+  return String(value || '').trim()
+}
+
 function renderTeachingHistory() {
   const history = state.teaching.data.feedbackHistory || []
   els.teachingContent.innerHTML = `
@@ -1323,6 +2067,15 @@ async function handleTeachingClick(event) {
   if (action === 'import-courses') importTeachingCourses()
   if (action === 'save-score') saveTeachingScore()
   if (action === 'analyze-class') analyzeTeachingClass(id)
+  if (action === 'analyze-paper') analyzePaperFile()
+  if (action === 'generate-paper-report') generatePaperReport()
+  if (action === 'export-paper-pdf') exportPaperReportPdf(null, button.dataset.studentId || '')
+  if (action === 'toggle-paper-student') togglePaperStudent(button.dataset.studentId || '')
+  if (action === 'restore-paper-report') restorePaperReport(id)
+  if (action === 'reset-paper') {
+    state.teaching.paper = createEmptyPaperState()
+    renderTeachingPanel()
+  }
   if (action === 'clear-history') clearTeachingHistory()
   if (action === 'copy-history') copyTeachingHistory(id)
   if (action === 'delete-history') deleteTeachingHistory(id)
@@ -1357,9 +2110,23 @@ function handleTeachingInput(event) {
       scheduleTeachingSave()
     }
   }
+  if (event.target.matches('[data-paper-field="singleStudentName"]')) {
+    const paper = getTeachingPaperState()
+    paper.singleStudentName = event.target.value
+    paper.report = null
+  }
 }
 
 function handleTeachingChange(event) {
+  if (event.target.matches('[data-paper-field]')) {
+    handlePaperFieldChange(event.target)
+  }
+  if (event.target.matches('[data-paper-score]')) {
+    handlePaperScoreChange(event.target)
+  }
+  if (event.target.matches('[data-paper-score-image]')) {
+    recognizePaperStudentScores(event.target)
+  }
   if (event.target.matches('[data-teaching-field="scoreClass"]')) {
     state.teaching.selectedScoreClassId = event.target.value
     renderTeachingPanel()
@@ -1368,6 +2135,487 @@ function handleTeachingChange(event) {
     state.teaching.scoreMode = event.target.value
     renderTeachingPanel()
   }
+}
+
+function handlePaperFieldChange(target) {
+  const paper = getTeachingPaperState()
+  const field = target.dataset.paperField
+
+  if (field === 'scope') {
+    paper.scope = target.value || 'class'
+    paper.excludedStudentIds = []
+    paper.report = null
+    renderTeachingPanel()
+    return
+  }
+
+  if (field === 'classId') {
+    paper.selectedClassId = target.value
+    paper.excludedStudentIds = []
+    paper.report = null
+    renderTeachingPanel()
+    return
+  }
+
+  if (field === 'profileId') {
+    paper.selectedProfileId = target.value
+    paper.excludedStudentIds = []
+    paper.report = null
+    renderTeachingPanel()
+    return
+  }
+
+  if (field === 'examType') {
+    paper.examType = target.value || '出门测'
+    paper.report = null
+    renderTeachingPanel()
+    return
+  }
+
+  if (field === 'file') {
+    const file = target.files && target.files[0]
+    paper.file = file || null
+    paper.fileName = file ? file.name : ''
+    paper.fileKey = file ? getFileKey(file) : ''
+    paper.analysis = null
+    paper.report = null
+    paper.scores = {}
+    paper.status = file ? `已选择：${file.name}` : '等待上传试卷'
+    renderTeachingPanel()
+  }
+}
+
+function handlePaperScoreChange(target) {
+  const paper = getTeachingPaperState()
+  const studentId = target.dataset.studentId
+  const questionKey = target.dataset.questionKey
+  if (!studentId || !questionKey) return
+
+  if (!paper.scores[studentId]) paper.scores[studentId] = {}
+  paper.scores[studentId][questionKey] = target.value
+  paper.report = null
+
+  const totalCell = target.closest('tr') && target.closest('tr').querySelector('.paper-total-cell')
+  if (totalCell) {
+    totalCell.textContent = formatPaperNumber(getPaperStudentTotal(studentId))
+  }
+}
+
+function getPaperScoreImageStatus(studentId) {
+  const statusMap = getTeachingPaperState().scoreImageStatus || {}
+  return statusMap[studentId] || ''
+}
+
+async function recognizePaperStudentScores(input) {
+  const file = input.files && input.files[0]
+  const studentId = input.dataset.studentId
+  const student = getPaperStudents().find((item) => item.id === studentId)
+  const questions = getPaperQuestions()
+
+  if (!file || !student || !questions.length) return
+
+  const paper = getTeachingPaperState()
+  if (!paper.scoreImageStatus) paper.scoreImageStatus = {}
+  paper.scoreImageStatus[studentId] = 'AI 识别中...'
+  paper.report = null
+  renderTeachingPanel()
+
+  try {
+    const formData = await buildPaperScoreRecognitionFormData(file, student, questions)
+    const response = await fetch('/api/teaching-data/paper-score-recognition', {
+      method: 'POST',
+      body: formData
+    })
+    const data = await response.json()
+
+    if (response.status === 401) {
+      updateAccessState({ authenticated: false })
+      renderAccessState()
+      throw new Error(data.error || '请先登录账号')
+    }
+
+    if (response.status === 429) {
+      updateAccessState({ usage: data.usage || state.access.usage })
+      renderAccessState()
+      throw new Error(data.error || '今日生成次数已用完')
+    }
+
+    if (!response.ok) throw new Error(data.error || '批改图识别失败')
+
+    if (data.usage) {
+      updateAccessState({ usage: data.usage })
+      renderAccessState()
+    }
+
+    applyRecognizedPaperScores(studentId, data.scores || {}, questions)
+    paper.scoreImageStatus[studentId] = data.demo ? '演示识别已填入' : 'AI 已填入'
+    showToast(`${student.name} 的批改图分数已填入，可继续手动修改`)
+  } catch (error) {
+    paper.scoreImageStatus[studentId] = error.message || '识别失败'
+    showToast(error.message || '批改图识别失败')
+  } finally {
+    input.value = ''
+    renderTeachingPanel()
+  }
+}
+
+async function buildPaperScoreRecognitionFormData(file, student, questions) {
+  const formData = new FormData()
+  const payload = {
+    title: getTeachingPaperState().analysis ? getTeachingPaperState().analysis.title : '试卷分析',
+    examType: getTeachingPaperState().examType || '出门测',
+    student,
+    questions: questions.map((question) => ({
+      key: question.key,
+      number: question.number,
+      sectionTitle: question.sectionTitle,
+      knowledge: question.knowledge,
+      score: question.score
+    }))
+  }
+
+  if (isPdfFile(file)) {
+    await appendPaperScorePdfData(formData, file, payload)
+  }
+
+  formData.append('payload', JSON.stringify(payload))
+  formData.append('scoreFile', file, file.name)
+  return formData
+}
+
+async function appendPaperScorePdfData(formData, file, payload) {
+  if (!window.pdfjsLib) return
+
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+  const pageCount = pdf.numPages || 0
+  const imagePageCount = Math.min(pageCount, PAPER_SCORE_MAX_PAGE_IMAGES)
+  const textParts = []
+
+  payload.selectedPdfPages = Array.from({ length: pageCount }, (item, index) => index + 1)
+  payload.pdfPageCount = pageCount
+  payload.imagePageCount = imagePageCount
+
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber)
+    const textContent = await page.getTextContent().catch(() => null)
+    if (textContent && Array.isArray(textContent.items)) {
+      const pageText = textContent.items.map((item) => item.str || '').join(' ').replace(/\s+/g, ' ').trim()
+      if (pageText) textParts.push(`第 ${pageNumber} 页：${pageText}`)
+    }
+
+    if (pageNumber <= imagePageCount) {
+      const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.76 })
+      if (blob) formData.append('scorePageImage', blob, `${file.name}-page-${pageNumber}.jpg`)
+    }
+  }
+
+  if (textParts.length) payload.clientPdfText = textParts.join('\n').slice(0, 30000)
+}
+
+function applyRecognizedPaperScores(studentId, scores, questions) {
+  const paper = getTeachingPaperState()
+  if (!paper.scores[studentId]) paper.scores[studentId] = {}
+
+  questions.forEach((question) => {
+    const rawValue = scores[question.key] ?? scores[question.number]
+    const value = Number(rawValue)
+    if (!Number.isFinite(value)) return
+    paper.scores[studentId][question.key] = formatPaperNumber(Math.max(0, Math.min(normalizePaperScore(question.score), value)))
+  })
+}
+
+function togglePaperStudent(studentId) {
+  if (!studentId) return
+  const paper = getTeachingPaperState()
+  const excluded = new Set(Array.isArray(paper.excludedStudentIds) ? paper.excludedStudentIds : [])
+  if (excluded.has(studentId)) excluded.delete(studentId)
+  else excluded.add(studentId)
+  paper.excludedStudentIds = Array.from(excluded)
+  paper.report = null
+  renderTeachingPanel()
+}
+
+async function analyzePaperFile() {
+  const paper = getTeachingPaperState()
+  if (!paper.file) {
+    showToast('请先上传试卷文件')
+    return
+  }
+
+  try {
+    paper.busy = true
+    paper.status = '正在准备试卷内容...'
+    renderTeachingPanel()
+
+    const formData = await buildPaperAnalysisFormData(paper.file)
+    paper.status = 'AI 正在深度分析试卷...'
+    renderTeachingPanel()
+
+    const response = await fetch('/api/teaching-data/paper-analysis', {
+      method: 'POST',
+      body: formData
+    })
+    const data = await response.json()
+
+    if (response.status === 401) {
+      updateAccessState({ authenticated: false })
+      renderAccessState()
+      throw new Error(data.error || '请先登录账号')
+    }
+
+    if (response.status === 429) {
+      updateAccessState({ usage: data.usage || state.access.usage })
+      renderAccessState()
+      throw new Error(data.error || '今日生成次数已用完')
+    }
+
+    if (!response.ok) throw new Error(data.error || '试卷分析失败')
+
+    if (data.usage) {
+      updateAccessState({ usage: data.usage })
+      renderAccessState()
+    }
+
+    paper.analysis = normalizePaperAnalysisClient(data.analysis)
+    paper.scores = {}
+    paper.report = null
+    paper.status = data.demo ? '演示分析已生成' : 'AI 分析完成'
+    showToast(data.demo ? '当前未配置 AI，已生成演示试卷分析' : '试卷分析完成')
+  } catch (error) {
+    paper.status = error.message || '试卷分析失败'
+    showToast(error.message || '试卷分析失败')
+  } finally {
+    paper.busy = false
+    renderTeachingPanel()
+  }
+}
+
+async function buildPaperAnalysisFormData(file) {
+  const formData = new FormData()
+  const payload = {
+    title: file.name.replace(/\.[^.]+$/, ''),
+    fileName: file.name,
+    scope: getTeachingPaperState().scope,
+    examType: getTeachingPaperState().examType || '出门测'
+  }
+
+  if (isPdfFile(file)) {
+    await appendPaperPdfData(formData, file, payload)
+  }
+
+  formData.append('payload', JSON.stringify(payload))
+  formData.append('paperFile', file, file.name)
+  return formData
+}
+
+async function appendPaperPdfData(formData, file, payload) {
+  if (!window.pdfjsLib) {
+    showToast('PDF 解析组件未加载，将按普通 PDF 上传')
+    return
+  }
+
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  const paper = getTeachingPaperState()
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+  const pageCount = pdf.numPages || 0
+  const imagePageCount = Math.min(pageCount, PAPER_ANALYSIS_MAX_PAGE_IMAGES)
+  const textParts = []
+
+  payload.selectedPdfPages = Array.from({ length: pageCount }, (item, index) => index + 1)
+  payload.pdfPageCount = pageCount
+  payload.imagePageCount = imagePageCount
+
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    paper.status = `正在读取 PDF 第 ${pageNumber}/${pageCount} 页`
+    renderTeachingPanel()
+    const page = await pdf.getPage(pageNumber)
+    const textContent = await page.getTextContent().catch(() => null)
+    if (textContent && Array.isArray(textContent.items)) {
+      const pageText = textContent.items.map((item) => item.str || '').join(' ').replace(/\s+/g, ' ').trim()
+      if (pageText) textParts.push(`第 ${pageNumber} 页：${pageText}`)
+    }
+
+    if (pageNumber <= imagePageCount) {
+      const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.76 })
+      if (blob) formData.append('paperPageImage', blob, `${file.name}-page-${pageNumber}.jpg`)
+    }
+  }
+
+  if (textParts.length) {
+    payload.clientPdfText = textParts.join('\n').slice(0, 50000)
+  }
+}
+
+function normalizePaperAnalysisClient(input) {
+  const source = input && typeof input === 'object' ? input : {}
+  let sections = Array.isArray(source.sections) ? source.sections : []
+  if (!sections.length && Array.isArray(source.questions)) {
+    sections = [{ title: '试卷题目', questions: source.questions }]
+  }
+
+  sections = sections.map((section, sectionIndex) => ({
+    id: section.id || `paper-section-${sectionIndex + 1}`,
+    title: section.title || `题型 ${sectionIndex + 1}`,
+    questions: (Array.isArray(section.questions) ? section.questions : []).map((question, questionIndex) => ({
+      id: question.id || `paper-q-${sectionIndex + 1}-${questionIndex + 1}`,
+      key: question.key || question.id || `${sectionIndex + 1}-${question.number || questionIndex + 1}`,
+      number: String(question.number || questionIndex + 1),
+      difficulty: question.difficulty,
+      knowledge: question.knowledge || question.knowledgePoint || question.point || '',
+      score: normalizePaperScore(question.score || question.points || 1),
+      analysis: question.analysis || '',
+      improvement: question.improvement || question.suggestion || ''
+    })).filter((question) => question.number)
+  })).filter((section) => section.questions.length)
+
+  if (!sections.length) {
+    sections = [{
+      id: 'paper-section-demo',
+      title: '试卷题目',
+      questions: [{
+        id: 'paper-q-1',
+        key: '1-1',
+        number: '1',
+        difficulty: 0.75,
+        knowledge: '待识别知识点',
+        score: 1,
+        analysis: 'AI 暂未识别出完整题目，可重新上传清晰文件。',
+        improvement: '建议确认试卷清晰度后再次分析。'
+      }]
+    }]
+  }
+
+  return {
+    title: source.title || '试卷分析',
+    totalScore: Number(source.totalScore || getPaperTotalScore(sections.flatMap((section) => section.questions))) || 0,
+    sections,
+    summary: source.summary || ''
+  }
+}
+
+async function exportPaperReportPdf(report = null, studentId = '') {
+  const activeReport = report || (getTeachingPaperState().report)
+  if (!activeReport) {
+    showToast('请先生成试卷分析 PDF')
+    return
+  }
+
+  const students = Array.isArray(activeReport.students) ? activeReport.students : []
+  const selectedStudent = studentId
+    ? students.find((student) => student.id === studentId)
+    : null
+  if (studentId && !selectedStudent) {
+    showToast('没有找到这个学生的分析文档')
+    return
+  }
+
+  const exportStudents = selectedStudent ? [selectedStudent] : students
+  if (activeReport.scope === 'class' && !selectedStudent) {
+    showToast('请选择某个学生下载单独 PDF')
+    return
+  }
+
+  try {
+    await ensureJsPdfReady()
+    if (!window.html2canvas) throw new Error('截图组件未加载，请刷新后重试')
+
+    for (const studentReport of exportStudents) {
+      await downloadPaperStudentPdf(activeReport, studentReport)
+    }
+    showToast('PDF 已下载')
+  } catch (error) {
+    showToast(error.message || 'PDF 下载失败')
+  }
+}
+
+async function ensureJsPdfReady() {
+  if (window.jspdf && window.jspdf.jsPDF) return
+  await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js')
+  if (!window.jspdf || !window.jspdf.jsPDF) throw new Error('PDF 组件加载失败，请刷新后重试')
+}
+
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const existing = Array.from(document.scripts).find((script) => script.src === src)
+    if (existing) {
+      existing.addEventListener('load', resolve, { once: true })
+      existing.addEventListener('error', reject, { once: true })
+      if (existing.dataset.loaded === 'true') resolve()
+      return
+    }
+
+    const script = document.createElement('script')
+    script.src = src
+    script.onload = () => {
+      script.dataset.loaded = 'true'
+      resolve()
+    }
+    script.onerror = reject
+    document.head.appendChild(script)
+  })
+}
+
+async function downloadPaperStudentPdf(report, studentReport) {
+  const sheet = buildPaperReportSheetElement(report, studentReport)
+  document.body.appendChild(sheet.wrapper)
+
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+
+  const canvas = await window.html2canvas(sheet.node, {
+    scale: 2,
+    backgroundColor: '#ffffff',
+    useCORS: true
+  })
+  sheet.wrapper.remove()
+
+  const { jsPDF } = window.jspdf
+  const pdf = new jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' })
+  const pageWidth = pdf.internal.pageSize.getWidth()
+  const pageHeight = pdf.internal.pageSize.getHeight()
+  const margin = 24
+  const targetWidth = pageWidth - margin * 2
+  const targetHeight = pageHeight - margin * 2
+  const scale = targetWidth / canvas.width
+  const sliceHeight = Math.max(1, Math.floor(targetHeight / scale))
+  let sourceY = 0
+  let pageIndex = 0
+
+  while (sourceY < canvas.height) {
+    const height = Math.min(sliceHeight, canvas.height - sourceY)
+    const sliceCanvas = document.createElement('canvas')
+    sliceCanvas.width = canvas.width
+    sliceCanvas.height = height
+    const context = sliceCanvas.getContext('2d')
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, sliceCanvas.width, sliceCanvas.height)
+    context.drawImage(canvas, 0, sourceY, canvas.width, height, 0, 0, canvas.width, height)
+
+    if (pageIndex > 0) pdf.addPage()
+    const imageData = sliceCanvas.toDataURL('image/jpeg', 0.94)
+    pdf.addImage(imageData, 'JPEG', margin, margin, targetWidth, height * scale)
+    sourceY += height
+    pageIndex += 1
+  }
+
+  pdf.save(`${sanitizeFileName(studentReport.name)}试卷分析报告.pdf`)
+}
+
+function buildPaperReportSheetElement(report, studentReport) {
+  const wrapper = document.createElement('div')
+  wrapper.className = 'paper-pdf-render-root'
+  wrapper.innerHTML = renderPaperStudentReport(studentReport, report)
+  return {
+    wrapper,
+    node: wrapper.querySelector('.paper-analysis-sheet')
+  }
+}
+
+function sanitizeFileName(value) {
+  return String(value || '学生')
+    .replace(/[\\/:*?"<>|]+/g, '')
+    .replace(/\s+/g, '')
+    .trim() || '学生'
 }
 
 function addTeachingClass() {
@@ -2022,19 +3270,19 @@ function renderMode() {
     element.classList.toggle('hidden', state.mode !== 'oneOnOne')
   })
 
-  const isToolMode = state.mode === 'admin' || state.mode === 'rearrange' || state.mode === 'teaching'
+  const isToolMode = state.mode === 'admin' || state.mode === 'rearrange' || state.mode === 'teaching' || state.mode === 'paperAnalysis'
   document.querySelector('#feedbackPanel').classList.toggle('hidden', isToolMode)
   document.querySelector('#resultsPanel').classList.toggle('hidden', isToolMode)
   els.adminPanel.classList.toggle('hidden', state.mode !== 'admin')
   els.rearrangePanel.classList.toggle('hidden', state.mode !== 'rearrange')
-  if (els.teachingPanel) els.teachingPanel.classList.toggle('hidden', state.mode !== 'teaching')
+  if (els.teachingPanel) els.teachingPanel.classList.toggle('hidden', state.mode !== 'teaching' && state.mode !== 'paperAnalysis')
 
   if (state.mode === 'admin' && state.access.user && state.access.user.isAdmin) {
     renderAdminUsers()
     if (!state.adminUsers.length) loadAdminUsers()
   }
 
-  if (state.mode === 'teaching') {
+  if (state.mode === 'teaching' || state.mode === 'paperAnalysis') {
     renderTeachingPanel()
     if (!state.teaching.loading && !state.teaching.data.updatedAt) loadTeachingData()
   }
@@ -2275,9 +3523,10 @@ function renderStudentTable() {
 function renderExitTestTable() {
   if (!els.exitTestPanel || !els.exitTestTable) return
 
-  const selectedClass = getSelectedClass()
-  const students = state.mode === 'class' && selectedClass ? selectedClass.students : []
-  els.exitTestPanel.classList.toggle('hidden', state.mode !== 'class')
+  const students = getExitTestStudents()
+  const shouldShow = state.mode === 'class'
+  els.exitTestPanel.classList.toggle('hidden', !shouldShow)
+  if (!shouldShow) return
   renderExitTestLectureSelect()
   if (els.exitTestCount) els.exitTestCount.textContent = `${students.length} 人`
   if (els.exitTestTotalField) els.exitTestTotalField.classList.toggle('hidden', state.exitTest.mode === 'grade')
@@ -2285,7 +3534,9 @@ function renderExitTestTable() {
   if (els.exitTestTotalInput) els.exitTestTotalInput.value = String(state.exitTest.totalScore || 100)
 
   if (!students.length) {
-    els.exitTestTable.innerHTML = '<div class="student-empty">保存班级后，可以在这里填写每位学生的出门测成绩。</div>'
+    els.exitTestTable.innerHTML = state.mode === 'oneOnOne'
+      ? '<div class="student-empty">选择或保存学生档案后，可以在这里填写出门测成绩。</div>'
+      : '<div class="student-empty">保存班级后，可以在这里填写每位学生的出门测成绩。</div>'
     return
   }
 
@@ -2304,6 +3555,11 @@ function renderExitTestTable() {
       </div>
     `
   }).join('')
+}
+
+function getExitTestStudents() {
+  const selectedClass = getSelectedClass()
+  return state.mode === 'class' && selectedClass ? selectedClass.students : []
 }
 
 function handleExitTestModeChange() {
