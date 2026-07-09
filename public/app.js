@@ -3644,7 +3644,7 @@ function renderResults() {
   const imageMode = isImageFeedbackMode()
   els.copyAllBtn.disabled = !state.feedbacks.length
   els.resultNote.textContent = state.feedbacks.length
-    ? (imageMode ? '图片反馈报告已生成' : `${state.feedbacks.length} 条反馈 · 全部已展开`)
+    ? (imageMode ? `${state.feedbacks.length} 张图片反馈报告已生成 · 下方可逐张查看和导出` : `${state.feedbacks.length} 条反馈 · 全部已展开`)
     : '生成后会显示在这里'
   renderDebugSummary()
 
@@ -3719,17 +3719,27 @@ function renderImageReport(payload = null) {
         scope: 'individual'
       }))
 
-  els.imageReportPreview.innerHTML = reportItems.map((item, index) => renderImageReportSheet({
-    item,
-    index,
-    reportDate,
-    reportPayload,
-    lessonTitle,
-    homeworkText,
-    reportScores,
-    selectedClass,
-    selectedProfile
-  })).join('')
+  els.imageReportPreview.innerHTML = reportItems.map((item, index) => `
+    <div class="image-report-preview-item">
+      ${reportItems.length > 1 ? `
+        <div class="image-report-preview-head">
+          <span>第 ${index + 1} 张</span>
+          <strong>${escapeHtml(item.name || `报告${index + 1}`)}</strong>
+        </div>
+      ` : ''}
+      ${renderImageReportSheet({
+        item,
+        index,
+        reportDate,
+        reportPayload,
+        lessonTitle,
+        homeworkText,
+        reportScores,
+        selectedClass,
+        selectedProfile
+      })}
+    </div>
+  `).join('')
 }
 
 function renderImageReportSheet(options) {

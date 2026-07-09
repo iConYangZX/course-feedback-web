@@ -1961,7 +1961,35 @@ textarea:focus {
 
 .image-report-preview {
   margin-top: 14px;
+  display: grid;
+  gap: 18px;
   overflow: auto;
+}
+
+.image-report-preview-item {
+  display: grid;
+  gap: 10px;
+}
+
+.image-report-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: min(760px, 100%);
+  margin: 0 auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f3f6ff;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.image-report-preview-head strong {
+  color: var(--text);
+  font-size: 14px;
 }
 
 .report-sheet {
