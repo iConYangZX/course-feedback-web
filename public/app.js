@@ -3716,12 +3716,14 @@ function renderImageReport(payload = null) {
     ? [{
         name: reportPayload.className || (selectedClass && selectedClass.name) || '班级整体',
         feedback: state.feedbacks.map((item) => item.feedback).join('\n\n'),
+        templateFields: state.feedbacks[0] && state.feedbacks[0].templateFields,
         scope: 'class'
       }]
     : state.feedbacks.map((item) => ({
         studentId: item.studentId,
         name: item.name,
         feedback: item.feedback,
+        templateFields: item.templateFields,
         scope: 'individual'
       }))
 
@@ -3762,11 +3764,19 @@ function renderImageReportSheet(options) {
     selectedProfile
   } = options
   const reportSections = parseFeedbackReportSections(item.feedback)
-  const contentSource = reportSections.courseContent || getManualCourseNoteForImageReport()
-  const courseLines = extractReportLines(contentSource)
-  const focusText = reportSections.studyFocus || ''
+  const templateFields = item.templateFields && typeof item.templateFields === 'object' ? item.templateFields : {}
+  const courseContentText = normalizeImageReportCourseText(
+    reportSections.courseContent
+      || templateFields.courseContent
+      || getManualCourseNoteForImageReport()
+      || '本节课围绕课件核心内容进行学习。'
+  )
+  const focusText = normalizeReportText(
+    reportSections.studyFocus
+      || templateFields.courseKnowledgePoint
+      || '1、理解本节课课件中的核心知识点。\n2、掌握课件中的重点方法与应用要求。'
+  )
   const performanceText = reportSections.performance || item.feedback || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
-  const hasCourseSection = courseLines.length > 0
   const isIndividual = item.scope !== 'class'
   const showAllScores = isIndividual
     && state.mode === 'class'
@@ -3809,16 +3819,14 @@ function renderImageReportSheet(options) {
         ${isIndividual && className && state.mode === 'class' ? `<div>班级：${escapeHtml(className)}</div>` : ''}
         ${lessonTitle ? `<div>课程主题：${escapeHtml(lessonTitle)}</div>` : ''}
       </div>
-      ${hasCourseSection ? `<section>
+      <section>
         <h3>【课程内容】</h3>
-        ${courseLines.length ? `<ol>
-          ${courseLines.slice(0, 4).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}
-        </ol>` : ''}
-      </section>` : ''}
-      ${focusText ? `<section>
+        <div class="report-paragraph">${formatReportText(courseContentText)}</div>
+      </section>
+      <section>
         <h3>【核心重点】</h3>
         <div class="report-paragraph">${formatReportText(normalizeReportListLines(focusText))}</div>
-      </section>` : ''}
+      </section>
       <section>
         <h3>【课堂表现】</h3>
         <div class="report-paragraph">${formatReportText(performanceText)}</div>
@@ -3900,6 +3908,17 @@ function normalizeReportListLines(text) {
   return normalizeReportText(text)
     .replace(/\s+([1-9][0-9]*[、.．])/g, '\n$1')
     .replace(/([。；;])\s*([1-9][0-9]*[、.．])/g, '$1\n$2')
+}
+
+function normalizeImageReportCourseText(text) {
+  const normalized = normalizeReportText(text)
+    .split(/\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^(上课日期|上课时段|课后作业|班级\/共性备注|教材讲次)[：:]/.test(line))
+    .join(' ')
+
+  return normalized || '本节课围绕课件核心内容进行学习。'
 }
 
 function getManualCourseNoteForImageReport() {

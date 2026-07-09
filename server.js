@@ -2796,6 +2796,9 @@ function buildUserContent(payload, courseware) {
         '请严格返回 JSON，字段为 feedbacks，每项包含 studentId、name、feedback、templateFields。',
         'studentId 必须原样使用学生表现数据 JSON 中对应学生的 id，name 必须原样使用对应学生的 name。',
         'templateFields 必须包含 courseContent、courseKnowledgePoint、performanceText、personalizedRemark、learningSuggestion，用于程序填入老师模板。',
+        payload.feedbackFormat === 'image'
+          ? '图片报告文案必须包含从课件深度解析得到的【课程内容】和【学习重点】：【课程内容】用一句话总结本节课件；【学习重点】用 1、2、3 分行列出核心重点。不要用上课日期、时段、课后作业或“教材讲次”替代课程内容。'
+          : '',
         'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
         '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
         '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须写入该学生 remark 的核心信息。',
@@ -2906,6 +2909,9 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     'JSON 格式必须是：{"feedbacks":[{"studentId":"...","name":"...","feedback":"...","templateFields":{"courseContent":"...","courseKnowledgePoint":"...","performanceText":"...","personalizedRemark":"...","learningSuggestion":"..."}}]}',
     'studentId 必须原样使用学生表现数据 JSON 中对应学生的 id，name 必须原样使用对应学生的 name。',
     'templateFields 会被程序填入老师模板，所以每个字段都必须针对该学生具体填写，不能空泛。',
+    payload.feedbackFormat === 'image'
+      ? '图片报告文案必须包含从课件深度解析得到的【课程内容】和【学习重点】：【课程内容】用一句话总结本节课件；【学习重点】用 1、2、3 分行列出核心重点。不要用上课日期、时段、课后作业或“教材讲次”替代课程内容。'
+      : '',
     'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
     '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
     '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须写入该学生 remark 的核心信息。',
@@ -3167,13 +3173,15 @@ function normalizeFeedbacks(feedbacks, students, payload = {}) {
     const matched = matchedByStudentId.get(student.id)
     const fallback = buildFallbackFeedback(student, payload)
     const modelFeedback = trim(matched && matched.feedback) || fallback
+    const templateFields = normalizeTemplateFields(matched && matched.templateFields, student, payload, modelFeedback)
     const templatedFeedback = applyFeedbackTemplate(payload.template, student, payload, matched, modelFeedback)
     const feedback = sanitizeFeedbackStudentNames(templatedFeedback || modelFeedback, student, students)
 
     return {
       studentId: student.id,
       name: student.name,
-      feedback
+      feedback,
+      templateFields
     }
   })
 }
@@ -3240,6 +3248,7 @@ function buildDemoFeedbacks(payload) {
   return payload.students.map((student) => ({
     studentId: student.id,
     name: student.name,
+    templateFields: normalizeTemplateFields(null, student, payload, buildFallbackFeedback(student, payload)),
     feedback: applyFeedbackTemplate(payload.template, student, payload, null, buildFallbackFeedback(student, payload))
       || buildFallbackFeedback(student, payload)
   }))
@@ -3304,10 +3313,20 @@ function getTemplateValue(key, fields, student, payload, modelFeedback) {
 }
 
 function buildCourseContentFallback(payload = {}) {
+  const courseNote = sanitizeCourseNoteForCourseContent(payload.courseNote)
   return [
     payload.lessonTitle ? `“${payload.lessonTitle}”` : '',
-    payload.courseNote ? payload.courseNote : ''
+    courseNote
   ].filter(Boolean).join('，') || '本节课重点内容'
+}
+
+function sanitizeCourseNoteForCourseContent(courseNote = '') {
+  return String(courseNote || '')
+    .split(/\r?\n/)
+    .map((line) => trim(line))
+    .filter(Boolean)
+    .filter((line) => !/^(上课日期|上课时段|课后作业|班级\/共性备注|教材讲次)[：:]/.test(line))
+    .join('\n')
 }
 
 function buildPerformanceFallback(student) {
