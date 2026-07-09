@@ -3766,7 +3766,7 @@ function renderImageReportSheet(options) {
   const courseLines = extractReportLines(contentSource)
   const focusText = reportSections.studyFocus || ''
   const performanceText = reportSections.performance || item.feedback || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
-  const hasCourseSection = courseLines.length > 0 || Boolean(focusText)
+  const hasCourseSection = courseLines.length > 0
   const isIndividual = item.scope !== 'class'
   const showAllScores = isIndividual
     && state.mode === 'class'
@@ -3814,7 +3814,10 @@ function renderImageReportSheet(options) {
         ${courseLines.length ? `<ol>
           ${courseLines.slice(0, 4).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}
         </ol>` : ''}
-        ${focusText ? `<p class="report-paragraph">核心重点：${escapeHtml(focusText)}</p>` : ''}
+      </section>` : ''}
+      ${focusText ? `<section>
+        <h3>【核心重点】</h3>
+        <div class="report-paragraph">${formatReportText(normalizeReportListLines(focusText))}</div>
       </section>` : ''}
       <section>
         <h3>【课堂表现】</h3>
@@ -3891,6 +3894,12 @@ function formatReportText(text) {
   return escapeHtml(normalized)
     .replace(/\n{2,}/g, '<br><br>')
     .replace(/\n/g, '<br>')
+}
+
+function normalizeReportListLines(text) {
+  return normalizeReportText(text)
+    .replace(/\s+([1-9][0-9]*[、.．])/g, '\n$1')
+    .replace(/([。；;])\s*([1-9][0-9]*[、.．])/g, '$1\n$2')
 }
 
 function getManualCourseNoteForImageReport() {
