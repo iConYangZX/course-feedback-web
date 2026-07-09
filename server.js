@@ -3110,11 +3110,53 @@ function parseJsonText(text) {
     .replace(/```$/i, '')
     .trim()
 
-  try {
-    return JSON.parse(cleanText)
-  } catch (error) {
-    return { feedbacks: [] }
+  const repairedText = repairJsonLatexBackslashes(cleanText)
+  const parsed = tryParseJson(cleanText) || tryParseJson(repairedText)
+  if (parsed) return parsed
+
+  const jsonText = extractFirstJsonObject(cleanText)
+  if (jsonText) {
+    const extracted = tryParseJson(jsonText) || tryParseJson(repairJsonLatexBackslashes(jsonText))
+    if (extracted) return extracted
   }
+
+  return { feedbacks: [], questions: [], scores: [] }
+}
+
+function parseProviderResponseJson(text, providerLabel) {
+  const parsed = tryParseJson(text)
+  if (parsed) return parsed
+
+  throw new Error(buildNonJsonAIResponseMessage(text, providerLabel))
+}
+
+function tryParseJson(text) {
+  try {
+    return JSON.parse(String(text || '').trim())
+  } catch (error) {
+    return null
+  }
+}
+
+function extractFirstJsonObject(text) {
+  const source = String(text || '')
+  const start = source.indexOf('{')
+  const end = source.lastIndexOf('}')
+
+  if (start < 0 || end <= start) return ''
+  return source.slice(start, end + 1)
+}
+
+function repairJsonLatexBackslashes(text) {
+  return String(text || '').replace(
+    /(^|[^\\])\\(frac|dfrac|tfrac|sqrt|left|right|times|cdot|leq|le|ge|geq|neq|approx|infty|pi|theta|alpha|beta|gamma|Delta|sum|int|tan|sin|cos|log|ln|text|overline|angle|parallel|perp|rangle|langle|begin|end)/g,
+    '$1\\\\$2'
+  )
+}
+
+function buildNonJsonAIResponseMessage(text, providerLabel) {
+  const preview = String(text || '').replace(/\s+/g, ' ').slice(0, 220)
+  return `${providerLabel || 'AI'} 返回内容无法解析，请稍后重试。返回片段：${preview}`
 }
 
 function normalizeFeedbacks(feedbacks, students, payload = {}) {
