@@ -190,6 +190,21 @@ app.patch('/api/admin/users/:userId', requireAdminMiddleware, (req, res) => {
   }
 })
 
+app.delete('/api/admin/users/:userId', requireAdminMiddleware, (req, res) => {
+  try {
+    const account = deleteAccount(req.params.userId, req.accessSession)
+    writeAccountState()
+    clearUsageForClient(getUsageClientIdForAccount(account))
+    writeUsageState()
+    res.json({
+      ok: true,
+      userId: account.id
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '删除账号失败' })
+  }
+})
+
 app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, (req, res) => {
   try {
     const account = findAccountById(req.params.userId)
@@ -331,6 +346,110 @@ app.post('/api/teaching-data/ai-analysis', requireAccessMiddleware, async (req, 
   }
 })
 
+app.post('/api/teaching-data/paper-analysis', requireAccessMiddleware, upload.fields([
+  { name: 'paperFile', maxCount: 1 },
+  { name: 'paperPageImage', maxCount: 80 }
+]), async (req, res) => {
+  try {
+    const session = req.accessSession
+    const usageClientId = getUsageClientId(session)
+    const usageInfo = getUsageInfoForSession(session)
+    if (!usageInfo.unlimited && usageInfo.remaining <= 0) {
+      res.status(429).json({
+        error: `今天的生成次数已用完。每日最多 ${usageInfo.limit} 次，请联系管理员或明天再试。`,
+        usage: usageInfo
+      })
+      return
+    }
+
+    const payload = parsePayload(req.body.payload)
+    const paperFile = getUploadedFile(req, 'paperFile')
+    const pageImages = getUploadedFiles(req, 'paperPageImage')
+    if (!paperFile) throw new Error('请先上传试卷文件')
+
+    const aiConfig = getAIConfig()
+    const paperCourseware = await normalizeCourseware(paperFile, {
+      clientPdfText: payload.clientPdfText,
+      pdfPageImages: pageImages,
+      selectedPdfPages: payload.selectedPdfPages
+    })
+
+    let analysis
+    let demo = false
+    if (!aiConfig.apiKey) {
+      demo = true
+      analysis = buildDemoPaperAnalysis(payload, paperCourseware)
+    } else {
+      const aiResponse = await requestPaperAnalysis(payload, paperCourseware, aiConfig)
+      analysis = normalizePaperAnalysis(parsePaperAnalysisResponse(aiResponse, aiConfig.provider), payload)
+    }
+
+    const usage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    res.json({
+      ok: true,
+      demo,
+      provider: aiConfig.provider,
+      model: aiConfig.model,
+      usage,
+      analysis
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({ error: getUserFacingError(error) })
+  }
+})
+
+app.post('/api/teaching-data/paper-score-recognition', requireAccessMiddleware, upload.fields([
+  { name: 'scoreFile', maxCount: 1 },
+  { name: 'scorePageImage', maxCount: 20 }
+]), async (req, res) => {
+  try {
+    const session = req.accessSession
+    const usageClientId = getUsageClientId(session)
+    const usageInfo = getUsageInfoForSession(session)
+    if (!usageInfo.unlimited && usageInfo.remaining <= 0) {
+      res.status(429).json({
+        error: `今天的生成次数已用完。每日最多 ${usageInfo.limit} 次，请联系管理员或明天再试。`,
+        usage: usageInfo
+      })
+      return
+    }
+
+    const payload = parsePayload(req.body.payload)
+    const scoreFile = getUploadedFile(req, 'scoreFile')
+    const pageImages = getUploadedFiles(req, 'scorePageImage')
+    if (!scoreFile) throw new Error('请先上传批改后的试卷图片或 PDF')
+
+    const aiConfig = getAIConfig()
+    const scoreCourseware = await normalizeCourseware(scoreFile, {
+      clientPdfText: payload.clientPdfText,
+      pdfPageImages: pageImages,
+      selectedPdfPages: payload.selectedPdfPages
+    })
+
+    let scores
+    let demo = false
+    if (!aiConfig.apiKey) {
+      demo = true
+      scores = buildDemoPaperScoreRecognition(payload)
+    } else {
+      const aiResponse = await requestPaperScoreRecognition(payload, scoreCourseware, aiConfig)
+      scores = normalizePaperScoreRecognition(parsePaperScoreRecognitionResponse(aiResponse, aiConfig.provider), payload)
+    }
+
+    const usage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    res.json({
+      ok: true,
+      demo,
+      usage,
+      scores
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({ error: getUserFacingError(error) })
+  }
+})
+
 app.get('/api/config', (req, res) => {
   const aiConfig = getAIConfig()
 
@@ -413,7 +532,9 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
       pdfPageImages,
       selectedPdfPages: payload.selectedPdfPages
     }) : null
-    const exitTestCourseware = exitTestFile ? await normalizeCourseware(exitTestFile) : null
+    const exitTestCourseware = exitTestFile ? await normalizeCourseware(exitTestFile, {
+      selectedPdfPages: payload.exitTest && payload.exitTest.selectedPdfPages
+    }) : null
     if (exitTestCourseware) payload.exitTestFile = buildUploadedFileSummary(exitTestCourseware)
 
     if (!aiConfig.apiKey) {
@@ -969,6 +1090,20 @@ function updateAccount(accountId, input) {
   return account
 }
 
+function deleteAccount(accountId, session = {}) {
+  const index = accountState.users.findIndex((account) => account.id === accountId)
+  if (index < 0) throw new Error('账号不存在')
+
+  const account = accountState.users[index]
+  if (account.id === session.accountId) throw new Error('不能删除当前登录的管理员账号')
+  if (account.role === 'admin' && account.active && getActiveAdminCount() <= 1) {
+    throw new Error('至少需要保留一个启用的管理员账号')
+  }
+
+  accountState.users.splice(index, 1)
+  return account
+}
+
 function getActiveAdminCount() {
   return accountState.users.filter((account) => account.role === 'admin' && account.active).length
 }
@@ -1058,6 +1193,12 @@ function resetUsage(clientId) {
     usageState[today][clientId] = 0
     writeUsageState()
   }
+}
+
+function clearUsageForClient(clientId) {
+  Object.keys(usageState).forEach((date) => {
+    if (usageState[date]) delete usageState[date][clientId]
+  })
 }
 
 function getTodayKey() {
@@ -1258,6 +1399,7 @@ function normalizeTeachingData(input) {
     scoreRecords: normalizeScoreRecords(source.scoreRecords),
     feedbackHistory: normalizeFeedbackHistory(source.feedbackHistory),
     oneProfiles: normalizeTeachingOneProfiles(source.oneProfiles),
+    paperAnalyses: normalizePaperAnalysisHistory(source.paperAnalyses),
     quickOptions: {
       performancePositive: normalizeStringList(quickOptions.performancePositive, performancePositiveFallback),
       performanceNegative: normalizeStringList(quickOptions.performanceNegative, performanceNegativeFallback),
@@ -1293,10 +1435,29 @@ function normalizeTeachingClasses(classes) {
       grade: trim(source.grade) || '高一',
       template: trim(source.template),
       note: trim(source.note),
+      materialMode: trim(source.materialMode) === 'book' ? 'book' : 'lesson',
+      textbook: normalizeTeachingTextbook(source.textbook),
       students: normalizeTeachingStudents(source.students),
       updatedAt: Number(source.updatedAt || Date.now())
     }
   }) : []
+}
+
+function normalizeTeachingTextbook(textbook) {
+  if (!textbook || typeof textbook !== 'object') return null
+  const source = textbook
+  const id = trim(source.id)
+  const name = trim(source.name || source.originalName)
+  if (!id && !name) return null
+
+  return {
+    id,
+    name: name || '已上传教材',
+    mime: trim(source.mime),
+    size: Number(source.size || 0),
+    lectures: parseMaterialLectures(source.lectures),
+    createdAt: Number(source.createdAt || Date.now())
+  }
 }
 
 function normalizeTeachingStudents(students) {
@@ -1450,6 +1611,27 @@ function normalizeFeedbackHistory(history) {
   }) : []
 }
 
+function normalizePaperAnalysisHistory(history) {
+  return Array.isArray(history) ? history.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `paper-${crypto.randomUUID()}`,
+      title: trim(source.title) || '试卷分析',
+      examType: trim(source.examType),
+      fileName: trim(source.fileName),
+      scope: ['class', 'one', 'single'].includes(trim(source.scope)) ? trim(source.scope) : 'single',
+      targetName: trim(source.targetName),
+      totalScore: Number(source.totalScore || 0),
+      classAverageTotal: Number(source.classAverageTotal || 0),
+      sections: Array.isArray(source.sections) ? source.sections : [],
+      questionAverages: source.questionAverages && typeof source.questionAverages === 'object' ? source.questionAverages : {},
+      students: Array.isArray(source.students) ? source.students : [],
+      summary: trim(source.summary),
+      createdAt: Number(source.createdAt || Date.now())
+    }
+  }).slice(0, 80) : []
+}
+
 function normalizeStringList(list, fallback = []) {
   const source = Array.isArray(list) && list.length ? list : fallback
   return source.map((item) => trim(item)).filter(Boolean).slice(0, 60)
@@ -1581,6 +1763,564 @@ function buildDemoAnalysisText(target, records = []) {
     `${target} 近期共有 ${records.length} 条记录。整体看，学习状态需要结合课堂表现和测评结果持续观察。`,
     '建议下次课先回顾最近一次薄弱点，再安排 2-3 道同类变式题检查迁移能力；课后以错题复盘和基础概念口述为主，避免只做机械刷题。'
   ].join('')
+}
+
+async function requestPaperAnalysis(payload, courseware, aiConfig) {
+  if (aiConfig.provider === 'openai') {
+    return requestOpenAIPaperAnalysis(payload, courseware, aiConfig)
+  }
+
+  return requestChatPaperAnalysis(payload, courseware, aiConfig, {
+    providerLabel: aiConfig.provider === 'deepseek' ? 'DeepSeek' : 'AI',
+    thinkingDisabled: aiConfig.provider === 'deepseek'
+  })
+}
+
+async function requestOpenAIPaperAnalysis(payload, courseware, aiConfig) {
+  const body = {
+    model: aiConfig.model,
+    instructions: buildPaperAnalysisSystemPrompt(),
+    input: [
+      {
+        role: 'user',
+        content: buildPaperAnalysisContent(payload, courseware, 'responses')
+      }
+    ],
+    text: {
+      format: {
+        type: 'json_schema',
+        name: 'paper_deep_analysis',
+        strict: true,
+        schema: getPaperAnalysisJsonSchema()
+      }
+    }
+  }
+
+  const response = await fetch(`${aiConfig.baseUrl}/responses`, withProxy({
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiConfig.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  }))
+  const text = await response.text()
+  const parsed = parseProviderResponseJson(text, 'AI')
+  if (!response.ok) {
+    const message = parsed.error && parsed.error.message ? parsed.error.message : text
+    throw new Error(`AI 请求失败：${message}`)
+  }
+  return parsed
+}
+
+async function requestChatPaperAnalysis(payload, courseware, aiConfig, options = {}) {
+  if (!aiConfig.baseUrl) throw new Error('请先填写 API 端点 URL')
+
+  const includeImage = hasCoursewareVisionImages(courseware)
+  const body = {
+    model: aiConfig.model,
+    messages: [
+      {
+        role: 'system',
+        content: buildPaperAnalysisSystemPrompt()
+      },
+      {
+        role: 'user',
+        content: buildPaperAnalysisContent(payload, courseware, includeImage ? 'chat' : 'text')
+      }
+    ],
+    temperature: 0.12,
+    max_tokens: 8000,
+    stream: false,
+    response_format: {
+      type: 'json_object'
+    }
+  }
+
+  if (options.thinkingDisabled) {
+    body.thinking = {
+      type: 'disabled'
+    }
+  }
+
+  try {
+    const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${aiConfig.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    }))
+    const text = await response.text()
+    const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
+    if (!response.ok) {
+      const message = parsed.error && parsed.error.message ? parsed.error.message : text
+      throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
+    }
+    return parsed
+  } catch (error) {
+    if (!includeImage || !isLikelyImageRequestError(error)) throw error
+    body.messages[1].content = buildPaperAnalysisContent(payload, courseware, 'text')
+    const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${aiConfig.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    }))
+    const text = await response.text()
+    const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
+    if (!response.ok) {
+      const message = parsed.error && parsed.error.message ? parsed.error.message : text
+      throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
+    }
+    return parsed
+  }
+}
+
+function buildPaperAnalysisSystemPrompt() {
+  return [
+    '你是一名严谨的试卷结构分析和教学诊断助手。',
+    '你要阅读老师上传的试卷/PDF/图片/Word 内容，提取题型结构、每道题题号、题分、难度系数、详细知识点，并给出针对每一道题的错题分析和改进方案。',
+    '难度系数使用 0.00 到 1.00 的小数，越接近 1 表示越容易，越接近 0 表示越难。',
+    '详细知识点要具体到可教学的粒度，例如“二次函数图像与最值”“三角形全等判定 SAS”“数列递推与通项”。',
+    '题分必须是数字；如果原卷未明确标注题分，请根据题型和卷面结构合理估计，选择题/填空题常见 3-5 分，解答题常见 8-15 分。',
+    '题型标题要按试卷原结构输出，例如“一、单选题”“二、填空题”“三、解答题”。',
+    '不要输出学生得分，学生得分由老师后续录入。',
+    '只返回 JSON，不要使用 Markdown，不要解释。'
+  ].join('\n')
+}
+
+function buildPaperAnalysisContent(payload, courseware, target) {
+  const text = [
+    `试卷标题：${payload.title || payload.fileName || '未命名试卷'}`,
+    `考试类型：${payload.examType || '未填写'}`,
+    `上传文件：${payload.fileName || (courseware && courseware.name) || '未填写'}`,
+    payload.pdfPageCount ? `PDF 页数：${payload.pdfPageCount}` : '',
+    payload.imagePageCount ? `已转图片页数：${payload.imagePageCount}` : '',
+    '',
+    '请完成深度分析，严格返回以下 JSON 结构：',
+    '{"title":"试卷标题","totalScore":100,"sections":[{"id":"s1","title":"一、单选题","questions":[{"id":"q1","number":"1","difficulty":0.82,"knowledge":"集合的基本运算","score":5,"analysis":"错因分析","improvement":"改进方案"}]}],"summary":"整张试卷的结构、重点和整体教学建议"}',
+    '',
+    buildPaperCoursewareText(courseware, target !== 'text')
+  ].filter(Boolean).join('\n')
+
+  const images = getCoursewareVisionImages(courseware)
+  if (target === 'responses') {
+    return [
+      { type: 'input_text', text },
+      ...images.map((image) => ({
+        type: 'input_image',
+        image_url: image.dataUrl,
+        detail: 'high'
+      }))
+    ]
+  }
+
+  if (target === 'chat' && images.length) {
+    return [
+      { type: 'text', text },
+      ...images.map((image) => ({
+        type: 'image_url',
+        image_url: {
+          url: image.dataUrl
+        }
+      }))
+    ]
+  }
+
+  return text
+}
+
+function buildPaperCoursewareText(courseware, includeImage) {
+  if (!courseware) return '未读取到试卷内容。'
+  const lines = []
+  if (courseware.extractedText) {
+    lines.push('试卷文字识别内容：')
+    lines.push(truncateText(courseware.extractedText, 50000))
+  }
+  if (includeImage && hasCoursewareVisionImages(courseware)) {
+    lines.push('试卷页面图片也已随消息发送，请结合图片中的题目、公式、图形和表格。')
+  }
+  if (!lines.length) {
+    lines.push(`试卷文件：${courseware.name}。当前未提取到可用文字，请尽量结合文件/图片内容分析。`)
+  }
+  return lines.join('\n')
+}
+
+function getPaperAnalysisJsonSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      title: { type: 'string' },
+      totalScore: { type: 'number' },
+      sections: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            questions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string' },
+                  number: { type: 'string' },
+                  difficulty: { type: 'number' },
+                  knowledge: { type: 'string' },
+                  score: { type: 'number' },
+                  analysis: { type: 'string' },
+                  improvement: { type: 'string' }
+                },
+                required: ['id', 'number', 'difficulty', 'knowledge', 'score', 'analysis', 'improvement']
+              }
+            }
+          },
+          required: ['id', 'title', 'questions']
+        }
+      },
+      summary: { type: 'string' }
+    },
+    required: ['title', 'totalScore', 'sections', 'summary']
+  }
+}
+
+function parsePaperAnalysisResponse(response, provider) {
+  if (provider === 'deepseek' || provider === 'custom') {
+    const content = response.choices && response.choices[0] && response.choices[0].message
+      ? response.choices[0].message.content
+      : ''
+    return parseJsonText(content)
+  }
+
+  if (response.output_text) return parseJsonText(response.output_text)
+
+  const output = Array.isArray(response.output) ? response.output : []
+  const text = output.flatMap((item) => Array.isArray(item.content) ? item.content : [])
+    .map((part) => part.text || '')
+    .filter(Boolean)
+    .join('\n')
+
+  return parseJsonText(text)
+}
+
+function normalizePaperAnalysis(input, payload = {}) {
+  const source = input && typeof input === 'object' ? input : {}
+  let sections = Array.isArray(source.sections) ? source.sections : []
+  if (!sections.length && Array.isArray(source.questions)) {
+    sections = [{ id: 's1', title: '试卷题目', questions: source.questions }]
+  }
+
+  const normalizedSections = sections.map((section, sectionIndex) => {
+    const questions = Array.isArray(section.questions) ? section.questions : []
+    return {
+      id: trim(section.id) || `s-${sectionIndex + 1}`,
+      title: trim(section.title) || `题型 ${sectionIndex + 1}`,
+      questions: questions.map((question, questionIndex) => normalizePaperQuestion(question, sectionIndex, questionIndex))
+        .filter((question) => question.number)
+    }
+  }).filter((section) => section.questions.length)
+
+  const safeSections = normalizedSections.length ? normalizedSections : buildDemoPaperAnalysis(payload, null).sections
+  const totalScore = Number(source.totalScore)
+  const computedTotal = safeSections.flatMap((section) => section.questions)
+    .reduce((sum, question) => sum + question.score, 0)
+
+  return {
+    title: trim(source.title) || trim(payload.title) || '试卷分析',
+    totalScore: Number.isFinite(totalScore) && totalScore > 0 ? totalScore : computedTotal,
+    sections: safeSections,
+    summary: trim(source.summary) || '本试卷已完成结构化分析，可结合学生逐题得分查看薄弱题型和后续改进方向。'
+  }
+}
+
+function normalizePaperQuestion(question, sectionIndex, questionIndex) {
+  const source = question && typeof question === 'object' ? question : {}
+  const score = Number(source.score || source.points || source.fullScore || 1)
+  const difficulty = Number(source.difficulty)
+  return {
+    id: trim(source.id) || `q-${sectionIndex + 1}-${questionIndex + 1}`,
+    key: trim(source.key) || `${sectionIndex + 1}-${trim(source.number) || questionIndex + 1}`,
+    number: trim(source.number) || String(questionIndex + 1),
+    difficulty: Number.isFinite(difficulty) ? Math.max(0, Math.min(1, difficulty > 1 ? difficulty / 100 : difficulty)) : 0.75,
+    knowledge: trim(source.knowledge || source.knowledgePoint || source.point) || '待补充知识点',
+    score: Number.isFinite(score) && score > 0 ? score : 1,
+    analysis: trim(source.analysis) || '该题主要考查对应知识点的理解和迁移，失分通常来自概念不清、步骤不完整或计算细节。',
+    improvement: trim(source.improvement || source.suggestion) || '建议先复盘本题关键条件和方法，再完成 2-3 道同类变式题巩固。'
+  }
+}
+
+function buildDemoPaperAnalysis(payload = {}, courseware = null) {
+  const title = trim(payload.title) || (courseware && courseware.name) || '示例试卷'
+  const sections = [
+    {
+      id: 's1',
+      title: '一、单选题',
+      questions: [
+        { id: 'q1', key: '1-1', number: '1', difficulty: 0.92, knowledge: '基础概念辨析', score: 5, analysis: '错因多为概念边界不清或审题遗漏关键词。', improvement: '整理概念对照表，并用 3 道基础题检查辨析能力。' },
+        { id: 'q2', key: '1-2', number: '2', difficulty: 0.84, knowledge: '公式直接应用', score: 5, analysis: '容易在代入公式时漏写条件或计算出错。', improvement: '训练公式适用条件和代入步骤，保留关键过程。' },
+        { id: 'q3', key: '1-3', number: '3', difficulty: 0.76, knowledge: '图表信息读取', score: 5, analysis: '失分通常来自图表横纵信息对应不准确。', improvement: '先标注图表变量，再列式判断。' }
+      ]
+    },
+    {
+      id: 's2',
+      title: '二、填空题',
+      questions: [
+        { id: 'q4', key: '2-4', number: '4', difficulty: 0.68, knowledge: '关键条件转化', score: 5, analysis: '该题需要把文字条件转成数学表达，过程跳步容易失分。', improvement: '练习“条件-式子-结论”的三栏整理法。' },
+        { id: 'q5', key: '2-5', number: '5', difficulty: 0.61, knowledge: '综合计算与检验', score: 5, analysis: '常见问题是计算后没有回代检验，导致答案不完整。', improvement: '每题最后增加回代检查和单位/范围检查。' }
+      ]
+    },
+    {
+      id: 's3',
+      title: '三、解答题',
+      questions: [
+        { id: 'q6', key: '3-6', number: '6', difficulty: 0.52, knowledge: '综合建模与规范书写', score: 10, analysis: '解答题既看思路也看步骤，失分集中在关键理由缺失。', improvement: '按“设、列、解、答”补全步骤，并训练规范表达。' }
+      ]
+    }
+  ]
+
+  return {
+    title,
+    totalScore: 35,
+    sections,
+    summary: '演示模式下生成了示例试卷结构。正式配置 AI 后，系统会读取上传试卷并输出真实题号、题分、知识点和每题改进建议。'
+  }
+}
+
+async function requestPaperScoreRecognition(payload, courseware, aiConfig) {
+  if (aiConfig.provider === 'openai') {
+    return requestOpenAIPaperScoreRecognition(payload, courseware, aiConfig)
+  }
+
+  return requestChatPaperScoreRecognition(payload, courseware, aiConfig, {
+    providerLabel: aiConfig.provider === 'deepseek' ? 'DeepSeek' : 'AI',
+    thinkingDisabled: aiConfig.provider === 'deepseek'
+  })
+}
+
+async function requestOpenAIPaperScoreRecognition(payload, courseware, aiConfig) {
+  const body = {
+    model: aiConfig.model,
+    instructions: buildPaperScoreRecognitionSystemPrompt(),
+    input: [
+      {
+        role: 'user',
+        content: buildPaperScoreRecognitionContent(payload, courseware, 'responses')
+      }
+    ],
+    text: {
+      format: {
+        type: 'json_schema',
+        name: 'paper_score_recognition',
+        strict: true,
+        schema: getPaperScoreRecognitionJsonSchema()
+      }
+    }
+  }
+
+  const response = await fetch(`${aiConfig.baseUrl}/responses`, withProxy({
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiConfig.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  }))
+  const text = await response.text()
+  const parsed = parseProviderResponseJson(text, 'AI')
+  if (!response.ok) {
+    const message = parsed.error && parsed.error.message ? parsed.error.message : text
+    throw new Error(`AI 请求失败：${message}`)
+  }
+  return parsed
+}
+
+async function requestChatPaperScoreRecognition(payload, courseware, aiConfig, options = {}) {
+  if (!aiConfig.baseUrl) throw new Error('请先填写 API 端点 URL')
+
+  const includeImage = hasCoursewareVisionImages(courseware)
+  const body = {
+    model: aiConfig.model,
+    messages: [
+      {
+        role: 'system',
+        content: buildPaperScoreRecognitionSystemPrompt()
+      },
+      {
+        role: 'user',
+        content: buildPaperScoreRecognitionContent(payload, courseware, includeImage ? 'chat' : 'text')
+      }
+    ],
+    temperature: 0.05,
+    max_tokens: 4000,
+    stream: false,
+    response_format: {
+      type: 'json_object'
+    }
+  }
+
+  if (options.thinkingDisabled) {
+    body.thinking = {
+      type: 'disabled'
+    }
+  }
+
+  const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiConfig.apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  }))
+  const text = await response.text()
+  const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
+  if (!response.ok) {
+    const message = parsed.error && parsed.error.message ? parsed.error.message : text
+    throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
+  }
+  return parsed
+}
+
+function buildPaperScoreRecognitionSystemPrompt() {
+  return [
+    '你是一名批改试卷得分识别助手。',
+    '你要阅读老师上传的已批改试卷图片或 PDF，只识别每道题已经批改出的得分。',
+    '老师会提供题号、题分、题目 key。请把识别到的得分填回对应 key。',
+    '如果某题看不清、没有批改痕迹或无法确定，不要猜测，可以不返回该题。',
+    '得分必须是数字，不能超过该题题分，不能小于 0。',
+    '只返回 JSON，不要解释。'
+  ].join('\n')
+}
+
+function buildPaperScoreRecognitionContent(payload, courseware, target) {
+  const questions = Array.isArray(payload.questions) ? payload.questions : []
+  const text = [
+    `试卷标题：${payload.title || '试卷分析'}`,
+    `考试类型：${payload.examType || '未填写'}`,
+    `学生：${payload.student && payload.student.name ? payload.student.name : '未填写'}`,
+    '',
+    '题目清单 JSON：',
+    JSON.stringify(questions.map((question) => ({
+      key: question.key,
+      number: question.number,
+      sectionTitle: question.sectionTitle,
+      score: question.score,
+      knowledge: question.knowledge
+    })), null, 2),
+    '',
+    '请识别上传批改图中每道题的实际得分，返回格式：',
+    '{"scores":[{"key":"1-1","number":"1","score":5}],"warnings":[]}',
+    '',
+    buildPaperCoursewareText(courseware, target !== 'text')
+  ].filter(Boolean).join('\n')
+
+  const images = getCoursewareVisionImages(courseware)
+  if (target === 'responses') {
+    return [
+      { type: 'input_text', text },
+      ...images.map((image) => ({
+        type: 'input_image',
+        image_url: image.dataUrl,
+        detail: 'high'
+      }))
+    ]
+  }
+
+  if (target === 'chat' && images.length) {
+    return [
+      { type: 'text', text },
+      ...images.map((image) => ({
+        type: 'image_url',
+        image_url: {
+          url: image.dataUrl
+        }
+      }))
+    ]
+  }
+
+  return text
+}
+
+function getPaperScoreRecognitionJsonSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      scores: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            key: { type: 'string' },
+            number: { type: 'string' },
+            score: { type: 'number' }
+          },
+          required: ['key', 'number', 'score']
+        }
+      },
+      warnings: {
+        type: 'array',
+        items: { type: 'string' }
+      }
+    },
+    required: ['scores', 'warnings']
+  }
+}
+
+function parsePaperScoreRecognitionResponse(response, provider) {
+  if (provider === 'deepseek' || provider === 'custom') {
+    const content = response.choices && response.choices[0] && response.choices[0].message
+      ? response.choices[0].message.content
+      : ''
+    return parseJsonText(content)
+  }
+
+  if (response.output_text) return parseJsonText(response.output_text)
+
+  const output = Array.isArray(response.output) ? response.output : []
+  const text = output.flatMap((item) => Array.isArray(item.content) ? item.content : [])
+    .map((part) => part.text || '')
+    .filter(Boolean)
+    .join('\n')
+
+  return parseJsonText(text)
+}
+
+function normalizePaperScoreRecognition(input, payload = {}) {
+  const questions = Array.isArray(payload.questions) ? payload.questions : []
+  const maxScoreMap = new Map(questions.map((question) => [trim(question.key), Number(question.score || 0)]))
+  const numberKeyMap = new Map(questions.map((question) => [trim(question.number), trim(question.key)]))
+  const sourceScores = Array.isArray(input && input.scores) ? input.scores : []
+  const scores = {}
+
+  sourceScores.forEach((item) => {
+    const key = trim(item && item.key) || numberKeyMap.get(trim(item && item.number))
+    if (!key) return
+    const maxScore = maxScoreMap.get(key)
+    const value = Number(item && item.score)
+    if (!Number.isFinite(value)) return
+    scores[key] = Math.max(0, Math.min(Number.isFinite(maxScore) && maxScore > 0 ? maxScore : value, value))
+  })
+
+  return scores
+}
+
+function buildDemoPaperScoreRecognition(payload = {}) {
+  const questions = Array.isArray(payload.questions) ? payload.questions : []
+  const scores = {}
+  questions.forEach((question) => {
+    scores[question.key || question.number] = Number(question.score || 0)
+  })
+  return scores
 }
 
 function safeEqual(left, right) {
@@ -1893,10 +2633,12 @@ function buildSystemPrompt() {
     '每个学生反馈建议 120 到 220 个汉字。',
     '每一条反馈必须包含：1 个本节课/课件里的具体知识点，1 个该学生的课堂表现等级，若老师填写了备注则必须自然写入备注。',
     '如果反馈类型是班级整体反馈，请面向整个班级生成课堂表现总结，不要写成单个学生逐条反馈。',
+    '如果提供了上课日期，可以自然使用；如果上课时段为空或未填写，任何文字反馈和图片报告文案都不要出现时段，也不要自行编造时段。',
     '如果提供了出门测成绩，必须写入反馈：个性化学生反馈只写当前学生自己的成绩；班级整体反馈要按从高到低列出全班所有学生成绩。',
     '如果提供了出门测文件内容，请结合文件里的测试知识点、题型或讲次内容评价学习情况；不要只写分数。',
     '如果反馈呈现形式是图片报告文案，请语言更适合放入报告里的“课堂表现”段落，结构清晰、少寒暄。',
     '一对一反馈里如果包含 personality 或 habit，要把它们作为长期档案背景，用自然、克制的方式融入建议，不要写得像诊断。',
+    '所有未填写、未上传、为空的内容都视为不存在，反馈正文里不要提及这些空内容，也不要用“未填写”“未上传”等字样。',
     '不同学生的反馈必须根据 performance、remark、personality 和 habit 明显区分，不允许只替换姓名。'
   ].join('\n')
 }
@@ -1915,8 +2657,6 @@ function buildExitTestPromptText(payload) {
     lines.push(payload.feedbackScope === 'class'
       ? '班级整体反馈中必须从高到低列出所有学生的出门测成绩，并概括整体得分情况。'
       : '个性化反馈中每个学生只写自己的出门测成绩，不要泄露或罗列其他学生成绩。')
-  } else {
-    lines.push('出门测成绩：未填写。')
   }
 
   const file = payload && payload.exitTestFile
@@ -1930,17 +2670,17 @@ function buildExitTestPromptText(payload) {
     if (file.ocrPageCount) {
       lines.push(`出门测 OCR 页数：${file.ocrPageCount}`)
     }
-    lines.push('出门测文件识别内容：')
-    lines.push(file.text || '未识别到可用文字，请只结合成绩和老师备注生成稳妥反馈。')
-  } else {
-    lines.push('')
-    lines.push('出门测文件：未上传。')
+    if (file.text) {
+      lines.push('出门测文件识别内容：')
+      lines.push(file.text)
+    }
   }
 
   return lines.join('\n')
 }
 
 function buildUserContent(payload, courseware) {
+  const exitTestPromptText = buildExitTestPromptText(payload)
   const content = [
     {
       type: 'input_text',
@@ -1948,20 +2688,20 @@ function buildUserContent(payload, courseware) {
         `课程类型：${payload.mode === 'oneOnOne' ? '一对一' : '班课'}`,
         `反馈类型：${payload.feedbackScope === 'class' ? '班级整体反馈' : '个性化学生反馈'}`,
         `反馈呈现形式：${payload.feedbackFormat === 'image' ? '图片报告文案' : '文字反馈'}`,
-        `班级/课程：${payload.className || '未填写'}`,
-        `年级：${payload.grade || '未填写'}`,
-        `课程主题：${payload.lessonTitle || '未填写'}`,
+        payload.className ? `班级/课程：${payload.className}` : '',
+        payload.grade ? `年级：${payload.grade}` : '',
+        payload.lessonTitle ? `课程主题：${payload.lessonTitle}` : '',
+        (payload.lessonDateText || payload.lessonDate) ? `上课日期：${payload.lessonDateText || payload.lessonDate}` : '',
+        payload.timeSlot ? `上课时段：${payload.timeSlot}` : '',
         '',
         '老师提供的反馈模板：',
         payload.template || '请根据学生本节课表现生成反馈。',
         '',
         getTemplateRules(),
         '',
-        '老师补充的课程内容：',
-        payload.courseNote || '未填写',
+        payload.courseNote ? `老师补充的课程内容：\n${payload.courseNote}` : '',
         '',
-        '出门测数据：',
-        buildExitTestPromptText(payload),
+        exitTestPromptText ? `出门测数据：\n${exitTestPromptText}` : '',
         '',
         '学生表现数据 JSON：',
         JSON.stringify(payload.students, null, 2),
@@ -1976,7 +2716,7 @@ function buildUserContent(payload, courseware) {
         '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
         '不同学生不要套用完全相同的句子。',
         '返回 JSON 前逐条自检：每条 feedback 是否保留了模板结构和固定句；不符合就先重写再返回。'
-      ].join('\n')
+      ].filter(Boolean).join('\n')
     }
   ]
 
@@ -2046,31 +2786,29 @@ function buildPlainPrompt(payload, courseware, options = {}) {
       : `老师上传了 PDF 课件：${courseware.name}。当前没有提取到可用文字，请结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
   } else if (courseware) {
     coursewareLines.push(`老师上传了课件文件：${courseware.name}。当前接口没有提取到可用文字，请只结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
-  } else {
-    coursewareLines.push('未上传课件。')
   }
+  const exitTestPromptText = buildExitTestPromptText(payload)
 
   return [
     `课程类型：${payload.mode === 'oneOnOne' ? '一对一' : '班课'}`,
     `反馈类型：${payload.feedbackScope === 'class' ? '班级整体反馈' : '个性化学生反馈'}`,
     `反馈呈现形式：${payload.feedbackFormat === 'image' ? '图片报告文案' : '文字反馈'}`,
-    `班级/课程：${payload.className || '未填写'}`,
-    `年级：${payload.grade || '未填写'}`,
-    `课程主题：${payload.lessonTitle || '未填写'}`,
+    payload.className ? `班级/课程：${payload.className}` : '',
+    payload.grade ? `年级：${payload.grade}` : '',
+    payload.lessonTitle ? `课程主题：${payload.lessonTitle}` : '',
+    (payload.lessonDateText || payload.lessonDate) ? `上课日期：${payload.lessonDateText || payload.lessonDate}` : '',
+    payload.timeSlot ? `上课时段：${payload.timeSlot}` : '',
     '',
     '老师提供的反馈模板：',
     payload.template || '请根据学生本节课表现生成反馈。',
     '',
     getTemplateRules(),
     '',
-    '老师补充的课程内容：',
-    payload.courseNote || '未填写',
+    payload.courseNote ? `老师补充的课程内容：\n${payload.courseNote}` : '',
     '',
-    '出门测数据：',
-    buildExitTestPromptText(payload),
+    exitTestPromptText ? `出门测数据：\n${exitTestPromptText}` : '',
     '',
-    '课件内容：',
-    coursewareLines.join('\n'),
+    coursewareLines.length ? `课件内容：\n${coursewareLines.join('\n')}` : '',
     '',
     '学生表现数据 JSON：',
     JSON.stringify(payload.students, null, 2),
@@ -2086,7 +2824,7 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
     '不同学生不要套用完全相同的句子。',
     '返回 JSON 前逐条自检：每条 feedback 是否保留了模板结构和固定句；不符合就先重写再返回。'
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 }
 
 function getTemplateRules() {
@@ -3496,13 +4234,23 @@ function buildAdviceFallback(student) {
 
 function buildFallbackFeedback(student, payload = {}) {
   const lesson = payload.lessonTitle ? `本节课围绕“${payload.lessonTitle}”展开，` : '本节课整体学习状态较为清晰，'
+  const schedule = buildFallbackScheduleText(payload)
   const remark = student.remark ? `课堂中特别需要关注的是：${student.remark}。` : ''
   const exitTestText = getFallbackExitTestText(student, payload)
   const advice = student.performance === '表现较差'
     ? '后续建议先把基础概念和典型题步骤补扎实，课后用少量高频题巩固。'
     : '后续建议继续整理本节课重点和错题，保持稳定练习节奏。'
 
-  return `${student.name}同学${lesson}${student.performance}。${remark}${exitTestText}${advice}`
+  return `${student.name}同学${schedule}${lesson}${student.performance}。${remark}${exitTestText}${advice}`
+}
+
+function buildFallbackScheduleText(payload = {}) {
+  if (!payload.lessonDateText && !payload.lessonDate && !payload.timeSlot) return ''
+
+  const dateText = payload.lessonDateText || payload.lessonDate || ''
+  return payload.timeSlot
+    ? `本次上课时间为${dateText} ${payload.timeSlot}，`
+    : `本次上课日期为${dateText}，`
 }
 
 function getFallbackExitTestText(student, payload = {}) {

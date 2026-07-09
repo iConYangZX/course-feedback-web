@@ -50,29 +50,42 @@
           </div>
         </div>
 
-        <div class="mode-switch" role="tablist" aria-label="课程类型">
-          <button class="mode-button active" data-mode="class" type="button">班课</button>
-          <button class="mode-button" data-mode="oneOnOne" type="button">一对一</button>
-          <button class="mode-button" data-mode="teaching" type="button">教学数据</button>
-          <button class="mode-button" data-mode="rearrange" type="button">题卷重排</button>
-          <button class="mode-button admin-entry hidden" data-mode="admin" type="button">账户</button>
-        </div>
-
-        <section class="sidebar-section class-only">
-          <div class="section-title-row">
-            <h2>班级</h2>
-            <button class="icon-action" id="newClassBtn" type="button" title="新建班级">+</button>
-          </div>
-          <div id="classList" class="class-list"></div>
-        </section>
-
-        <section class="sidebar-section one-only hidden">
-          <div class="section-title-row">
-            <h2>学生档案</h2>
-            <button class="icon-action" id="newOneProfileBtn" type="button" title="新建学生档案">+</button>
-          </div>
-          <div id="oneProfileList" class="class-list"></div>
-        </section>
+        <nav class="mode-switch" aria-label="主导航">
+          <section class="nav-group">
+            <div class="nav-group-title">反馈</div>
+            <div class="nav-group-list" role="tablist" aria-label="反馈">
+              <button class="mode-button active" data-mode="class" type="button">班课</button>
+              <section class="sidebar-section nested-sidebar-section class-only">
+                <div class="section-title-row">
+                  <h2>班级</h2>
+                  <button class="icon-action" id="newClassBtn" type="button" title="新建班级">+</button>
+                </div>
+                <div id="classList" class="class-list"></div>
+              </section>
+              <button class="mode-button" data-mode="oneOnOne" type="button">一对一</button>
+              <section class="sidebar-section nested-sidebar-section one-only hidden">
+                <div class="section-title-row">
+                  <h2>学生档案</h2>
+                  <button class="icon-action" id="newOneProfileBtn" type="button" title="新建学生档案">+</button>
+                </div>
+                <div id="oneProfileList" class="class-list"></div>
+              </section>
+            </div>
+          </section>
+          <section class="nav-group">
+            <div class="nav-group-title">教学工具</div>
+            <div class="nav-group-list" role="tablist" aria-label="教学工具">
+              <button class="mode-button" data-mode="paperAnalysis" type="button">试卷分析</button>
+              <button class="mode-button" data-mode="rearrange" type="button">题卷重排</button>
+            </div>
+          </section>
+          <section class="nav-group admin-entry hidden">
+            <div class="nav-group-title">账户设置</div>
+            <div class="nav-group-list" role="tablist" aria-label="账户设置">
+              <button class="mode-button" data-mode="admin" type="button">账户管理</button>
+            </div>
+          </section>
+        </nav>
 
         <div class="status-stack">
           <div class="account-status hidden" id="accountStatus"></div>
@@ -265,20 +278,35 @@
           </div>
 
           <div class="form-grid two">
-            <label class="field">
+            <label class="field one-profile-note-field">
               <span>平时性格</span>
               <textarea id="onePersonalityInput" rows="4" placeholder="例如：比较谨慎，回答前会反复确认；需要鼓励后更愿意表达"></textarea>
+              <div class="profile-keyword-panel">
+                <div>
+                  <div class="field-label">性格优势关键词</div>
+                  <div class="keyword-chip-list compact" id="onePersonalityPositiveList"></div>
+                </div>
+                <div>
+                  <div class="field-label">性格需关注关键词</div>
+                  <div class="keyword-chip-list compact" id="onePersonalityNegativeList"></div>
+                </div>
+              </div>
             </label>
-            <label class="field">
+            <label class="field one-profile-note-field">
               <span>做题习惯备注</span>
               <textarea id="oneHabitInput" rows="4" placeholder="例如：步骤意识较好，但容易漏写条件；计算速度偏慢"></textarea>
+              <div class="profile-keyword-panel">
+                <div>
+                  <div class="field-label">习惯优势关键词</div>
+                  <div class="keyword-chip-list compact" id="oneHabitPositiveList"></div>
+                </div>
+                <div>
+                  <div class="field-label">习惯需改进关键词</div>
+                  <div class="keyword-chip-list compact" id="oneHabitNegativeList"></div>
+                </div>
+              </div>
             </label>
           </div>
-
-          <label class="field">
-            <span>反馈模板</span>
-            <textarea id="oneProfileTemplateInput" rows="7"></textarea>
-          </label>
 
           <div class="panel-actions">
             <button class="secondary-button danger-button" id="deleteOneProfileBtn" type="button">删除档案</button>
@@ -316,7 +344,38 @@
             </label>
           </div>
 
-          <div class="form-grid two class-only">
+          <section class="class-schedule-panel" id="classSchedulePanel">
+            <div class="field class-date-field">
+              <span>上课日期</span>
+              <button class="date-picker-trigger" id="classDateToggleBtn" type="button" aria-expanded="false" aria-controls="classCalendarPopup">
+                <span id="classDateSelectedText">今天</span>
+                <strong>选择日期</strong>
+              </button>
+            </div>
+            <label class="field class-time-field">
+              <span>上课时段</span>
+              <select id="classTimeSlotSelect">
+                <option value="" selected>暂不填写</option>
+                <option value="8-10">8-10</option>
+                <option value="10-12">10-12</option>
+                <option value="14-16">14-16</option>
+                <option value="16-18">16-18</option>
+              </select>
+            </label>
+            <div class="class-calendar hidden" id="classCalendarPopup">
+              <div class="calendar-head">
+                <button class="calendar-nav-button" id="classCalendarPrevBtn" type="button" aria-label="上个月">‹</button>
+                <strong id="classCalendarTitle">本月</strong>
+                <button class="calendar-nav-button" id="classCalendarNextBtn" type="button" aria-label="下个月">›</button>
+              </div>
+              <div class="calendar-weekdays" aria-hidden="true">
+                <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+              </div>
+              <div class="calendar-grid" id="classCalendarGrid"></div>
+            </div>
+          </section>
+
+          <div class="form-grid two">
             <label class="field">
               <span>反馈呈现形式</span>
               <select id="feedbackFormatSelect">
@@ -345,23 +404,10 @@
             <textarea id="templateInput" rows="7"></textarea>
           </label>
 
-          <section class="image-format-preview class-only hidden" id="imageFormatPreview">
-            <div class="field-label">图片反馈预览</div>
-            <div class="mini-report-preview">
-              <div class="mini-report-head">
-                <strong>数学课程反馈报告</strong>
-                <span>升学帮</span>
-              </div>
-              <div class="mini-report-line"></div>
-              <div class="mini-report-block short"></div>
-              <div class="mini-report-block"></div>
-              <div class="mini-report-table">
-                <span></span><span></span><span></span>
-                <span></span><span></span><span></span>
-                <span></span><span></span><span></span>
-              </div>
-            </div>
-          </section>
+          <label class="field one-only hidden" id="oneFeedbackTemplateField">
+            <span>反馈模板</span>
+            <textarea id="oneProfileTemplateInput" rows="7"></textarea>
+          </label>
 
           <div class="class-feedback-options class-only" id="classFeedbackOptions">
             <div class="keyword-group">
@@ -414,6 +460,10 @@
                 <input id="exitTestTotalInput" type="number" min="1" value="100" />
               </label>
             </div>
+            <label class="field exit-test-lecture-field hidden" id="exitTestLectureField">
+              <span>选择出门测讲次</span>
+              <select id="exitTestLectureSelect"></select>
+            </label>
             <div class="upload-hint">可上传整本或单独一讲，AI 会结合文件内容和成绩生成反馈。</div>
             <div id="exitTestTable" class="exit-test-table"></div>
           </section>
@@ -524,6 +574,7 @@
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
     <script src="/app.js"></script>
   </body>
