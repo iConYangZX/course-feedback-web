@@ -1213,7 +1213,7 @@ async function writeMaterialState() {
 }
 
 async function saveUploadedMaterial(ownerId, file, input = {}) {
-  const originalName = file.originalname || 'material.pdf'
+  const originalName = normalizeUploadFileName(file.originalname, 'material.pdf')
   const lowerName = originalName.toLowerCase()
   if (!/\.(pdf|docx|pptx|txt|md|png|jpg|jpeg|webp)$/i.test(lowerName)) {
     throw new Error('教材目前支持 PDF、Word、PPT、文本或图片文件')
@@ -1258,16 +1258,17 @@ function getStoredMaterialFile(session, materialId) {
   }
 
   return {
-    originalname: material.originalName,
+    originalname: normalizeUploadFileName(material.originalName || material.name, 'material.pdf'),
     mimetype: material.mime,
     buffer: Buffer.from(material.dataBase64, 'base64')
   }
 }
 
 function getSafeMaterial(material = {}) {
+  const safeName = normalizeUploadFileName(material.name || material.originalName, '整本教材')
   return {
     id: trim(material.id),
-    name: trim(material.name || material.originalName),
+    name: safeName,
     mime: trim(material.mime),
     size: Number(material.size || 0),
     lectures: Array.isArray(material.lectures) ? material.lectures.map((lecture, index) => ({
@@ -1320,7 +1321,7 @@ function safeEqual(left, right) {
 }
 
 async function normalizeCourseware(file, options = {}) {
-  const originalName = file.originalname || 'courseware'
+  const originalName = normalizeUploadFileName(file.originalname, 'courseware')
   const mime = getMimeType(originalName, file.mimetype)
   const isImage = mime.startsWith('image/')
   const isPdf = mime === 'application/pdf'
@@ -2441,6 +2442,18 @@ function truncateText(text) {
 
   if (cleanText.length <= maxLength) return cleanText
   return `${cleanText.slice(0, maxLength)}\n\n[课件内容较长，后文已截断]`
+}
+
+function normalizeUploadFileName(value, fallback = 'file') {
+  const rawName = trim(value) || fallback
+  const decodedName = Buffer.from(rawName, 'latin1').toString('utf8')
+
+  if (!decodedName || decodedName.includes('�')) return rawName
+  return getMojibakeScore(decodedName) < getMojibakeScore(rawName) ? decodedName : rawName
+}
+
+function getMojibakeScore(value) {
+  return (String(value || '').match(/[ÃÂÄÅÆÇÈÉÒÓÔÕÖØÙÚÛÜÝÞßà-ÿ�]/g) || []).length
 }
 
 function getMimeType(name, fallback) {
