@@ -3916,6 +3916,7 @@ function normalizeImageReportCourseText(text) {
     .map((line) => line.trim())
     .filter(Boolean)
     .filter((line) => !/^(上课日期|上课时段|课后作业|班级\/共性备注|教材讲次)[：:]/.test(line))
+    .map((line) => line.replace(/^[1-9][0-9]*[、.．]\s*/, '').trim())
     .join(' ')
 
   return normalized || '本节课围绕课件核心内容进行学习。'
