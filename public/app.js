@@ -4001,16 +4001,11 @@ async function downloadImageReport() {
   }
 
   for (const [index, sheet] of sheets.entries()) {
-    const canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff' })
-    await new Promise((resolve) => {
-      canvas.toBlob((blob) => {
-        if (blob) {
-          const name = sheet.dataset.reportName || `报告${index + 1}`
-          downloadBlob(blob, `${sanitizeFileName(name)}课程反馈报告.png`)
-        }
-        resolve()
-      }, 'image/png')
-    })
+    const blob = await renderImageReportBlob(sheet)
+    if (blob) {
+      const name = sheet.dataset.reportName || `报告${index + 1}`
+      downloadBlob(blob, `${sanitizeFileName(name)}课程反馈报告.png`)
+    }
   }
 }
 
@@ -4039,6 +4034,8 @@ async function copyImageReport(sheet, button = null) {
     return
   }
 
+  const reportName = sheet.dataset.reportName || '图片反馈'
+  const blobPromise = renderImageReportBlob(sheet)
   const originalText = button ? button.textContent : ''
   if (button) {
     button.disabled = true
@@ -4046,22 +4043,38 @@ async function copyImageReport(sheet, button = null) {
   }
 
   try {
-    const canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff' })
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
-    if (!blob) throw new Error('图片生成失败')
-
     await navigator.clipboard.write([
-      new window.ClipboardItem({ 'image/png': blob })
+      new window.ClipboardItem({ 'image/png': blobPromise })
     ])
     showToast('图片已复制')
   } catch (error) {
-    showToast(error.message || '复制图片失败，请先导出图片')
+    const blob = await blobPromise.catch(() => null)
+    if (blob) {
+      try {
+        await navigator.clipboard.write([
+          new window.ClipboardItem({ 'image/png': blob })
+        ])
+        showToast('图片已复制')
+      } catch (fallbackError) {
+        downloadBlob(blob, `${sanitizeFileName(reportName)}课程反馈报告.png`)
+        showToast('当前浏览器不允许直接复制图片，已自动下载')
+      }
+    } else {
+      showToast('当前浏览器不允许直接复制图片，请使用导出图片')
+    }
   } finally {
     if (button) {
       button.disabled = false
       button.textContent = originalText || '复制图片'
     }
   }
+}
+
+async function renderImageReportBlob(sheet) {
+  const canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff' })
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), 'image/png')
+  })
 }
 
 function getChineseWeekday(date) {
