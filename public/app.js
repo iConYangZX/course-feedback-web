@@ -3705,7 +3705,7 @@ function renderImageReport(payload = null) {
   const selectedProfile = getSelectedOneProfile()
   const reportPayload = payload || buildGeneratePayload() || {}
   const reportDate = reportPayload.lessonDate ? getDateFromKey(reportPayload.lessonDate) : new Date()
-  const lessonTitle = reportPayload.lessonTitle || els.lessonTitleInput.value.trim() || '本节课程'
+  const lessonTitle = (reportPayload.lessonTitle || els.lessonTitleInput.value.trim() || '').trim()
   const homeworkText = reportPayload.homework || (els.homeworkInput ? els.homeworkInput.value.trim() : '')
   const students = state.mode === 'oneOnOne'
     ? getWorkingStudents()
@@ -3762,10 +3762,11 @@ function renderImageReportSheet(options) {
     selectedProfile
   } = options
   const reportSections = parseFeedbackReportSections(item.feedback)
-  const contentSource = reportSections.courseContent || reportPayload.courseNote || els.courseNoteInput.value || item.feedback
+  const contentSource = reportSections.courseContent || getManualCourseNoteForImageReport()
   const courseLines = extractReportLines(contentSource)
   const focusText = reportSections.studyFocus || ''
   const performanceText = reportSections.performance || item.feedback || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
+  const hasCourseSection = courseLines.length > 0 || Boolean(focusText)
   const isIndividual = item.scope !== 'class'
   const showAllScores = isIndividual
     && state.mode === 'class'
@@ -3806,15 +3807,15 @@ function renderImageReportSheet(options) {
         ${reportPayload.timeSlot ? `<div>时段：${escapeHtml(reportPayload.timeSlot)}</div>` : ''}
         ${isIndividual ? `<div>学生：${escapeHtml(studentName)}</div>` : `<div>班级：${escapeHtml(className || item.name)}</div>`}
         ${isIndividual && className && state.mode === 'class' ? `<div>班级：${escapeHtml(className)}</div>` : ''}
-        <div>课程主题：${escapeHtml(lessonTitle)}</div>
+        ${lessonTitle ? `<div>课程主题：${escapeHtml(lessonTitle)}</div>` : ''}
       </div>
-      <section>
+      ${hasCourseSection ? `<section>
         <h3>【课程内容】</h3>
-        <ol>
-          ${courseLines.slice(0, 4).map((line) => `<li>${escapeHtml(line)}</li>`).join('') || `<li>${escapeHtml(lessonTitle)}</li>`}
-        </ol>
-        <p class="report-paragraph">核心重点：${escapeHtml(focusText || courseLines[0] || lessonTitle)}。</p>
-      </section>
+        ${courseLines.length ? `<ol>
+          ${courseLines.slice(0, 4).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}
+        </ol>` : ''}
+        ${focusText ? `<p class="report-paragraph">核心重点：${escapeHtml(focusText)}</p>` : ''}
+      </section>` : ''}
       <section>
         <h3>【课堂表现】</h3>
         <div class="report-paragraph">${formatReportText(performanceText)}</div>
@@ -3890,6 +3891,10 @@ function formatReportText(text) {
   return escapeHtml(normalized)
     .replace(/\n{2,}/g, '<br><br>')
     .replace(/\n/g, '<br>')
+}
+
+function getManualCourseNoteForImageReport() {
+  return els.courseNoteInput ? els.courseNoteInput.value.trim() : ''
 }
 
 function extractReportLines(text) {
