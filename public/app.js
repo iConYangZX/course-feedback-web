@@ -3699,29 +3699,78 @@ function renderImageReport(payload = null) {
   const selectedProfile = getSelectedOneProfile()
   const reportPayload = payload || buildGeneratePayload() || {}
   const reportDate = reportPayload.lessonDate ? getDateFromKey(reportPayload.lessonDate) : new Date()
-  const feedbackText = state.feedbacks.map((item) => item.feedback).join('\n\n')
   const lessonTitle = reportPayload.lessonTitle || els.lessonTitleInput.value.trim() || '本节课程'
-  const reportSections = parseFeedbackReportSections(feedbackText)
-  const contentSource = reportSections.courseContent || reportPayload.courseNote || els.courseNoteInput.value || feedbackText
-  const courseLines = extractReportLines(contentSource)
-  const focusText = reportSections.studyFocus || ''
-  const performanceText = reportSections.performance || feedbackText || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
   const homeworkText = reportPayload.homework || (els.homeworkInput ? els.homeworkInput.value.trim() : '')
   const students = state.mode === 'oneOnOne'
     ? getWorkingStudents()
     : (selectedClass ? selectedClass.students : [])
   const reportScores = buildReportScoreRows(students, reportPayload.exitTest)
-  const hasScoreRows = reportScores.length > 0
-  const numericScores = reportScores.map((item) => Number(item.score)).filter(Number.isFinite)
+  const isClassOverall = reportPayload.feedbackScope === 'class'
+  const reportItems = isClassOverall
+    ? [{
+        name: reportPayload.className || (selectedClass && selectedClass.name) || '班级整体',
+        feedback: state.feedbacks.map((item) => item.feedback).join('\n\n'),
+        scope: 'class'
+      }]
+    : state.feedbacks.map((item) => ({
+        studentId: item.studentId,
+        name: item.name,
+        feedback: item.feedback,
+        scope: 'individual'
+      }))
+
+  els.imageReportPreview.innerHTML = reportItems.map((item, index) => renderImageReportSheet({
+    item,
+    index,
+    reportDate,
+    reportPayload,
+    lessonTitle,
+    homeworkText,
+    reportScores,
+    selectedClass,
+    selectedProfile
+  })).join('')
+}
+
+function renderImageReportSheet(options) {
+  const {
+    item,
+    index,
+    reportDate,
+    reportPayload,
+    lessonTitle,
+    homeworkText,
+    reportScores,
+    selectedClass,
+    selectedProfile
+  } = options
+  const reportSections = parseFeedbackReportSections(item.feedback)
+  const contentSource = reportSections.courseContent || reportPayload.courseNote || els.courseNoteInput.value || item.feedback
+  const courseLines = extractReportLines(contentSource)
+  const focusText = reportSections.studyFocus || ''
+  const performanceText = reportSections.performance || item.feedback || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
+  const isIndividual = item.scope !== 'class'
+  const scoreRows = isIndividual
+    ? reportScores.filter((score) => {
+        if (item.studentId && score.studentId) return score.studentId === item.studentId
+        return score.name === item.name
+      })
+    : reportScores
+  const hasScoreRows = scoreRows.length > 0
+  const numericScores = scoreRows.map((score) => Number(score.score)).filter(Number.isFinite)
   const avg = numericScores.length
     ? (numericScores.reduce((sum, score) => sum + score, 0) / numericScores.length).toFixed(1)
     : '-'
   const max = numericScores.length ? Math.max(...numericScores) : '-'
   const min = numericScores.length ? Math.min(...numericScores) : '-'
-  const rate = numericScores.length ? `${(reportScores.reduce((sum, item) => sum + Number(item.rate || 0), 0) / reportScores.length).toFixed(1)}%` : '-'
+  const rate = numericScores.length ? `${(scoreRows.reduce((sum, score) => sum + Number(score.rate || 0), 0) / scoreRows.length).toFixed(1)}%` : '-'
+  const className = reportPayload.className || (selectedClass && selectedClass.name) || ''
+  const studentName = state.mode === 'oneOnOne'
+    ? ((selectedProfile && selectedProfile.name) || item.name || reportPayload.className || '')
+    : item.name
 
-  els.imageReportPreview.innerHTML = `
-    <article class="report-sheet" id="imageReportSheet">
+  return `
+    <article class="report-sheet image-report-sheet" id="${index === 0 ? 'imageReportSheet' : `imageReportSheet-${index}`}" data-image-report-sheet data-report-name="${escapeHtml(studentName || item.name || `报告${index + 1}`)}">
       <header class="report-header">
         <div></div>
         <h2>数学课程反馈报告</h2>
@@ -3733,7 +3782,8 @@ function renderImageReport(payload = null) {
       <div class="report-meta">
         <div>日期：${reportDate.getFullYear()}年${reportDate.getMonth() + 1}月${reportDate.getDate()}日（${getChineseWeekday(reportDate)}）</div>
         ${reportPayload.timeSlot ? `<div>时段：${escapeHtml(reportPayload.timeSlot)}</div>` : ''}
-        <div>${state.mode === 'oneOnOne' ? '学生' : '班级'}：${escapeHtml(state.mode === 'oneOnOne' ? ((selectedProfile && selectedProfile.name) || reportPayload.className || '') : (reportPayload.className || (selectedClass && selectedClass.name) || ''))}</div>
+        ${isIndividual ? `<div>学生：${escapeHtml(studentName)}</div>` : `<div>班级：${escapeHtml(className || item.name)}</div>`}
+        ${isIndividual && className && state.mode === 'class' ? `<div>班级：${escapeHtml(className)}</div>` : ''}
         <div>课程主题：${escapeHtml(lessonTitle)}</div>
       </div>
       <section>
@@ -3756,10 +3806,10 @@ function renderImageReport(payload = null) {
         <table class="report-table">
           <thead><tr><th>姓名</th><th>成绩</th><th>正确率</th></tr></thead>
           <tbody>
-            ${reportScores.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.displayScore || item.score || '—')}</td><td>${item.rate !== null ? `${Number(item.rate).toFixed(1)}%` : '—'}</td></tr>`).join('')}
+            ${scoreRows.map((score) => `<tr><td>${escapeHtml(score.name)}</td><td>${escapeHtml(score.displayScore || score.score || '—')}</td><td>${score.rate !== null ? `${Number(score.rate).toFixed(1)}%` : '—'}</td></tr>`).join('')}
           </tbody>
         </table>
-        <p>平均分：${avg} 最高分：${max} 最低分：${min} 得分率：${rate}</p>
+        ${isIndividual ? '' : `<p>平均分：${avg} 最高分：${max} 最低分：${min} 得分率：${rate}</p>`}
       </section>` : ''}
       <footer>以上为本次课程反馈，如有疑问欢迎沟通。</footer>
     </article>
@@ -3835,6 +3885,7 @@ function buildReportScoreRows(students, exitTest = null) {
       if (exitTest.mode === 'grade') {
         return {
           name: student.name,
+          studentId: student.id,
           score: null,
           displayScore: student.grade || '—',
           rate: null
@@ -3843,6 +3894,7 @@ function buildReportScoreRows(students, exitTest = null) {
 
       return {
         name: student.name,
+        studentId: student.id,
         score: Number(student.score),
         displayScore: `${student.score}/${exitTest.totalScore || 100}`,
         rate: exitTest.totalScore ? (Number(student.score) / Number(exitTest.totalScore)) * 100 : null
@@ -3854,8 +3906,8 @@ function buildReportScoreRows(students, exitTest = null) {
 }
 
 async function downloadImageReport() {
-  const sheet = document.querySelector('#imageReportSheet')
-  if (!sheet) {
+  const sheets = Array.from(document.querySelectorAll('[data-image-report-sheet]'))
+  if (!sheets.length) {
     showToast('还没有图片反馈报告')
     return
   }
@@ -3864,10 +3916,18 @@ async function downloadImageReport() {
     return
   }
 
-  const canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff' })
-  canvas.toBlob((blob) => {
-    if (blob) downloadBlob(blob, `课程反馈报告-${Date.now()}.png`)
-  }, 'image/png')
+  for (const [index, sheet] of sheets.entries()) {
+    const canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff' })
+    await new Promise((resolve) => {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const name = sheet.dataset.reportName || `报告${index + 1}`
+          downloadBlob(blob, `${sanitizeFileName(name)}课程反馈报告.png`)
+        }
+        resolve()
+      }, 'image/png')
+    })
+  }
 }
 
 function getChineseWeekday(date) {
