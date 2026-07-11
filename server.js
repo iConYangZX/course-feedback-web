@@ -532,6 +532,32 @@ app.post('/api/config', (req, res) => {
   })
 })
 
+app.post('/api/courseware-lectures', requireAccessMiddleware, upload.single('courseware'), async (req, res) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ error: '请先上传课件文件' })
+      return
+    }
+
+    const courseware = await normalizeCourseware(req.file)
+    const detection = detectTextCoursewareLectures(courseware.extractedText, {
+      pageCount: courseware.ocrPageCount
+    })
+
+    res.json({
+      lectures: detection.lectures,
+      pageCount: detection.pageCount,
+      extractionSource: courseware.extractionSource,
+      textLength: trim(courseware.extractedText).length
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({
+      error: getUserFacingError(error)
+    })
+  }
+})
+
 app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
   { name: 'courseware', maxCount: 12 },
   { name: 'exitTest', maxCount: 1 },
@@ -2553,6 +2579,206 @@ function sliceTextByApproxPages(text, selectedPages) {
     .trim() || source
 }
 
+function detectTextCoursewareLectures(text, options = {}) {
+  const source = trim(text)
+  const pageSize = 1400
+  const estimatedPageCount = Math.max(1, Number(options.pageCount || 0), Math.ceil(source.length / pageSize) || 1)
+  if (!source) {
+    return {
+      lectures: [],
+      pageCount: estimatedPageCount
+    }
+  }
+
+  const headings = []
+  const lines = source.split(/\r?\n/)
+  let offset = 0
+  let sawContentsNearStart = false
+
+  lines.forEach((rawLine) => {
+    const raw = String(rawLine || '')
+    const lineStart = offset
+    offset += raw.length + 1
+
+    const normalizedLine = raw.replace(/　/g, ' ').replace(/\s+/g, ' ').trim()
+    if (!normalizedLine) return
+    if (lineStart < pageSize * 3 && /目录|contents/i.test(normalizedLine)) sawContentsNearStart = true
+
+    const pageLabelMatch = normalizedLine.match(/^第\s*(\d{1,4})\s*页\s*[:：、，.\-—_ ]*(.*)$/)
+    const explicitPage = pageLabelMatch ? Number(pageLabelMatch[1]) : 0
+    const contentLine = pageLabelMatch ? pageLabelMatch[2] : normalizedLine
+    const pageNumber = explicitPage || Math.min(estimatedPageCount, Math.floor(lineStart / pageSize) + 1)
+    const heading = matchTextLectureHeadingLine(contentLine, pageNumber)
+      || matchTextLectureHeadingLine(normalizedLine, pageNumber)
+
+    if (!heading) return
+
+    const looksLikeContentsLine = sawContentsNearStart
+      && lineStart < pageSize * 3
+      && (/\.{2,}|…{2,}|[·•∙]{2,}|\s+\d{1,4}$/.test(normalizedLine))
+    if (looksLikeContentsLine) return
+
+    headings.push({
+      ...heading,
+      offset: lineStart
+    })
+  })
+
+  return {
+    lectures: buildTextLecturePageRanges(headings, estimatedPageCount),
+    pageCount: estimatedPageCount
+  }
+}
+
+function matchTextLectureHeadingLine(line, pageNumber) {
+  if (!line || line.length > 160) return null
+
+  const chineseMatch = line.match(/第\s*([零〇一二两三四五六七八九十百\d]{1,8})\s*(讲|课|章|节)\s*[:：、，.．\-—_ ]*\s*(.{0,80})$/)
+  if (chineseMatch) {
+    return buildTextLectureHeading({
+      pageNumber,
+      rawNumber: chineseMatch[1],
+      unit: chineseMatch[2],
+      marker: `第${chineseMatch[1]}${chineseMatch[2]}`,
+      title: chineseMatch[3]
+    })
+  }
+
+  const lessonMatch = line.match(/\b(Lesson|Lecture)\s*([0-9]{1,3})\s*[:：.．\-—_ ]*\s*(.{0,80})$/i)
+  if (lessonMatch) {
+    return buildTextLectureHeading({
+      pageNumber,
+      rawNumber: lessonMatch[2],
+      unit: lessonMatch[1],
+      marker: `${lessonMatch[1]} ${lessonMatch[2]}`,
+      title: lessonMatch[3]
+    })
+  }
+
+  const topicMatch = line.match(/专题\s*([零〇一二两三四五六七八九十百\d]{1,8})\s*[:：、，.．\-—_ ]*\s*(.{0,80})$/)
+  if (topicMatch) {
+    return buildTextLectureHeading({
+      pageNumber,
+      rawNumber: topicMatch[1],
+      unit: '专题',
+      marker: `专题${topicMatch[1]}`,
+      title: topicMatch[2]
+    })
+  }
+
+  return null
+}
+
+function buildTextLectureHeading({ pageNumber, rawNumber, unit, marker, title }) {
+  const normalizedNumber = normalizeTextLectureNumber(rawNumber)
+  const cleanTitle = cleanTextLectureHeadingTitle(title)
+  const headingTitle = cleanTitle ? `${marker} ${cleanTitle}` : marker
+
+  return {
+    pageNumber,
+    number: normalizedNumber,
+    unit,
+    key: normalizedNumber ? `${unit}-${normalizedNumber}` : `${unit}-${marker}`,
+    title: headingTitle
+  }
+}
+
+function cleanTextLectureHeadingTitle(value) {
+  let title = String(value || '').replace(/\s+/g, ' ').trim()
+  const nextHeadingIndex = title.search(/\s第\s*[零〇一二两三四五六七八九十百\d]{1,8}\s*(讲|课|章|节)/)
+  if (nextHeadingIndex > 0) title = title.slice(0, nextHeadingIndex)
+
+  return title
+    .replace(/\.{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/…{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/[·•∙]{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/\s+(?:P\.?\s*)?\d{1,4}\s*$/i, '')
+    .replace(/^[：:、，,.\-—_]+/, '')
+    .trim()
+    .slice(0, 60)
+}
+
+function normalizeTextLectureNumber(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return 0
+  if (/^\d+$/.test(raw)) return Number(raw)
+  return chineseTextNumberToNumber(raw)
+}
+
+function chineseTextNumberToNumber(value) {
+  const map = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9
+  }
+  const text = String(value || '').replace(/[零〇]/g, '')
+  if (!text) return 0
+  if (text.includes('百')) {
+    const [hundredsText, restText = ''] = text.split('百')
+    const hundreds = hundredsText ? map[hundredsText] || 0 : 1
+    return hundreds * 100 + chineseTextNumberToNumber(restText)
+  }
+  if (text.includes('十')) {
+    const [tensText, onesText = ''] = text.split('十')
+    const tens = tensText ? map[tensText] || 0 : 1
+    const ones = onesText ? map[onesText] || 0 : 0
+    return tens * 10 + ones
+  }
+  return map[text] || 0
+}
+
+function buildTextLecturePageRanges(headings, pageCount) {
+  const lectures = []
+
+  headings
+    .sort((left, right) => left.pageNumber - right.pageNumber || left.offset - right.offset)
+    .forEach((heading) => {
+      const previous = lectures[lectures.length - 1]
+      if (previous && previous.key === heading.key) return
+      const duplicatedIndex = lectures.findIndex((lecture) => lecture.key === heading.key)
+      if (duplicatedIndex >= 0) {
+        const duplicated = lectures[duplicatedIndex]
+        const duplicatedLooksLikeContents = Number(duplicated.offset || 0) < 4200
+          && Number(heading.offset || 0) > Number(duplicated.offset || 0)
+        if (duplicatedLooksLikeContents) {
+          lectures[duplicatedIndex] = {
+            ...duplicated,
+            startPage: Math.max(1, Math.min(pageCount, heading.pageNumber)),
+            endPage: pageCount,
+            offset: heading.offset
+          }
+        }
+        return
+      }
+
+      lectures.push({
+        key: heading.key,
+        title: heading.title,
+        startPage: Math.max(1, Math.min(pageCount, heading.pageNumber)),
+        endPage: pageCount,
+        offset: heading.offset
+      })
+    })
+
+  if (lectures.length <= 1) return []
+
+  return lectures.map((lecture, index) => ({
+    key: lecture.key,
+    title: lecture.title,
+    startPage: lecture.startPage,
+    endPage: lectures[index + 1] ? Math.max(lecture.startPage, lectures[index + 1].startPage - 1) : pageCount
+  }))
+}
+
 async function normalizeCoursewareUploads(files, storedMaterialFile, payload = {}, pdfPageImages = []) {
   const uploadFiles = Array.isArray(files) ? files : []
   if (!uploadFiles.length && storedMaterialFile) {
@@ -3734,6 +3960,9 @@ function extractPptxText(buffer) {
 
 function xmlToText(xml) {
   return String(xml || '')
+    .replace(/<w:br\s*\/>/g, '\n')
+    .replace(/<\/w:p>/g, '\n')
+    .replace(/<w:tab\s*\/>/g, ' ')
     .replace(/<a:br\s*\/>/g, '\n')
     .replace(/<\/a:p>/g, '\n')
     .replace(/<[^>]+>/g, ' ')

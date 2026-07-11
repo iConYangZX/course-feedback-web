@@ -2182,9 +2182,7 @@ textarea:focus {
 }
 
 .pdf-page-selection {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: block;
   gap: 12px;
   margin: -4px 0 16px;
   padding: 12px 14px;
@@ -2198,15 +2196,35 @@ textarea:focus {
 
 .courseware-selection-list {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
 }
 
 .courseware-selection-item {
   display: grid;
-  grid-template-columns: auto minmax(140px, 1fr) minmax(120px, auto) auto auto;
+  grid-template-columns: minmax(66px, auto) minmax(160px, 1fr) minmax(180px, 240px) minmax(170px, auto) auto;
   align-items: center;
-  gap: 10px;
+  gap: 10px 12px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(36, 48, 89, 0.08);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.courseware-selection-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #454866;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.courseware-selection-main {
+  display: grid;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -2223,17 +2241,47 @@ textarea:focus {
   font-weight: 700;
 }
 
-.courseware-word-range {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.courseware-selection-loading,
+.courseware-selection-placeholder {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
 }
 
+.courseware-lecture-select {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.courseware-lecture-select select {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 28px 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: #252842;
+  font: inherit;
+  font-weight: 800;
+}
+
+.courseware-word-range {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .courseware-word-range input {
-  width: 58px;
+  width: 64px;
   min-height: 34px;
   padding: 5px 7px;
   border: 1px solid var(--line);
@@ -2426,10 +2474,18 @@ textarea:focus {
   }
 
   .courseware-selection-meta,
+  .courseware-selection-main,
+  .courseware-lecture-select,
+  .courseware-selection-loading,
+  .courseware-selection-placeholder,
   .courseware-word-range,
-  .courseware-selection-item .compact-button,
   .courseware-selection-item .list-delete-button {
     grid-column: 2;
+  }
+
+  .courseware-word-range {
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .modal-backdrop {

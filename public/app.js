@@ -465,18 +465,18 @@ function bindEvents() {
     els.exitTestTable.addEventListener('input', handleExitTestInput)
     els.exitTestTable.addEventListener('change', handleExitTestInput)
   }
-  els.pdfPageSelectBtn.addEventListener('click', openPdfPageSelection)
-  els.pdfPageSelectAllBtn.addEventListener('click', selectAllPdfPages)
-  els.pdfPageSelectNoneBtn.addEventListener('click', clearPdfPages)
-  els.pdfPageCancelBtn.addEventListener('click', cancelPdfPageSelection)
-  els.pdfPageConfirmBtn.addEventListener('click', confirmPdfPageSelection)
-  els.pdfPageModalCloseBtn.addEventListener('click', closePdfPageModal)
-  els.pdfPageModal.addEventListener('click', (event) => {
+  if (els.pdfPageSelectBtn) els.pdfPageSelectBtn.addEventListener('click', openPdfPageSelection)
+  if (els.pdfPageSelectAllBtn) els.pdfPageSelectAllBtn.addEventListener('click', selectAllPdfPages)
+  if (els.pdfPageSelectNoneBtn) els.pdfPageSelectNoneBtn.addEventListener('click', clearPdfPages)
+  if (els.pdfPageCancelBtn) els.pdfPageCancelBtn.addEventListener('click', cancelPdfPageSelection)
+  if (els.pdfPageConfirmBtn) els.pdfPageConfirmBtn.addEventListener('click', confirmPdfPageSelection)
+  if (els.pdfPageModalCloseBtn) els.pdfPageModalCloseBtn.addEventListener('click', closePdfPageModal)
+  if (els.pdfPageModal) els.pdfPageModal.addEventListener('click', (event) => {
     if (event.target === els.pdfPageModal) closePdfPageModal()
   })
-  els.pdfPageGrid.addEventListener('change', updatePdfPageSelectionFromGrid)
-  els.pdfPageGrid.addEventListener('click', handlePdfPageGridClick)
-  els.pdfLectureSelect.addEventListener('change', applySelectedPdfLecture)
+  if (els.pdfPageGrid) els.pdfPageGrid.addEventListener('change', updatePdfPageSelectionFromGrid)
+  if (els.pdfPageGrid) els.pdfPageGrid.addEventListener('click', handlePdfPageGridClick)
+  if (els.pdfLectureSelect) els.pdfLectureSelect.addEventListener('change', applySelectedPdfLecture)
   els.rearrangeUploadBtn.addEventListener('click', () => els.rearrangeFileInput.click())
   els.rearrangeTitleInput.addEventListener('input', renderQuestionPreview)
   els.rearrangeFileInput.addEventListener('change', (event) => {
@@ -5676,7 +5676,7 @@ async function generateFeedback() {
         payload.coursewareMeta[index] = {
           fileIndex: index,
           fileName: file.name,
-          selectedPdfPages: item && item.isWord ? buildWordSelectedPages(item) : [],
+          selectedPdfPages: item ? buildCoursewareSelectedPagesFromRange(item) : [],
           clientPdfText: ''
         }
       }
@@ -5879,6 +5879,22 @@ function isWordFile(fileOrName) {
   return /\.(doc|docx)$/i.test(name)
 }
 
+function isTextCoursewareFile(fileOrName) {
+  const name = typeof fileOrName === 'string' ? fileOrName : String(fileOrName && fileOrName.name || '')
+  return /\.(doc|docx|pptx|txt|md)$/i.test(name)
+}
+
+function isImageCoursewareFile(fileOrName) {
+  const file = typeof fileOrName === 'string' ? null : fileOrName
+  const name = typeof fileOrName === 'string' ? fileOrName : String(fileOrName && fileOrName.name || '')
+  const type = String(file && file.type || '')
+  return type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(name)
+}
+
+function supportsCoursewarePageRange(item) {
+  return Boolean(item && (item.isPdf || item.isTextDocument))
+}
+
 async function handleCoursewareChange() {
   const addedFiles = els.coursewareInput && els.coursewareInput.files
     ? Array.from(els.coursewareInput.files)
@@ -5888,13 +5904,17 @@ async function handleCoursewareChange() {
   const files = getCoursewareFiles()
   const pdfFiles = files.filter(isPdfFile)
   updateFilePicker(els.coursewareInput, els.coursewareFileName)
+  syncCoursewareSelectionItems(files)
+  renderPdfPageSelection()
 
   if (pdfFiles.length) {
-    await loadPdfPageSelections(pdfFiles, true)
+    await loadPdfPageSelections(pdfFiles, false)
     syncCoursewareSelectionItems(files)
-    return
+    renderPdfPageSelection()
   }
 
+  const textFiles = files.filter((file) => isTextCoursewareFile(file))
+  await detectCoursewareTextLectures(textFiles)
   syncCoursewareSelectionItems(files)
   renderPdfPageSelection()
 }
@@ -5976,6 +5996,7 @@ async function loadPdfPageSelections(files, openWhenReady = false) {
     return
   }
 
+  const previousItems = new Map((state.pdfSelection.items || []).map((item) => [item.fileKey, item]))
   state.pdfSelection = {
     items: files.map((file) => ({
       fileKey: getFileKey(file),
@@ -5995,7 +6016,7 @@ async function loadPdfPageSelections(files, openWhenReady = false) {
     lectures: [],
     selectedLectureIndex: '',
     loading: true,
-    isOpen: true,
+    isOpen: false,
     error: ''
   }
   renderPdfPageSelection()
@@ -6005,13 +6026,24 @@ async function loadPdfPageSelections(files, openWhenReady = false) {
     for (const file of files) {
       items.push(await loadPdfSelectionItem(file))
     }
-    const active = items[0] || {}
+    const loaded = new Map(items.map((item) => [item.fileKey, item]))
+    const mergedItems = getCoursewareFiles().map((file) => {
+      const fileKey = getFileKey(file)
+      return createCoursewareSelectionItem(file, {
+        ...(previousItems.get(fileKey) || {}),
+        ...(loaded.get(fileKey) || {})
+      })
+    })
+    const active = mergedItems.find((item) => item.fileKey === state.pdfSelection.activeFileKey && item.isPdf)
+      || mergedItems.find((item) => item.isPdf)
+      || {}
     state.pdfSelection = {
+      ...state.pdfSelection,
       ...active,
-      items,
+      items: mergedItems,
       activeFileKey: active.fileKey || '',
       loading: false,
-      isOpen: openWhenReady
+      isOpen: Boolean(openWhenReady)
     }
     renderPdfPageSelection()
 
@@ -6044,9 +6076,66 @@ async function loadPdfSelectionItem(file) {
     selectedPages,
     lectures,
     selectedLectureIndex: firstLecture ? '0' : '',
+    rangeStartPage: selectedPages[0] || 1,
+    rangeEndPage: selectedPages[selectedPages.length - 1] || pageCount || '',
     loading: false,
     isOpen: false,
     error: ''
+  }
+}
+
+async function detectCoursewareTextLectures(files) {
+  const candidates = files
+    .map((file) => ({
+      file,
+      item: (state.pdfSelection.items || []).find((entry) => entry.fileKey === getFileKey(file))
+    }))
+    .filter(({ item }) => item && !item.lectureDetectionDone && !item.loading)
+
+  if (!candidates.length) return
+
+  candidates.forEach(({ item }) => {
+    item.loading = true
+    item.error = ''
+  })
+  renderPdfPageSelection()
+
+  for (const { file } of candidates) {
+    const fileKey = getFileKey(file)
+    const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+    if (!item) continue
+
+    try {
+      const formData = new FormData()
+      formData.append('courseware', file)
+      const response = await fetch('/api/courseware-lectures', {
+        method: 'POST',
+        body: formData
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || '讲次识别失败')
+
+      const nextItem = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+      if (!nextItem) continue
+
+      nextItem.lectures = Array.isArray(data.lectures) ? data.lectures : []
+      nextItem.pageCount = Number(data.pageCount || 0)
+      nextItem.loading = false
+      nextItem.lectureDetectionDone = true
+      nextItem.error = ''
+
+      if (nextItem.lectures.length > 1 && !nextItem.selectedLectureIndex && !nextItem.selectedPages.length) {
+        applyCoursewareLectureSelection(nextItem, '0')
+      }
+    } catch (error) {
+      const nextItem = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+      if (nextItem) {
+        nextItem.loading = false
+        nextItem.lectureDetectionDone = true
+        nextItem.error = '未能自动识别讲次，可手动输入页码'
+      }
+    }
+    renderPdfPageSelection()
   }
 }
 
@@ -6120,36 +6209,7 @@ function handlePdfPageGridClick(event) {
 
 function syncCoursewareSelectionItems(files = getCoursewareFiles()) {
   const existed = new Map((state.pdfSelection.items || []).map((item) => [item.fileKey, item]))
-  const nextItems = files.map((file) => {
-    const fileKey = getFileKey(file)
-    const previous = existed.get(fileKey)
-    if (previous) {
-      return {
-        ...previous,
-        fileName: file.name,
-        isPdf: isPdfFile(file),
-        isWord: isWordFile(file),
-        wordStartPage: previous.wordStartPage || 1,
-        wordEndPage: previous.wordEndPage || '',
-        included: previous.included !== false
-      }
-    }
-    return {
-      fileKey,
-      fileName: file.name,
-      isPdf: isPdfFile(file),
-      isWord: isWordFile(file),
-      included: true,
-      wordStartPage: 1,
-      wordEndPage: '',
-      pageCount: 0,
-      selectedPages: [],
-      lectures: [],
-      selectedLectureIndex: '',
-      loading: false,
-      error: ''
-    }
-  })
+  const nextItems = files.map((file) => createCoursewareSelectionItem(file, existed.get(getFileKey(file))))
   const active = nextItems.find((item) => item.fileKey === state.pdfSelection.activeFileKey && item.isPdf)
     || nextItems.find((item) => item.isPdf)
   state.pdfSelection.items = nextItems
@@ -6162,19 +6222,68 @@ function syncCoursewareSelectionItems(files = getCoursewareFiles()) {
   }
 }
 
+function createCoursewareSelectionItem(file, previous = null) {
+  const fileKey = getFileKey(file)
+  const isPdf = isPdfFile(file)
+  const isTextDocument = isTextCoursewareFile(file)
+  const rangeStartPage = previous && previous.rangeStartPage !== undefined
+    ? previous.rangeStartPage
+    : (previous && previous.wordStartPage !== undefined ? previous.wordStartPage : '')
+  const rangeEndPage = previous && previous.rangeEndPage !== undefined
+    ? previous.rangeEndPage
+    : (previous && previous.wordEndPage !== undefined ? previous.wordEndPage : '')
+
+  return {
+    ...(previous || {}),
+    fileKey,
+    fileName: file.name,
+    isPdf,
+    isWord: isWordFile(file),
+    isTextDocument,
+    isImage: isImageCoursewareFile(file),
+    included: previous ? previous.included !== false : true,
+    rangeStartPage,
+    rangeEndPage,
+    wordStartPage: rangeStartPage || 1,
+    wordEndPage: rangeEndPage || '',
+    pageCount: Number(previous && previous.pageCount || 0),
+    selectedPages: Array.isArray(previous && previous.selectedPages) ? previous.selectedPages.slice() : [],
+    lectures: Array.isArray(previous && previous.lectures) ? previous.lectures.slice() : [],
+    selectedLectureIndex: previous && previous.selectedLectureIndex !== undefined ? previous.selectedLectureIndex : '',
+    loading: Boolean(previous && previous.loading),
+    lectureDetectionDone: Boolean(previous && previous.lectureDetectionDone),
+    error: previous && previous.error ? previous.error : ''
+  }
+}
+
 function handleCoursewareSelectionChange(event) {
+  const isRelevantControl = event.target.matches('[data-courseware-include]')
+    || event.target.matches('[data-courseware-range]')
+    || event.target.matches('[data-courseware-lecture]')
+  if (!isRelevantControl) return
+
   if (event.target.matches('[data-courseware-include]')) {
     const fileKey = event.target.dataset.coursewareInclude
     const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
     if (item) item.included = event.target.checked
   }
-  if (event.target.matches('[data-courseware-word-range]')) {
-    const fileKey = event.target.dataset.coursewareWordRange
+  if (event.target.matches('[data-courseware-range]')) {
+    const fileKey = event.target.dataset.coursewareRange
     const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
     if (item) {
-      if (event.target.dataset.rangeField === 'start') item.wordStartPage = Math.max(1, Number(event.target.value || 1))
-      if (event.target.dataset.rangeField === 'end') item.wordEndPage = event.target.value ? Math.max(1, Number(event.target.value)) : ''
-      item.selectedPages = buildWordSelectedPages(item)
+      if (event.target.dataset.rangeField === 'start') item.rangeStartPage = normalizeRangeInputValue(event.target.value)
+      if (event.target.dataset.rangeField === 'end') item.rangeEndPage = normalizeRangeInputValue(event.target.value)
+      item.wordStartPage = item.rangeStartPage || 1
+      item.wordEndPage = item.rangeEndPage || ''
+      item.selectedLectureIndex = ''
+      item.selectedPages = buildCoursewareSelectedPagesFromRange(item)
+    }
+  }
+  if (event.target.matches('[data-courseware-lecture]')) {
+    const fileKey = event.target.dataset.coursewareLecture
+    const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+    if (item) {
+      applyCoursewareLectureSelection(item, event.target.value)
     }
   }
   renderPdfPageSelection()
@@ -6187,18 +6296,20 @@ function handleCoursewareSelectionClick(event) {
     renderPdfPageSelection()
     return
   }
-  const button = event.target.closest('[data-courseware-page-key]')
-  if (!button) return
-  setActivePdfSelection(button.dataset.coursewarePageKey)
-  state.pdfSelection.isOpen = true
-  renderPdfPageSelection()
 }
 
 function removeCoursewareFile(fileKey) {
   state.coursewareFiles = getCoursewareFiles().filter((file) => getFileKey(file) !== fileKey)
   state.pdfSelection.items = (state.pdfSelection.items || []).filter((item) => item.fileKey !== fileKey)
   const active = state.pdfSelection.items.find((item) => item.isPdf)
-  if (active) setActivePdfSelection(active.fileKey)
+  if (active) {
+    state.pdfSelection = {
+      ...state.pdfSelection,
+      ...active,
+      activeFileKey: active.fileKey,
+      isOpen: false
+    }
+  }
   else {
     state.pdfSelection = {
       ...state.pdfSelection,
@@ -6217,11 +6328,54 @@ function removeCoursewareFile(fileKey) {
   updateFilePicker(els.coursewareInput, els.coursewareFileName)
 }
 
+function normalizeRangeInputValue(value) {
+  if (value === '' || value === null || value === undefined) return ''
+  const number = Math.max(1, Math.floor(Number(value) || 1))
+  return Number.isFinite(number) ? number : ''
+}
+
 function buildWordSelectedPages(item) {
-  const start = Math.max(1, Number(item.wordStartPage || 1))
-  const end = Number(item.wordEndPage || 0)
-  if (!end || end < start) return [start]
-  return buildPageRange(start, end)
+  return buildCoursewareSelectedPagesFromRange(item)
+}
+
+function buildCoursewareSelectedPagesFromRange(item) {
+  if (!supportsCoursewarePageRange(item)) return []
+
+  const start = normalizeRangeInputValue(item.rangeStartPage)
+  const end = normalizeRangeInputValue(item.rangeEndPage)
+  const pageCount = Math.max(0, Number(item.pageCount || 0))
+
+  if (!start && !end) return []
+
+  const left = start || 1
+  const right = end || pageCount || left
+  return buildPageRange(Math.min(left, right), Math.max(left, right))
+}
+
+function applyCoursewareLectureSelection(item, selectedValue) {
+  if (selectedValue === '' || selectedValue === null || selectedValue === undefined) {
+    item.selectedLectureIndex = ''
+    item.selectedPages = buildCoursewareSelectedPagesFromRange(item)
+    return
+  }
+
+  const index = Number(selectedValue)
+  const lecture = Array.isArray(item.lectures) && Number.isInteger(index)
+    ? item.lectures[index]
+    : null
+
+  if (!lecture) {
+    item.selectedLectureIndex = ''
+    item.selectedPages = buildCoursewareSelectedPagesFromRange(item)
+    return
+  }
+
+  item.selectedLectureIndex = String(index)
+  item.rangeStartPage = lecture.startPage
+  item.rangeEndPage = lecture.endPage
+  item.wordStartPage = lecture.startPage
+  item.wordEndPage = lecture.endPage
+  item.selectedPages = buildPageRange(lecture.startPage, lecture.endPage)
 }
 
 function setActivePdfSelection(fileKey) {
@@ -6249,6 +6403,8 @@ function syncActivePdfSelectionItem() {
     selectedPages: state.pdfSelection.selectedPages.slice(),
     lectures: state.pdfSelection.lectures.slice(),
     selectedLectureIndex: state.pdfSelection.selectedLectureIndex,
+    rangeStartPage: state.pdfSelection.rangeStartPage || '',
+    rangeEndPage: state.pdfSelection.rangeEndPage || '',
     loading: state.pdfSelection.loading,
     error: state.pdfSelection.error
   }
@@ -6267,6 +6423,8 @@ function syncPdfPageRangeInputs() {
 
   state.pdfSelection.selectedPages = buildPageRange(left, right)
   state.pdfSelection.selectedLectureIndex = ''
+  state.pdfSelection.rangeStartPage = left
+  state.pdfSelection.rangeEndPage = right
   syncActivePdfSelectionItem()
 }
 
@@ -6274,17 +6432,14 @@ function renderPdfPageSelection() {
   if (!els.pdfPageSelectionBar || !els.pdfPageModal) return
 
   syncCoursewareSelectionItems()
-  const pdfFiles = getCoursewareFiles().filter(isPdfFile)
   const hasFiles = Boolean(getCoursewareFiles().length)
 
   els.pdfPageSelectionBar.classList.toggle('hidden', !hasFiles)
 
   if (hasFiles) {
     els.pdfPageSelectionText.innerHTML = renderCoursewareSelectionList()
-    els.pdfPageSelectBtn.textContent = '选择PDF页面'
-    els.pdfPageSelectBtn.classList.toggle('hidden', !pdfFiles.length)
-    els.pdfPageSelectBtn.disabled = state.pdfSelection.loading || !pdfFiles.length
   }
+  if (els.pdfPageSelectBtn) els.pdfPageSelectBtn.classList.add('hidden')
 
   renderPdfPageModal()
 }
@@ -6295,16 +6450,16 @@ function renderCoursewareSelectionList() {
     <div class="courseware-selection-list">
       ${items.map((item) => `
         <div class="courseware-selection-item">
-          <input data-courseware-include="${escapeHtml(item.fileKey)}" type="checkbox" ${item.included === false ? '' : 'checked'} />
-          <span class="courseware-selection-name">${escapeHtml(item.fileName)}</span>
-          <span class="courseware-selection-meta">${escapeHtml(getCoursewareSelectionMeta(item))}</span>
-          ${item.isWord ? `
-            <span class="courseware-word-range">
-              第 <input data-courseware-word-range="${escapeHtml(item.fileKey)}" data-range-field="start" type="number" min="1" value="${escapeHtml(item.wordStartPage || 1)}" /> 到
-              <input data-courseware-word-range="${escapeHtml(item.fileKey)}" data-range-field="end" type="number" min="1" value="${escapeHtml(item.wordEndPage || '')}" placeholder="末页" /> 页
-            </span>
-          ` : ''}
-          ${item.isPdf ? `<button class="secondary-button compact-button" data-courseware-page-key="${escapeHtml(item.fileKey)}" type="button">选择页码</button>` : ''}
+          <label class="courseware-selection-check">
+            <input data-courseware-include="${escapeHtml(item.fileKey)}" type="checkbox" ${item.included === false ? '' : 'checked'} />
+            <span>读取</span>
+          </label>
+          <div class="courseware-selection-main">
+            <span class="courseware-selection-name">${escapeHtml(item.fileName)}</span>
+            <span class="courseware-selection-meta">${escapeHtml(getCoursewareSelectionMeta(item))}</span>
+          </div>
+          ${renderCoursewareLectureControl(item)}
+          ${renderCoursewareRangeControl(item)}
           <button class="list-delete-button" data-courseware-remove="${escapeHtml(item.fileKey)}" type="button">移除</button>
         </div>
       `).join('')}
@@ -6312,14 +6467,83 @@ function renderCoursewareSelectionList() {
   `
 }
 
+function renderCoursewareLectureControl(item) {
+  const lectures = Array.isArray(item.lectures) ? item.lectures : []
+  if (!supportsCoursewarePageRange(item)) return '<div class="courseware-selection-placeholder"></div>'
+  if (item.loading) return '<div class="courseware-selection-loading">正在识别讲次...</div>'
+  if (item.error && supportsCoursewarePageRange(item)) {
+    return `<div class="courseware-selection-loading">${escapeHtml(item.error)}</div>`
+  }
+  if (lectures.length <= 1) return '<div class="courseware-selection-placeholder">未检测到多讲</div>'
+
+  return `
+    <label class="courseware-lecture-select">
+      <span>按讲次</span>
+      <select data-courseware-lecture="${escapeHtml(item.fileKey)}">
+        <option value="">手动输入页码</option>
+        ${lectures.map((lecture, index) => {
+          const selected = String(index) === String(item.selectedLectureIndex) ? ' selected' : ''
+          return `<option value="${index}"${selected}>${escapeHtml(getPdfLectureOptionLabel(lecture))}</option>`
+        }).join('')}
+      </select>
+    </label>
+  `
+}
+
+function renderCoursewareRangeControl(item) {
+  if (!supportsCoursewarePageRange(item)) {
+    return '<div class="courseware-selection-placeholder">将读取全文</div>'
+  }
+
+  const startValue = getCoursewareRangeInputValue(item, 'start')
+  const endValue = getCoursewareRangeInputValue(item, 'end')
+  const maxAttribute = item.pageCount ? ` max="${escapeHtml(item.pageCount)}"` : ''
+
+  return `
+    <div class="courseware-word-range">
+      <span>手动页码</span>
+      <input data-courseware-range="${escapeHtml(item.fileKey)}" data-range-field="start" type="number" min="1"${maxAttribute} value="${escapeHtml(startValue)}" placeholder="开始" />
+      <span>-</span>
+      <input data-courseware-range="${escapeHtml(item.fileKey)}" data-range-field="end" type="number" min="1"${maxAttribute} value="${escapeHtml(endValue)}" placeholder="结束" />
+      <span>页</span>
+    </div>
+  `
+}
+
+function getCoursewareRangeInputValue(item, field) {
+  const value = field === 'start' ? item.rangeStartPage : item.rangeEndPage
+  if (value !== '' && value !== null && value !== undefined) return value
+
+  if (item.isPdf && Array.isArray(item.selectedPages) && item.selectedPages.length) {
+    return field === 'start'
+      ? item.selectedPages[0]
+      : item.selectedPages[item.selectedPages.length - 1]
+  }
+
+  return ''
+}
+
 function getCoursewareSelectionMeta(item) {
+  if (item.loading) return '正在识别讲次'
+  if (item.error) return item.error
   if (item.isPdf) return getPdfReadSummary(item)
-  if (item.isWord) {
-    const start = Number(item.wordStartPage || 1)
-    const end = Number(item.wordEndPage || 0)
-    return end ? `将读取第 ${start}-${end} 页` : `将从第 ${start} 页读到文末`
+  if (supportsCoursewarePageRange(item)) {
+    const lecture = getSelectedCoursewareLecture(item)
+    if (lecture) return `读取 ${lecture.title}（约第 ${lecture.startPage}-${lecture.endPage} 页）`
+    const selectedPages = Array.isArray(item.selectedPages) ? item.selectedPages : []
+    if (selectedPages.length) return `将读取约第 ${formatPageRanges(selectedPages)} 页`
+    return item.pageCount ? `将读取全文（约 ${item.pageCount} 页）` : '将读取全文'
   }
   return '将读取全文'
+}
+
+function getSelectedCoursewareLecture(item) {
+  if (!item || item.selectedLectureIndex === '' || item.selectedLectureIndex === null || item.selectedLectureIndex === undefined) {
+    return null
+  }
+  const index = Number(item && item.selectedLectureIndex)
+  if (!Number.isInteger(index)) return null
+  return Array.isArray(item.lectures) ? item.lectures[index] : null
 }
 
 function renderPdfPageModal() {
@@ -6397,6 +6621,13 @@ function renderPdfLecturePicker(selection) {
 }
 
 function applySelectedPdfLecture() {
+  if (els.pdfLectureSelect.value === '') {
+    state.pdfSelection.selectedLectureIndex = ''
+    syncActivePdfSelectionItem()
+    renderPdfPageSelection()
+    return
+  }
+
   const index = Number(els.pdfLectureSelect.value)
   const lecture = state.pdfSelection.lectures[index]
 
@@ -6409,11 +6640,16 @@ function applySelectedPdfLecture() {
 
   state.pdfSelection.selectedLectureIndex = String(index)
   state.pdfSelection.selectedPages = buildPageRange(lecture.startPage, lecture.endPage)
+  state.pdfSelection.rangeStartPage = lecture.startPage
+  state.pdfSelection.rangeEndPage = lecture.endPage
   syncActivePdfSelectionItem()
   renderPdfPageSelection()
 }
 
 function getSelectedPdfLecture(selection = state.pdfSelection) {
+  if (!selection || selection.selectedLectureIndex === '' || selection.selectedLectureIndex === null || selection.selectedLectureIndex === undefined) {
+    return null
+  }
   const index = Number(selection.selectedLectureIndex)
   return Number.isInteger(index) ? selection.lectures[index] : null
 }
