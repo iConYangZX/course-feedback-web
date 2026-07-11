@@ -1772,13 +1772,17 @@ function normalizePaperAnalysisHistory(history) {
       examType: trim(source.examType),
       fileName: trim(source.fileName),
       scope: ['class', 'one', 'single'].includes(trim(source.scope)) ? trim(source.scope) : 'single',
+      classId: trim(source.classId),
+      profileId: trim(source.profileId),
       targetName: trim(source.targetName),
+      date: trim(source.date),
       totalScore: Number(source.totalScore || 0),
       classAverageTotal: Number(source.classAverageTotal || 0),
       sections: Array.isArray(source.sections) ? source.sections : [],
       questionAverages: source.questionAverages && typeof source.questionAverages === 'object' ? source.questionAverages : {},
       students: Array.isArray(source.students) ? source.students : [],
       summary: trim(source.summary),
+      applied: Boolean(source.applied),
       createdAt: Number(source.createdAt || Date.now())
     }
   }).slice(0, 80) : []

@@ -1368,6 +1368,12 @@ textarea:focus {
   gap: 14px;
 }
 
+.teaching-content {
+  color: #2e324d;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
 .teaching-grid {
   display: grid;
   gap: 16px;
@@ -1394,8 +1400,10 @@ textarea:focus {
 }
 
 .teaching-title {
-  font-size: 16px;
+  letter-spacing: 0;
+  font-size: 15px;
   font-weight: 850;
+  line-height: 1.4;
 }
 
 .teaching-meta {
@@ -1429,7 +1437,8 @@ textarea:focus {
 .teaching-data-columns strong {
   display: block;
   margin-bottom: 8px;
-  font-size: 14px;
+  color: #20233b;
+  font-size: 13px;
 }
 
 .teaching-data-list {
@@ -1445,6 +1454,12 @@ textarea:focus {
 .teaching-empty-line {
   color: var(--muted);
   font-size: 13px;
+}
+
+.inline-actions {
+  align-items: center;
+  flex-direction: row;
+  gap: 8px;
 }
 
 .compact-empty {

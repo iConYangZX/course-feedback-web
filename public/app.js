@@ -218,6 +218,7 @@ function bindElements() {
     teachingTabs: document.querySelectorAll('.teaching-tab'),
     teachingContent: document.querySelector('#teachingContent'),
     teachingRefreshBtn: document.querySelector('#teachingRefreshBtn'),
+    teachingSyncBtn: document.querySelector('#teachingSyncBtn'),
     teachingPrintBtn: document.querySelector('#teachingPrintBtn'),
     teachingScreenshotBtn: document.querySelector('#teachingScreenshotBtn'),
     teachingRestoreInput: document.querySelector('#teachingRestoreInput'),
@@ -327,7 +328,6 @@ function bindElements() {
     debugSummary: document.querySelector('#debugSummary'),
     teachingApplyBar: document.querySelector('#teachingApplyBar'),
     applyTeachingDataBtn: document.querySelector('#applyTeachingDataBtn'),
-    teachingApplyHint: document.querySelector('#teachingApplyHint'),
     resultList: document.querySelector('#resultList'),
     imageReportPanel: document.querySelector('#imageReportPanel'),
     imageReportPreview: document.querySelector('#imageReportPreview'),
@@ -364,6 +364,7 @@ function bindEvents() {
   els.createUserBtn.addEventListener('click', createAdminUser)
   els.adminUserList.addEventListener('click', handleAdminUserAction)
   if (els.teachingRefreshBtn) els.teachingRefreshBtn.addEventListener('click', loadTeachingData)
+  if (els.teachingSyncBtn) els.teachingSyncBtn.addEventListener('click', syncTeachingProfiles)
   if (els.teachingPrintBtn) els.teachingPrintBtn.addEventListener('click', () => window.print())
   if (els.teachingScreenshotBtn) els.teachingScreenshotBtn.addEventListener('click', captureTeachingPanel)
   if (els.teachingRestoreInput) els.teachingRestoreInput.addEventListener('change', restoreTeachingBackup)
@@ -946,6 +947,12 @@ function persistTeachingCache() {
   localStorage.setItem(TEACHING_CACHE_KEY, JSON.stringify(state.teaching.data))
 }
 
+async function syncTeachingProfiles() {
+  mergePrimaryIntoTeachingData()
+  await saveTeachingData()
+  renderTeachingPanel()
+}
+
 async function saveTeachingData(options = {}) {
   state.teaching.data.updatedAt = Date.now()
   persistTeachingCache()
@@ -1051,8 +1058,9 @@ function renderTeachingPanel() {
   const tabsBar = els.teachingPanel.querySelector('.teaching-tabs')
 
   if (headingEyebrow) headingEyebrow.textContent = isPaperTool ? 'Paper Analysis' : 'Teaching Data'
-  if (headingTitle) headingTitle.textContent = isPaperTool ? '试卷分析' : '教学数据工作台'
+  if (headingTitle) headingTitle.textContent = isPaperTool ? '试卷分析' : '教学数据'
   if (tabsBar) tabsBar.classList.toggle('hidden', isPaperTool)
+  if (els.teachingSyncBtn) els.teachingSyncBtn.classList.toggle('hidden', isPaperTool)
   if (els.teachingPrintBtn) els.teachingPrintBtn.classList.toggle('hidden', isPaperTool)
   if (els.teachingScreenshotBtn) els.teachingScreenshotBtn.classList.toggle('hidden', isPaperTool)
 
@@ -1093,8 +1101,7 @@ function renderTeachingClassData() {
     els.teachingContent.innerHTML = `
       <section class="teaching-card">
         <div class="teaching-title">班课教学数据</div>
-        <div class="student-empty">暂无班级档案。请先在反馈栏建立班级，或点击同步现有档案。</div>
-        <div class="panel-actions"><button class="primary-button" data-teaching-action="sync-primary" type="button">同步现有档案</button></div>
+        <div class="student-empty">暂无班级档案。请先在反馈栏建立班级，或点击顶部“同步档案”。</div>
       </section>
     `
     return
@@ -1109,7 +1116,6 @@ function renderTeachingClassData() {
             <div class="teaching-title">班课</div>
             <div class="teaching-meta">${classes.length} 个班级 · 已同步反馈档案</div>
           </div>
-          <button class="secondary-button compact-button" data-teaching-action="sync-primary" type="button">同步档案</button>
         </div>
         <div class="teaching-pill-list">
           ${classes.map((classInfo) => `
@@ -1187,8 +1193,7 @@ function renderTeachingOneData() {
     els.teachingContent.innerHTML = `
       <section class="teaching-card">
         <div class="teaching-title">一对一教学数据</div>
-        <div class="student-empty">暂无一对一档案。请先在反馈栏建立学生档案，或点击同步现有档案。</div>
-        <div class="panel-actions"><button class="primary-button" data-teaching-action="sync-primary" type="button">同步现有档案</button></div>
+        <div class="student-empty">暂无一对一档案。请先在反馈栏建立学生档案，或点击顶部“同步档案”。</div>
       </section>
     `
     return
@@ -1202,7 +1207,6 @@ function renderTeachingOneData() {
             <div class="teaching-title">一对一</div>
             <div class="teaching-meta">${profiles.length} 个学生档案</div>
           </div>
-          <button class="secondary-button compact-button" data-teaching-action="sync-primary" type="button">同步档案</button>
         </div>
         <div class="teaching-pill-list">
           ${profiles.map((profile) => `
@@ -1709,6 +1713,7 @@ function renderPaperReportArea() {
   const paper = getTeachingPaperState()
   const reports = Array.isArray(paper.report && paper.report.students) ? paper.report.students : []
   const isClass = paper.report && paper.report.scope === 'class'
+  const applied = Boolean(paper.report && paper.report.applied)
 
   if (isClass) {
     return `
@@ -1718,6 +1723,7 @@ function renderPaperReportArea() {
             <div class="teaching-title">学生 PDF 文档已准备</div>
             <div class="teaching-meta">班课会为每个学生生成一份单独的试卷分析 PDF，不合并成全班预览。</div>
           </div>
+          <button class="primary-button compact-button" data-teaching-action="apply-paper-report" type="button" ${applied ? 'disabled' : ''}>${applied ? '已应用' : '确认应用到教学数据'}</button>
         </div>
         <div class="paper-pdf-ready">
           <strong>${escapeHtml(paper.report.title || '试卷分析')}</strong>
@@ -1740,7 +1746,10 @@ function renderPaperReportArea() {
           <div class="teaching-title">PDF 文档已准备</div>
           <div class="teaching-meta">${reports.length} 名学生 · ${isClass ? '班课 PDF 已包含每题平均分' : '一对一/单独分析不显示班级平均分'}。</div>
         </div>
-        <button class="primary-button compact-button" data-teaching-action="export-paper-pdf" type="button">下载 PDF</button>
+        <div class="panel-actions inline-actions">
+          <button class="primary-button compact-button" data-teaching-action="apply-paper-report" type="button" ${applied ? 'disabled' : ''}>${applied ? '已应用' : '确认应用到教学数据'}</button>
+          <button class="secondary-button compact-button" data-teaching-action="export-paper-pdf" type="button">下载 PDF</button>
+        </div>
       </div>
       <div class="paper-pdf-ready">
         <strong>${escapeHtml(paper.report.title || '试卷分析')}</strong>
@@ -2073,10 +2082,13 @@ function generatePaperReport() {
   const report = {
     id: createId('paper-report'),
     scope: paper.scope,
+    classId: paper.scope === 'class' ? paper.selectedClassId : '',
+    profileId: paper.scope === 'one' ? paper.selectedProfileId : '',
     examType: paper.examType || '出门测',
     title: `${paper.examType || '出门测'} · ${paper.analysis.title || paper.fileName || '试卷分析'}`,
     fileName: paper.fileName,
     targetName: getPaperTargetName(),
+    date: getLocalDateKey(new Date()),
     totalScore,
     classAverageTotal,
     sections,
@@ -2087,7 +2099,6 @@ function generatePaperReport() {
   }
 
   paper.report = report
-  savePaperReportHistory(report)
   renderTeachingPanel()
   if (report.scope === 'class') {
     showToast('每个学生的单独 PDF 文档已生成')
@@ -2148,20 +2159,72 @@ function savePaperReportHistory(report) {
     examType: report.examType,
     fileName: report.fileName,
     scope: report.scope,
+    classId: report.classId || '',
+    profileId: report.profileId || '',
     targetName: report.targetName,
+    date: report.date || getLocalDateKey(new Date(report.createdAt || Date.now())),
     totalScore: report.totalScore,
     classAverageTotal: report.classAverageTotal,
     sections: report.sections,
     questionAverages: report.questionAverages,
     students: report.students,
     summary: report.summary,
+    applied: Boolean(report.applied),
     createdAt: report.createdAt
   }
   state.teaching.data.paperAnalyses = [
     historyItem,
     ...(state.teaching.data.paperAnalyses || []).filter((item) => item.id !== historyItem.id)
   ].slice(0, 80)
-  saveTeachingData({ silent: true })
+}
+
+async function applyPaperReportToTeachingData() {
+  const paper = getTeachingPaperState()
+  const report = paper.report
+  if (!report || report.applied) return
+
+  mergePrimaryIntoTeachingData()
+  report.applied = true
+  savePaperReportHistory(report)
+
+  const scoreRecord = buildScoreRecordFromPaperReport(report)
+  if (scoreRecord) {
+    state.teaching.data.scoreRecords = [
+      scoreRecord,
+      ...(state.teaching.data.scoreRecords || []).filter((item) => item.sourceFeedbackId !== report.id)
+    ]
+  }
+
+  await saveTeachingData({ silent: true })
+  renderTeachingPanel()
+  showToast('试卷分析已应用到教学数据')
+}
+
+function buildScoreRecordFromPaperReport(report) {
+  if (!report || !['class', 'one'].includes(report.scope)) return null
+
+  return {
+    id: createId('score'),
+    sourceFeedbackId: report.id,
+    scope: report.scope === 'one' ? 'oneOnOne' : 'class',
+    classId: report.scope === 'class' ? report.classId || '' : '',
+    className: report.scope === 'class' ? report.targetName || '' : '',
+    profileId: report.scope === 'one' ? report.profileId || '' : '',
+    studentName: report.scope === 'one' && report.students && report.students[0] ? report.students[0].name : '',
+    title: report.examType || '试卷分析',
+    subject: report.title || '',
+    date: report.date || getLocalDateKey(new Date(report.createdAt || Date.now())),
+    mode: 'percent',
+    totalScore: Number(report.totalScore || 100),
+    students: (report.students || []).map((student) => ({
+      studentId: student.id || '',
+      name: student.name,
+      score: Number(student.total),
+      grade: '',
+      note: ''
+    })).filter((student) => student.name),
+    createdAt: Date.now()
+  }
 }
 
 function restorePaperReport(id) {
@@ -2332,8 +2395,7 @@ async function handleTeachingClick(event) {
   const id = button.dataset.id || ''
 
   if (action === 'sync-primary') {
-    mergePrimaryIntoTeachingData()
-    await saveTeachingData()
+    await syncTeachingProfiles()
   }
   if (action === 'select-data-class') {
     state.teaching.selectedClassId = id
@@ -2359,6 +2421,7 @@ async function handleTeachingClick(event) {
   if (action === 'analyze-class') analyzeTeachingClass(id)
   if (action === 'analyze-paper') analyzePaperFile()
   if (action === 'generate-paper-report') generatePaperReport()
+  if (action === 'apply-paper-report') applyPaperReportToTeachingData()
   if (action === 'export-paper-pdf') exportPaperReportPdf(null, button.dataset.studentId || '')
   if (action === 'toggle-paper-student') togglePaperStudent(button.dataset.studentId || '')
   if (action === 'restore-paper-report') restorePaperReport(id)
@@ -4005,7 +4068,10 @@ function renderResults() {
     ? (imageMode ? `${state.feedbacks.length} 张图片反馈报告已生成 · 下方可逐张查看和导出` : `${state.feedbacks.length} 条反馈 · 全部已展开`)
     : '生成后会显示在这里'
   renderTeachingApplyBar()
-  renderDebugSummary()
+  if (els.debugSummary) {
+    els.debugSummary.classList.add('hidden')
+    els.debugSummary.innerHTML = ''
+  }
 
   if (!state.feedbacks.length) {
     els.resultList.classList.remove('hidden')
@@ -4046,11 +4112,6 @@ function renderTeachingApplyBar() {
   els.applyTeachingDataBtn.textContent = pending && pending.applied
     ? '已应用到教学数据'
     : (pending && pending.applying ? '正在应用...' : '确认应用到教学数据')
-  if (els.teachingApplyHint) {
-    els.teachingApplyHint.textContent = pending && pending.applied
-      ? '本次反馈已写入教学数据。'
-      : '确认后，本次反馈会写入教学数据并统计到课/成绩。'
-  }
 }
 
 function isImageFeedbackMode() {
