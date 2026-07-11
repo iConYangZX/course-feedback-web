@@ -2506,9 +2506,12 @@ async function normalizeCourseware(file, options = {}) {
     : (isImage
         ? { text: await extractImageText(file.buffer, originalName), source: 'image-ocr', pageCount: 1 }
         : await extractCoursewareText(file.buffer, originalName))
-  const extractedText = shouldUseSelectedPdfPages
+  const rawExtractedText = shouldUseSelectedPdfPages
     ? clientPdfText
     : (extraction.text || clientPdfText)
+  const extractedText = !isPdf && selectedPdfPages.length
+    ? sliceTextByApproxPages(rawExtractedText, selectedPdfPages)
+    : rawExtractedText
   const extractionSource = extractedText && shouldUseSelectedPdfPages
     ? 'pdf-selected-pages'
     : (extraction.text ? extraction.source : (clientPdfText ? 'browser-pdf-text' : extraction.source))
@@ -2532,6 +2535,22 @@ async function normalizeCourseware(file, options = {}) {
     imageSendSucceeded: false,
     imageFallbackUsed: false
   }
+}
+
+function sliceTextByApproxPages(text, selectedPages) {
+  const source = trim(text)
+  if (!source || !selectedPages.length) return source
+
+  const pageSize = 1400
+  const chunks = []
+  for (let index = 0; index < source.length; index += pageSize) {
+    chunks.push(source.slice(index, index + pageSize))
+  }
+  return selectedPages
+    .map((pageNumber) => chunks[pageNumber - 1])
+    .filter(Boolean)
+    .join('\n')
+    .trim() || source
 }
 
 async function normalizeCoursewareUploads(files, storedMaterialFile, payload = {}, pdfPageImages = []) {

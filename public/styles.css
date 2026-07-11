@@ -2204,7 +2204,7 @@ textarea:focus {
 
 .courseware-selection-item {
   display: grid;
-  grid-template-columns: auto minmax(140px, 1fr) minmax(120px, auto) auto;
+  grid-template-columns: auto minmax(140px, 1fr) minmax(120px, auto) auto auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -2221,6 +2221,24 @@ textarea:focus {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.courseware-word-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.courseware-word-range input {
+  width: 58px;
+  min-height: 34px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
 }
 
 .modal-backdrop {
@@ -2408,7 +2426,9 @@ textarea:focus {
   }
 
   .courseware-selection-meta,
-  .courseware-selection-item .compact-button {
+  .courseware-word-range,
+  .courseware-selection-item .compact-button,
+  .courseware-selection-item .list-delete-button {
     grid-column: 2;
   }
 
