@@ -533,13 +533,14 @@ app.post('/api/config', (req, res) => {
 })
 
 app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
-  { name: 'courseware', maxCount: 1 },
+  { name: 'courseware', maxCount: 12 },
   { name: 'exitTest', maxCount: 1 },
-  { name: 'pdfPageImage', maxCount: 500 }
+  { name: 'pdfPageImage', maxCount: 1000 }
 ]), async (req, res) => {
   try {
     const session = req.accessSession
-    const coursewareFile = getUploadedFile(req, 'courseware')
+    const coursewareFiles = getUploadedFiles(req, 'courseware')
+    const coursewareFile = coursewareFiles[0] || null
     const exitTestFile = getUploadedFile(req, 'exitTest')
     const pdfPageImages = getUploadedFiles(req, 'pdfPageImage')
 
@@ -554,18 +555,13 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     }
 
     const payload = parsePayload(req.body.payload)
-    const storedMaterialFile = !coursewareFile && payload.materialId
+    const storedMaterialFile = !coursewareFiles.length && payload.materialId
       ? getStoredMaterialFile(session, payload.materialId)
       : null
-    validatePayload(payload, Boolean(coursewareFile || storedMaterialFile))
+    validatePayload(payload, Boolean(coursewareFiles.length || storedMaterialFile))
 
     const aiConfig = getAIConfig()
-    const coursewareSource = coursewareFile || storedMaterialFile
-    const courseware = coursewareSource ? await normalizeCourseware(coursewareSource, {
-      clientPdfText: payload.clientPdfText,
-      pdfPageImages,
-      selectedPdfPages: payload.selectedPdfPages
-    }) : null
+    const courseware = await normalizeCoursewareUploads(coursewareFiles, storedMaterialFile, payload, pdfPageImages)
     const exitTestCourseware = exitTestFile ? await normalizeCourseware(exitTestFile, {
       selectedPdfPages: payload.exitTest && payload.exitTest.selectedPdfPages
     }) : null
@@ -2538,6 +2534,56 @@ async function normalizeCourseware(file, options = {}) {
   }
 }
 
+async function normalizeCoursewareUploads(files, storedMaterialFile, payload = {}, pdfPageImages = []) {
+  const uploadFiles = Array.isArray(files) ? files : []
+  if (!uploadFiles.length && storedMaterialFile) {
+    return normalizeCourseware(storedMaterialFile, {
+      clientPdfText: payload.clientPdfText,
+      pdfPageImages,
+      selectedPdfPages: payload.selectedPdfPages
+    })
+  }
+
+  const metaList = Array.isArray(payload.coursewareMeta) ? payload.coursewareMeta : []
+  const coursewares = []
+  for (let index = 0; index < uploadFiles.length; index += 1) {
+    const file = uploadFiles[index]
+    const meta = metaList[index] && typeof metaList[index] === 'object' ? metaList[index] : {}
+    const fileImages = pdfPageImages.filter((imageFile) => String(imageFile.originalname || '').startsWith(`courseware-${index}-`))
+    coursewares.push(await normalizeCourseware(file, {
+      clientPdfText: meta.clientPdfText,
+      pdfPageImages: fileImages,
+      selectedPdfPages: meta.selectedPdfPages
+    }))
+  }
+
+  if (coursewares.length <= 1) return coursewares[0] || null
+  return combineCoursewares(coursewares)
+}
+
+function combineCoursewares(coursewares) {
+  const valid = coursewares.filter(Boolean)
+  return {
+    name: valid.map((item) => item.name).join('、'),
+    mime: 'application/x-multiple-courseware',
+    buffer: Buffer.alloc(0),
+    extractedText: valid.map((item, index) => [
+      `【课件 ${index + 1}：${item.name}】`,
+      item.extractedText || '未提取到可用文字，请结合图片或文件内容分析。'
+    ].join('\n')).join('\n\n'),
+    extractionSource: 'multiple-courseware',
+    ocrPageCount: valid.reduce((sum, item) => sum + Number(item.ocrPageCount || 0), 0),
+    selectedPdfPages: [],
+    isImage: false,
+    dataUrl: '',
+    visionImages: valid.flatMap((item) => getCoursewareVisionImages(item)),
+    imageSendAttempted: false,
+    imageSendSucceeded: false,
+    imageFallbackUsed: false,
+    files: valid
+  }
+}
+
 function normalizePageNumbers(pageNumbers) {
   const list = Array.isArray(pageNumbers) ? pageNumbers : []
   return Array.from(new Set(
@@ -2620,14 +2666,16 @@ async function requestOpenAI(payload, courseware, aiConfig) {
                       courseKnowledgePoint: { type: 'string' },
                       performanceText: { type: 'string' },
                       personalizedRemark: { type: 'string' },
-                      learningSuggestion: { type: 'string' }
+                      learningSuggestion: { type: 'string' },
+                      subject: { type: 'string' }
                     },
                     required: [
                       'courseContent',
                       'courseKnowledgePoint',
                       'performanceText',
                       'personalizedRemark',
-                      'learningSuggestion'
+                      'learningSuggestion',
+                      'subject'
                     ]
                   }
                 },
@@ -2790,6 +2838,7 @@ function buildSystemPrompt() {
     '如果提供了出门测成绩，必须写入反馈：个性化学生反馈只写当前学生自己的成绩；班级整体反馈要按从高到低列出全班所有学生成绩。',
     '如果提供了出门测文件内容，请结合文件里的测试知识点、题型或讲次内容评价学习情况；不要只写分数。',
     '如果反馈呈现形式是图片报告文案，请语言更适合放入报告里的“课堂表现”段落，结构清晰、少寒暄。',
+    '如果反馈正文、标题或模板字段涉及科目/学科，必须根据上传课件、讲义或试卷内容判断正确科目；不能默认写数学。无法可靠判断科目时，不要主动写具体科目。',
     '一对一反馈里如果包含 personality 或 habit，要把它们作为长期档案背景，用自然、克制的方式融入建议，不要写得像诊断。',
     '所有未填写、未上传、为空的内容都视为不存在，反馈正文里不要提及这些空内容，也不要用“未填写”“未上传”等字样。',
     '不同学生的反馈必须根据 performance、remark、personality 和 habit 明显区分，不允许只替换姓名。'
@@ -2827,7 +2876,7 @@ function buildUserContent(payload, courseware) {
         '',
         '请严格返回 JSON，字段为 feedbacks，每项包含 studentId、name、feedback、templateFields。',
         'studentId 必须原样使用学生表现数据 JSON 中对应学生的 id，name 必须原样使用对应学生的 name。',
-        'templateFields 必须包含 courseContent、courseKnowledgePoint、performanceText、personalizedRemark、learningSuggestion，用于程序填入老师模板。',
+        'templateFields 必须包含 courseContent、courseKnowledgePoint、performanceText、personalizedRemark、learningSuggestion，可额外包含 subject（根据课件判断的科目），用于程序填入老师模板。',
         payload.feedbackFormat === 'image'
           ? '图片报告文案必须包含从课件深度解析得到的【课程内容】和【学习重点】：【课程内容】用一句不带编号、不列点的完整句子总结本节课件；【学习重点】用 1、2、3 分行列出核心重点。不要用上课日期、时段、课后作业或“教材讲次”替代课程内容。'
           : '',
@@ -2938,9 +2987,9 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     JSON.stringify(payload.students, null, 2),
     '',
     '请严格返回 JSON，且只能返回 JSON，不要解释，不要使用 Markdown。',
-    'JSON 格式必须是：{"feedbacks":[{"studentId":"...","name":"...","feedback":"...","templateFields":{"courseContent":"...","courseKnowledgePoint":"...","performanceText":"...","personalizedRemark":"...","learningSuggestion":"..."}}]}',
+    'JSON 格式必须是：{"feedbacks":[{"studentId":"...","name":"...","feedback":"...","templateFields":{"courseContent":"...","courseKnowledgePoint":"...","performanceText":"...","personalizedRemark":"...","learningSuggestion":"...","subject":"..."}}]}',
     'studentId 必须原样使用学生表现数据 JSON 中对应学生的 id，name 必须原样使用对应学生的 name。',
-    'templateFields 会被程序填入老师模板，所以每个字段都必须针对该学生具体填写，不能空泛。',
+    'templateFields 会被程序填入老师模板，所以每个字段都必须针对该学生具体填写，不能空泛；如果能从课件判断科目，请在 templateFields.subject 写入正确科目。',
     payload.feedbackFormat === 'image'
       ? '图片报告文案必须包含从课件深度解析得到的【课程内容】和【学习重点】：【课程内容】用一句不带编号、不列点的完整句子总结本节课件；【学习重点】用 1、2、3 分行列出核心重点。不要用上课日期、时段、课后作业或“教材讲次”替代课程内容。'
       : '',
@@ -3007,6 +3056,9 @@ function getTemplateRules() {
 }
 
 function getCoursewareTextLabel(courseware) {
+  if (courseware.mime === 'application/x-multiple-courseware') {
+    return '老师上传了多个课件/讲义。每个文件内容如下，请逐个分析后综合生成反馈：'
+  }
   if (courseware.isImage) {
     return '从图片课件中识别到的文字如下，请优先结合这些内容生成反馈：'
   }
@@ -3313,6 +3365,7 @@ function normalizeTemplateFields(rawFields = {}, student, payload = {}, modelFee
     performanceText: trim(fields.performanceText) || performanceFallback,
     personalizedRemark: trim(fields.personalizedRemark) || personalizedFallback,
     learningSuggestion: trim(fields.learningSuggestion) || buildAdviceFallback(student),
+    subject: trim(fields.subject),
     modelFeedback: trim(modelFeedback)
   }
 }
@@ -3322,6 +3375,7 @@ function getTemplateValue(key, fields, student, payload, modelFeedback) {
 
   if (['学生姓名', '姓名', '学生'].includes(normalizedKey)) return student.name
   if (['年级'].includes(normalizedKey)) return payload.grade || ''
+  if (['科目', '学科'].includes(normalizedKey)) return fields.subject || ''
   if (['班级', '班级名称', '课程'].includes(normalizedKey)) return payload.className || ''
   if (['课程主题', '主题'].includes(normalizedKey)) return payload.lessonTitle || fields.courseContent
   if (['课程内容', '本节课内容'].includes(normalizedKey)) return fields.courseContent
@@ -3333,6 +3387,7 @@ function getTemplateValue(key, fields, student, payload, modelFeedback) {
 
   if (normalizedKey.includes('姓名')) return student.name
   if (normalizedKey.includes('年级')) return payload.grade || ''
+  if (normalizedKey.includes('科目') || normalizedKey.includes('学科')) return fields.subject || ''
   if (normalizedKey.includes('班级')) return payload.className || ''
   if (normalizedKey.includes('主题')) return payload.lessonTitle || fields.courseContent
   if (normalizedKey.includes('内容')) return fields.courseContent

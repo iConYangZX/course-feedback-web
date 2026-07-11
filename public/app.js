@@ -106,6 +106,8 @@ const state = {
   },
   adminUsers: [],
   pdfSelection: {
+    items: [],
+    activeFileKey: '',
     fileKey: '',
     fileName: '',
     pageCount: 0,
@@ -468,6 +470,7 @@ function bindEvents() {
     if (event.target === els.pdfPageModal) closePdfPageModal()
   })
   els.pdfPageGrid.addEventListener('change', updatePdfPageSelectionFromGrid)
+  els.pdfPageGrid.addEventListener('click', handlePdfPageGridClick)
   els.pdfLectureSelect.addEventListener('change', applySelectedPdfLecture)
   els.rearrangeUploadBtn.addEventListener('click', () => els.rearrangeFileInput.click())
   els.rearrangeTitleInput.addEventListener('input', renderQuestionPreview)
@@ -4357,6 +4360,7 @@ function renderImageReportSheet(options) {
   } = options
   const reportSections = parseFeedbackReportSections(item.feedback)
   const templateFields = item.templateFields && typeof item.templateFields === 'object' ? item.templateFields : {}
+  const subjectText = normalizeSubjectText(reportSections.subject || templateFields.subject || '')
   const courseContentText = normalizeImageReportCourseText(
     reportSections.courseContent
       || templateFields.courseContent
@@ -4398,7 +4402,7 @@ function renderImageReportSheet(options) {
     <article class="report-sheet image-report-sheet" id="${index === 0 ? 'imageReportSheet' : `imageReportSheet-${index}`}" data-image-report-sheet data-report-name="${escapeHtml(studentName || item.name || `报告${index + 1}`)}">
       <header class="report-header">
         <div></div>
-        <h2>数学课程反馈报告</h2>
+        <h2>${subjectText ? `${escapeHtml(subjectText)}课程反馈报告` : '课程反馈报告'}</h2>
         <div class="report-brand">
           <strong>升学帮</strong>
           <span>教学有章法 提分有路径</span>
@@ -4446,7 +4450,8 @@ function parseFeedbackReportSections(text) {
   const sections = {
     courseContent: '',
     studyFocus: '',
-    performance: ''
+    performance: '',
+    subject: ''
   }
   const source = String(text || '')
     .replace(/\r\n/g, '\n')
@@ -4470,6 +4475,7 @@ function parseFeedbackReportSections(text) {
     if (/课堂内容|课程内容/.test(title)) sections.courseContent = content
     if (/学习重点|课程重点|核心重点/.test(title)) sections.studyFocus = content
     if (/课堂表现|学生表现/.test(title)) sections.performance = content
+    if (/科目|学科/.test(title)) sections.subject = content
   })
 
   if (!sections.performance) {
@@ -4512,6 +4518,14 @@ function normalizeImageReportCourseText(text) {
     .join(' ')
 
   return normalized || '本节课围绕课件核心内容进行学习。'
+}
+
+function normalizeSubjectText(text) {
+  return normalizeReportText(text)
+    .replace(/[【】]/g, '')
+    .replace(/^(科目|学科)[：:]/, '')
+    .trim()
+    .slice(0, 12)
 }
 
 function getManualCourseNoteForImageReport() {
@@ -5638,7 +5652,7 @@ async function generateFeedback() {
 
   const formData = new FormData()
 
-  const file = payload.materialId ? null : (els.coursewareInput.files && els.coursewareInput.files[0])
+  const files = payload.materialId ? [] : getCoursewareFiles()
   const exitTestFile = els.exitTestInput && els.exitTestInput.files
     ? els.exitTestInput.files[0]
     : null
@@ -5646,14 +5660,25 @@ async function generateFeedback() {
   setGenerating(true)
 
   try {
-    if (file && isPdfFile(file)) {
-      els.generateBtn.textContent = '正在读取 PDF...'
-      await appendPdfPreviewData(formData, file, payload)
-      els.generateBtn.textContent = 'AI 生成中...'
+    payload.coursewareMeta = []
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index]
+      if (isPdfFile(file)) {
+        els.generateBtn.textContent = `正在读取 PDF ${index + 1}/${files.length}`
+        await appendPdfPreviewData(formData, file, payload, index)
+      } else {
+        payload.coursewareMeta[index] = {
+          fileIndex: index,
+          fileName: file.name,
+          selectedPdfPages: [],
+          clientPdfText: ''
+        }
+      }
+      formData.append('courseware', file)
     }
+    els.generateBtn.textContent = 'AI 生成中...'
 
     formData.append('payload', JSON.stringify(payload))
-    if (file) formData.append('courseware', file)
     if (exitTestFile && payload.exitTest) formData.append('exitTest', exitTestFile)
 
     const response = await fetch('/api/generate-feedback', {
@@ -5844,12 +5869,13 @@ function isPdfFile(file) {
 }
 
 async function handleCoursewareChange() {
-  const file = getCoursewareFile()
+  const files = getCoursewareFiles()
+  const pdfFiles = files.filter(isPdfFile)
   updateFilePicker(els.coursewareInput, els.coursewareFileName)
   resetPdfPageSelection()
 
-  if (file && isPdfFile(file)) {
-    await loadPdfPageSelection(file, true)
+  if (pdfFiles.length) {
+    await loadPdfPageSelections(pdfFiles, true)
     return
   }
 
@@ -5860,6 +5886,12 @@ function getCoursewareFile() {
   return els.coursewareInput.files && els.coursewareInput.files[0]
 }
 
+function getCoursewareFiles() {
+  return els.coursewareInput && els.coursewareInput.files
+    ? Array.from(els.coursewareInput.files)
+    : []
+}
+
 function getFileKey(file) {
   if (!file) return ''
   return [file.name, file.size, file.lastModified].join(':')
@@ -5867,6 +5899,8 @@ function getFileKey(file) {
 
 function resetPdfPageSelection() {
   state.pdfSelection = {
+    items: [],
+    activeFileKey: '',
     fileKey: '',
     fileName: '',
     pageCount: 0,
@@ -5880,6 +5914,31 @@ function resetPdfPageSelection() {
 }
 
 async function loadPdfPageSelection(file, openWhenReady = false) {
+  try {
+    const item = await loadPdfSelectionItem(file)
+    state.pdfSelection = {
+      ...item,
+      items: [item],
+      activeFileKey: item.fileKey,
+      isOpen: openWhenReady && (item.lectures.length > 1 || item.pageCount > 40)
+    }
+    renderPdfPageSelection()
+
+    if (openWhenReady && item.lectures.length > 1) {
+      showToast(`检测到 ${item.lectures.length} 个讲次，请选择要读取的讲次`)
+    } else if (openWhenReady && item.pageCount > 40) {
+      showToast('未检测到多讲，已默认读取全文；页数较多时可手动改页码')
+    } else if (openWhenReady) {
+      showToast('未检测到多讲，默认读取整个 PDF')
+    }
+  } catch (error) {
+    state.pdfSelection.error = error.message || 'PDF 页面读取失败'
+    renderPdfPageSelection()
+    showToast(state.pdfSelection.error)
+  }
+}
+
+async function loadPdfPageSelections(files, openWhenReady = false) {
   if (!window.pdfjsLib) {
     showToast('PDF 解析组件加载失败，请刷新页面重试')
     renderPdfPageSelection()
@@ -5887,8 +5946,19 @@ async function loadPdfPageSelection(file, openWhenReady = false) {
   }
 
   state.pdfSelection = {
-    fileKey: getFileKey(file),
-    fileName: file.name,
+    items: files.map((file) => ({
+      fileKey: getFileKey(file),
+      fileName: file.name,
+      pageCount: 0,
+      selectedPages: [],
+      lectures: [],
+      selectedLectureIndex: '',
+      loading: true,
+      error: ''
+    })),
+    activeFileKey: files[0] ? getFileKey(files[0]) : '',
+    fileKey: files[0] ? getFileKey(files[0]) : '',
+    fileName: files[0] ? files[0].name : '',
     pageCount: 0,
     selectedPages: [],
     lectures: [],
@@ -5900,29 +5970,21 @@ async function loadPdfPageSelection(file, openWhenReady = false) {
   renderPdfPageSelection()
 
   try {
-    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-    const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-    const pageCount = pdf.numPages
-    const lectures = await detectPdfLectures(pdf)
-    const firstLecture = lectures[0]
-
-    state.pdfSelection.pageCount = pageCount
-    state.pdfSelection.lectures = lectures
-    state.pdfSelection.selectedLectureIndex = firstLecture ? '0' : ''
-    state.pdfSelection.selectedPages = firstLecture
-      ? buildPageRange(firstLecture.startPage, firstLecture.endPage)
-      : Array.from({ length: pageCount }, (item, index) => index + 1)
-    state.pdfSelection.loading = false
-    state.pdfSelection.isOpen = openWhenReady && (lectures.length > 1 || pageCount > 40)
+    const items = []
+    for (const file of files) {
+      items.push(await loadPdfSelectionItem(file))
+    }
+    const active = items[0] || {}
+    state.pdfSelection = {
+      ...active,
+      items,
+      activeFileKey: active.fileKey || '',
+      loading: false,
+      isOpen: openWhenReady
+    }
     renderPdfPageSelection()
 
-    if (openWhenReady && lectures.length > 1) {
-      showToast(`检测到 ${lectures.length} 个讲次，请选择要读取的讲次`)
-    } else if (openWhenReady && pageCount > 40) {
-      showToast('未检测到多讲，已默认读取全文；页数较多时可手动改页码')
-    } else if (openWhenReady) {
-      showToast('未检测到多讲，默认读取整个 PDF')
-    }
+    if (openWhenReady) showToast(`已读取 ${items.length} 个 PDF，请逐个确认页码范围`)
   } catch (error) {
     state.pdfSelection.loading = false
     state.pdfSelection.error = error.message || 'PDF 页面读取失败'
@@ -5931,12 +5993,36 @@ async function loadPdfPageSelection(file, openWhenReady = false) {
   }
 }
 
-async function openPdfPageSelection() {
-  const file = getCoursewareFile()
-  if (!file || !isPdfFile(file)) return
+async function loadPdfSelectionItem(file) {
+  if (!window.pdfjsLib) throw new Error('PDF 解析组件加载失败，请刷新页面重试')
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+  const pageCount = pdf.numPages
+  const lectures = await detectPdfLectures(pdf)
+  const firstLecture = lectures[0]
+  const selectedPages = firstLecture
+    ? buildPageRange(firstLecture.startPage, firstLecture.endPage)
+    : Array.from({ length: pageCount }, (item, index) => index + 1)
+  return {
+    fileKey: getFileKey(file),
+    fileName: file.name,
+    pageCount,
+    selectedPages,
+    lectures,
+    selectedLectureIndex: firstLecture ? '0' : '',
+    loading: false,
+    isOpen: false,
+    error: ''
+  }
+}
 
-  if (state.pdfSelection.fileKey !== getFileKey(file) || !state.pdfSelection.pageCount) {
-    await loadPdfPageSelection(file, true)
+async function openPdfPageSelection() {
+  const pdfFiles = getCoursewareFiles().filter(isPdfFile)
+  const file = pdfFiles[0]
+  if (!file) return
+
+  if (!state.pdfSelection.items.length) {
+    await loadPdfPageSelections(pdfFiles, true)
     return
   }
 
@@ -5972,12 +6058,14 @@ function selectAllPdfPages() {
   const pageCount = state.pdfSelection.pageCount
   state.pdfSelection.selectedPages = Array.from({ length: pageCount }, (item, index) => index + 1)
   state.pdfSelection.selectedLectureIndex = ''
+  syncActivePdfSelectionItem()
   renderPdfPageSelection()
 }
 
 function clearPdfPages() {
   state.pdfSelection.selectedPages = state.pdfSelection.pageCount ? [1] : []
   state.pdfSelection.selectedLectureIndex = ''
+  syncActivePdfSelectionItem()
   renderPdfPageSelection()
 }
 
@@ -5986,6 +6074,43 @@ function updatePdfPageSelectionFromGrid(event) {
 
   syncPdfPageRangeInputs()
   renderPdfPageSelection()
+}
+
+function handlePdfPageGridClick(event) {
+  const button = event.target.closest('[data-pdf-file-key]')
+  if (!button) return
+  setActivePdfSelection(button.dataset.pdfFileKey)
+  renderPdfPageSelection()
+}
+
+function setActivePdfSelection(fileKey) {
+  syncActivePdfSelectionItem()
+  const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+  if (!item) return
+
+  state.pdfSelection = {
+    ...state.pdfSelection,
+    ...item,
+    activeFileKey: item.fileKey,
+    isOpen: true
+  }
+}
+
+function syncActivePdfSelectionItem() {
+  const items = Array.isArray(state.pdfSelection.items) ? state.pdfSelection.items : []
+  const index = items.findIndex((item) => item.fileKey === state.pdfSelection.activeFileKey)
+  if (index < 0) return
+  state.pdfSelection.items[index] = {
+    ...items[index],
+    fileKey: state.pdfSelection.fileKey,
+    fileName: state.pdfSelection.fileName,
+    pageCount: state.pdfSelection.pageCount,
+    selectedPages: state.pdfSelection.selectedPages.slice(),
+    lectures: state.pdfSelection.lectures.slice(),
+    selectedLectureIndex: state.pdfSelection.selectedLectureIndex,
+    loading: state.pdfSelection.loading,
+    error: state.pdfSelection.error
+  }
 }
 
 function syncPdfPageRangeInputs() {
@@ -6001,20 +6126,24 @@ function syncPdfPageRangeInputs() {
 
   state.pdfSelection.selectedPages = buildPageRange(left, right)
   state.pdfSelection.selectedLectureIndex = ''
+  syncActivePdfSelectionItem()
 }
 
 function renderPdfPageSelection() {
   if (!els.pdfPageSelectionBar || !els.pdfPageModal) return
 
   const file = getCoursewareFile()
-  const hasPdf = Boolean(file && isPdfFile(file))
+  const pdfFiles = getCoursewareFiles().filter(isPdfFile)
+  const hasPdf = Boolean(pdfFiles.length)
 
   els.pdfPageSelectionBar.classList.toggle('hidden', !hasPdf)
 
   if (hasPdf) {
     const summary = state.pdfSelection.loading
-      ? `${file.name}：正在读取页面并检测讲次...`
-      : `${file.name}：${getPdfReadSummary(state.pdfSelection)}`
+      ? `正在读取 ${pdfFiles.length} 个 PDF 并检测讲次...`
+      : (state.pdfSelection.items.length > 1
+          ? `${state.pdfSelection.items.length} 个 PDF：${state.pdfSelection.items.map((item) => `${item.fileName} ${getPdfReadSummary(item)}`).join('；')}`
+          : `${pdfFiles[0].name}：${getPdfReadSummary(state.pdfSelection)}`)
 
     els.pdfPageSelectionText.textContent = summary
     els.pdfPageSelectBtn.disabled = state.pdfSelection.loading
@@ -6050,6 +6179,7 @@ function renderPdfPageModal() {
   const startPage = selection.selectedPages[0] || 1
   const endPage = selection.selectedPages[selection.selectedPages.length - 1] || selection.pageCount || 1
   els.pdfPageGrid.innerHTML = `
+    ${renderPdfFileTabs(selection)}
     <div class="pdf-page-range">
       <label class="field pdf-page-range-field">
         <span>开始页</span>
@@ -6059,6 +6189,19 @@ function renderPdfPageModal() {
         <span>结束页</span>
         <input data-pdf-range-field="end" type="number" min="1" max="${selection.pageCount}" value="${endPage}" />
       </label>
+    </div>
+  `
+}
+
+function renderPdfFileTabs(selection) {
+  const items = Array.isArray(selection.items) ? selection.items : []
+  if (items.length <= 1) return ''
+
+  return `
+    <div class="pdf-file-tabs">
+      ${items.map((item, index) => `
+        <button class="teaching-pill ${item.fileKey === selection.activeFileKey ? 'active' : ''}" data-pdf-file-key="${escapeHtml(item.fileKey)}" type="button">${index + 1}. ${escapeHtml(item.fileName)}</button>
+      `).join('')}
     </div>
   `
 }
@@ -6089,12 +6232,14 @@ function applySelectedPdfLecture() {
 
   if (!lecture) {
     state.pdfSelection.selectedLectureIndex = ''
+    syncActivePdfSelectionItem()
     renderPdfPageSelection()
     return
   }
 
   state.pdfSelection.selectedLectureIndex = String(index)
   state.pdfSelection.selectedPages = buildPageRange(lecture.startPage, lecture.endPage)
+  syncActivePdfSelectionItem()
   renderPdfPageSelection()
 }
 
@@ -6351,8 +6496,11 @@ function getPdfLectureOptionLabel(lecture) {
 }
 
 function getSelectedPdfPages(file, pageCount) {
-  if (state.pdfSelection.fileKey === getFileKey(file)) {
-    return state.pdfSelection.selectedPages
+  const fileKey = getFileKey(file)
+  const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+  const selectedPages = item ? item.selectedPages : (state.pdfSelection.fileKey === fileKey ? state.pdfSelection.selectedPages : [])
+  if (selectedPages && selectedPages.length) {
+    return selectedPages
       .filter((pageNumber) => pageNumber >= 1 && pageNumber <= pageCount)
       .sort((left, right) => left - right)
   }
@@ -6398,7 +6546,7 @@ function formatPageRanges(pages) {
   return ranges.join('、')
 }
 
-async function appendPdfPreviewData(formData, file, payload) {
+async function appendPdfPreviewData(formData, file, payload, fileIndex = 0) {
   if (!window.pdfjsLib) {
     showToast('PDF 解析组件加载失败，将按普通 PDF 上传')
     return
@@ -6415,7 +6563,13 @@ async function appendPdfPreviewData(formData, file, payload) {
     throw new Error('请至少选择 1 页 PDF')
   }
 
-  payload.selectedPdfPages = selectedPages
+  if (!Array.isArray(payload.coursewareMeta)) payload.coursewareMeta = []
+  payload.coursewareMeta[fileIndex] = {
+    fileIndex,
+    fileName: file.name,
+    selectedPdfPages: selectedPages,
+    clientPdfText: ''
+  }
 
   for (let index = 0; index < selectedPages.length; index += 1) {
     const pageNumber = selectedPages[index]
@@ -6428,7 +6582,7 @@ async function appendPdfPreviewData(formData, file, payload) {
 
     const imageBlob = await renderPdfPageToImageBlob(page)
     if (imageBlob) {
-      formData.append('pdfPageImage', imageBlob, `${file.name}-page-${pageNumber}.jpg`)
+      formData.append('pdfPageImage', imageBlob, `courseware-${fileIndex}-page-${pageNumber}.jpg`)
     }
   }
 
@@ -6438,7 +6592,8 @@ async function appendPdfPreviewData(formData, file, payload) {
     .trim()
 
   if (extractedText) {
-    payload.clientPdfText = extractedText.slice(0, 30000)
+    payload.coursewareMeta[fileIndex].clientPdfText = extractedText.slice(0, 30000)
+    if (fileIndex === 0) payload.clientPdfText = extractedText.slice(0, 30000)
   }
 }
 
@@ -6617,9 +6772,10 @@ function updateAllFilePickers() {
 function updateFilePicker(input, nameElement) {
   if (!input || !nameElement) return
 
-  const file = input.files && input.files[0]
+  const files = input.files ? Array.from(input.files) : []
+  const file = files[0]
   const picker = input.closest('.file-picker')
-  nameElement.textContent = file ? file.name : '未选择任何文件'
+  nameElement.textContent = files.length > 1 ? `${files.length} 个文件` : (file ? file.name : '未选择任何文件')
   if (picker) picker.classList.toggle('has-file', Boolean(file))
 }
 
