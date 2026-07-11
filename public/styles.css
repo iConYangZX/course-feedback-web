@@ -1456,6 +1456,25 @@ textarea:focus {
   font-size: 13px;
 }
 
+.teaching-delete-menu {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.teaching-delete-menu summary {
+  cursor: pointer;
+  width: max-content;
+  font-weight: 800;
+}
+
+.teaching-delete-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .inline-actions {
   align-items: center;
   flex-direction: row;

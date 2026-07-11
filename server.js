@@ -1753,6 +1753,8 @@ function normalizeFeedbackHistory(history) {
       feedbackFormat: trim(source.feedbackFormat) === 'image' ? 'image' : 'text',
       courseNote: trim(source.courseNote),
       exitTest: source.exitTest && typeof source.exitTest === 'object' ? source.exitTest : null,
+      feedbackExclusions: normalizeStudentExclusions(source.feedbackExclusions),
+      attendanceExclusions: normalizeStudentExclusions(source.attendanceExclusions),
       feedbacks: Array.isArray(source.feedbacks) ? source.feedbacks.map((feedback) => ({
         studentId: trim(feedback && feedback.studentId),
         name: trim(feedback && feedback.name),
@@ -1761,6 +1763,13 @@ function normalizeFeedbackHistory(history) {
       createdAt: Number(source.createdAt || Date.now())
     }
   }) : []
+}
+
+function normalizeStudentExclusions(exclusions) {
+  return Array.isArray(exclusions) ? exclusions.map((item) => ({
+    studentId: trim(item && item.studentId),
+    name: trim(item && item.name)
+  })).filter((item) => item.studentId || item.name) : []
 }
 
 function normalizePaperAnalysisHistory(history) {

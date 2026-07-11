@@ -1155,7 +1155,7 @@ function renderClassTeachingDataDetail(classInfo, sessionDates) {
 function renderClassStudentTeachingCard(classInfo, student) {
   const scores = getStudentScoreRows(classInfo.id, student, 'class')
   const feedbacks = getStudentFeedbackRows(classInfo.id, student)
-  const attendanceDates = feedbacks.map((item) => item.date)
+  const attendanceDates = getStudentAttendanceDates(classInfo.id, student)
 
   return `
     <article class="teaching-card compact-card">
@@ -1168,7 +1168,7 @@ function renderClassStudentTeachingCard(classInfo, student) {
       <div class="teaching-data-columns">
         <div>
           <strong>出门测成绩</strong>
-          ${renderScoreRows(scores)}
+          ${renderTeachingScoreRows(scores)}
         </div>
         <div>
           <strong>反馈记录</strong>
@@ -1179,6 +1179,7 @@ function renderClassStudentTeachingCard(classInfo, student) {
           ${renderDateList(attendanceDates)}
         </div>
       </div>
+      ${renderStudentRecordDeleteMenu({ scope: 'class', classId: classInfo.id, studentId: student.id, studentName: student.name })}
     </article>
   `
 }
@@ -1224,7 +1225,7 @@ function renderTeachingOneData() {
 function renderOneTeachingDataDetail(profile) {
   const feedbacks = getOneFeedbackRows(profile)
   const scores = getStudentScoreRows('', { id: profile.id, name: profile.name }, 'oneOnOne')
-  const attendanceDates = feedbacks.map((item) => item.date)
+  const attendanceDates = getOneAttendanceDates(profile)
 
   return `
     <div class="result-head">
@@ -1236,7 +1237,7 @@ function renderOneTeachingDataDetail(profile) {
     <div class="teaching-data-columns">
       <div>
         <strong>成绩记录</strong>
-        ${renderScoreRows(scores)}
+        ${renderTeachingScoreRows(scores)}
       </div>
       <div>
         <strong>反馈记录</strong>
@@ -1247,6 +1248,7 @@ function renderOneTeachingDataDetail(profile) {
         ${renderDateList(attendanceDates)}
       </div>
     </div>
+    ${renderStudentRecordDeleteMenu({ scope: 'oneOnOne', profileId: profile.id, studentId: profile.id, studentName: profile.name })}
   `
 }
 
@@ -1259,6 +1261,7 @@ function getClassSessionDates(classId) {
 function getStudentFeedbackRows(classId, student) {
   return (state.teaching.data.feedbackHistory || [])
     .filter((item) => item.mode === 'class' && item.classId === classId)
+    .filter((item) => !isStudentExcluded(item.feedbackExclusions, student))
     .filter((item) => {
       if (item.feedbackScope === 'class') return true
       return (item.feedbacks || []).some((feedback) => (
@@ -1275,12 +1278,41 @@ function getStudentFeedbackRows(classId, student) {
 function getOneFeedbackRows(profile) {
   return (state.teaching.data.feedbackHistory || [])
     .filter((item) => item.mode === 'oneOnOne')
+    .filter((item) => !isStudentExcluded(item.feedbackExclusions, { id: profile.id, name: profile.name }))
     .filter((item) => item.profileId === profile.id || item.studentName === profile.name || (item.feedbacks || []).some((feedback) => feedback.name === profile.name))
     .map((item) => ({
       date: getTeachingRecordDate(item),
       text: `${formatTeachingDate(getTeachingRecordDate(item))}    进行${getFeedbackFormatLabel(item)}`
     }))
     .sort(compareTeachingRows)
+}
+
+function getStudentAttendanceDates(classId, student) {
+  return uniqueSortedDates((state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'class' && item.classId === classId)
+    .filter((item) => !isStudentExcluded(item.attendanceExclusions, student))
+    .filter((item) => {
+      if (item.feedbackScope === 'class') return true
+      return (item.feedbacks || []).some((feedback) => (
+        (student.id && feedback.studentId === student.id) || feedback.name === student.name
+      ))
+    })
+    .map(getTeachingRecordDate))
+}
+
+function getOneAttendanceDates(profile) {
+  const student = { id: profile.id, name: profile.name }
+  return uniqueSortedDates((state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'oneOnOne')
+    .filter((item) => !isStudentExcluded(item.attendanceExclusions, student))
+    .filter((item) => item.profileId === profile.id || item.studentName === profile.name || (item.feedbacks || []).some((feedback) => feedback.name === profile.name))
+    .map(getTeachingRecordDate))
+}
+
+function isStudentExcluded(exclusions, student) {
+  return Array.isArray(exclusions) && exclusions.some((item) => (
+    (student.id && item.studentId === student.id) || item.name === student.name
+  ))
 }
 
 function getStudentScoreRows(classId, student, scope) {
@@ -1299,9 +1331,30 @@ function getStudentScoreRows(classId, student, scope) {
     .sort(compareTeachingRows)
 }
 
-function renderScoreRows(rows) {
+function renderTeachingScoreRows(rows) {
   if (!rows.length) return '<div class="teaching-empty-line">暂无成绩</div>'
   return `<ul class="teaching-data-list">${rows.map((row) => `<li>${escapeHtml(row.text)}</li>`).join('')}</ul>`
+}
+
+function renderStudentRecordDeleteMenu(options) {
+  const attrs = [
+    `data-scope="${escapeHtml(options.scope)}"`,
+    `data-class-id="${escapeHtml(options.classId || '')}"`,
+    `data-profile-id="${escapeHtml(options.profileId || '')}"`,
+    `data-student-id="${escapeHtml(options.studentId || '')}"`,
+    `data-student-name="${escapeHtml(options.studentName || '')}"`
+  ].join(' ')
+
+  return `
+    <details class="teaching-delete-menu">
+      <summary>删除记录</summary>
+      <div class="teaching-delete-actions">
+        <button class="list-delete-button" data-teaching-action="delete-student-scores" ${attrs} type="button">删除出门测/成绩</button>
+        <button class="list-delete-button" data-teaching-action="delete-student-feedbacks" ${attrs} type="button">删除反馈记录</button>
+        <button class="list-delete-button" data-teaching-action="delete-student-attendance" ${attrs} type="button">删除到课次数</button>
+      </div>
+    </details>
+  `
 }
 
 function renderFeedbackRows(rows) {
@@ -2432,6 +2485,9 @@ async function handleTeachingClick(event) {
   if (action === 'clear-history') clearTeachingHistory()
   if (action === 'copy-history') copyTeachingHistory(id)
   if (action === 'delete-history') deleteTeachingHistory(id)
+  if (action === 'delete-student-scores') deleteStudentTeachingRecords(button, 'scores')
+  if (action === 'delete-student-feedbacks') deleteStudentTeachingRecords(button, 'feedbacks')
+  if (action === 'delete-student-attendance') deleteStudentTeachingRecords(button, 'attendance')
   if (action === 'add-one-profile') addTeachingOneProfile()
   if (action === 'select-one-profile') {
     state.teaching.selectedOneProfileId = id
@@ -3158,6 +3214,87 @@ function copyTeachingHistory(id) {
 function deleteTeachingHistory(id) {
   state.teaching.data.feedbackHistory = state.teaching.data.feedbackHistory.filter((item) => item.id !== id)
   saveTeachingData()
+}
+
+function deleteStudentTeachingRecords(button, type) {
+  const student = {
+    id: button.dataset.studentId || '',
+    name: button.dataset.studentName || ''
+  }
+  const scope = button.dataset.scope || 'class'
+  const classId = button.dataset.classId || ''
+  const profileId = button.dataset.profileId || ''
+  const label = type === 'scores' ? '出门测/成绩' : (type === 'feedbacks' ? '反馈记录' : '到课次数')
+  const confirmed = window.confirm(`确认删除 ${student.name} 的${label}吗？`)
+  if (!confirmed) return
+
+  if (type === 'scores') {
+    state.teaching.data.scoreRecords = (state.teaching.data.scoreRecords || [])
+      .map((record) => {
+        if (!isTeachingRecordForTarget(record, scope, classId, profileId)) return record
+        return {
+          ...record,
+          students: (record.students || []).filter((score) => !isSameTeachingStudent(score, student))
+        }
+      })
+      .filter((record) => (record.students || []).length)
+  }
+
+  if (type === 'feedbacks') {
+    state.teaching.data.feedbackHistory = (state.teaching.data.feedbackHistory || [])
+      .map((record) => {
+        if (!isTeachingRecordForTarget(record, scope, classId, profileId)) return record
+        if (record.feedbackScope === 'class') {
+          return {
+            ...record,
+            feedbackExclusions: addStudentExclusion(record.feedbackExclusions, student)
+          }
+        }
+        return {
+          ...record,
+          feedbacks: (record.feedbacks || []).filter((feedback) => !isSameTeachingStudent(feedback, student))
+        }
+      })
+      .filter((record) => record.feedbackScope === 'class' || (record.feedbacks || []).length)
+  }
+
+  if (type === 'attendance') {
+    state.teaching.data.feedbackHistory = (state.teaching.data.feedbackHistory || [])
+      .map((record) => {
+        if (!isTeachingRecordForTarget(record, scope, classId, profileId)) return record
+        return {
+          ...record,
+          attendanceExclusions: addStudentExclusion(record.attendanceExclusions, student)
+        }
+      })
+  }
+
+  saveTeachingData()
+  renderTeachingPanel()
+  showToast(`已删除${label}`)
+}
+
+function isTeachingRecordForTarget(record, scope, classId, profileId) {
+  if (scope === 'oneOnOne') {
+    if (record.scope !== 'oneOnOne' && record.mode !== 'oneOnOne') return false
+    return !profileId || record.profileId === profileId
+  }
+
+  if (record.scope !== 'class' && record.mode !== 'class') return false
+  return !classId || record.classId === classId
+}
+
+function isSameTeachingStudent(recordStudent, student) {
+  return (student.id && (recordStudent.studentId === student.id || recordStudent.id === student.id))
+    || recordStudent.name === student.name
+}
+
+function addStudentExclusion(exclusions, student) {
+  const list = Array.isArray(exclusions) ? exclusions.slice() : []
+  if (!isStudentExcluded(list, student)) {
+    list.push({ studentId: student.id || '', name: student.name || '' })
+  }
+  return list
 }
 
 function addTeachingOneProfile() {
