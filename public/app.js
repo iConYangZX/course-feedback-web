@@ -76,6 +76,7 @@ const state = {
   editingClassId: '',
   editingOneProfileId: '',
   feedbacks: [],
+  lastGeneratedPayload: null,
   debug: null,
   oneLesson: {
     performance: '表现良好',
@@ -391,6 +392,7 @@ function bindEvents() {
     button.addEventListener('click', () => {
       state.mode = button.dataset.mode
       state.feedbacks = []
+      state.lastGeneratedPayload = null
       state.debug = null
       state.pendingTeachingApplication = null
       render()
@@ -439,6 +441,10 @@ function bindEvents() {
     state.classSchedule.timeSlot = els.classTimeSlotSelect.value
   })
   if (els.feedbackScopeSelect) els.feedbackScopeSelect.addEventListener('change', () => {
+    state.feedbacks = []
+    state.lastGeneratedPayload = null
+    state.debug = null
+    state.pendingTeachingApplication = null
     renderFeedbackModeControls()
     renderResults()
   })
@@ -4275,6 +4281,86 @@ function renderResults() {
   `).join('')
 }
 
+function normalizeGeneratedFeedbacksForPayload(feedbacks, payload = {}) {
+  const source = Array.isArray(feedbacks) ? feedbacks : []
+  const students = Array.isArray(payload.students) ? payload.students : []
+  if (payload.feedbackScope === 'class' || !students.length) return source
+
+  const usedIndexes = new Set()
+  const sharedFeedback = source.find((item) => item && item.templateFields)
+  const sharedFields = sharedFeedback ? sharedFeedback.templateFields : {}
+
+  return students.map((student, studentIndex) => {
+    let matchIndex = source.findIndex((item, index) => (
+      !usedIndexes.has(index)
+      && item
+      && item.studentId
+      && item.studentId === student.id
+    ))
+
+    if (matchIndex < 0) {
+      matchIndex = source.findIndex((item, index) => (
+        !usedIndexes.has(index)
+        && item
+        && item.name
+        && item.name === student.name
+      ))
+    }
+
+    if (matchIndex < 0 && source[studentIndex] && !usedIndexes.has(studentIndex)) {
+      matchIndex = studentIndex
+    }
+
+    if (matchIndex >= 0) {
+      usedIndexes.add(matchIndex)
+      const matched = source[matchIndex]
+      return {
+        ...matched,
+        studentId: student.id,
+        name: student.name
+      }
+    }
+
+    return buildMissingGeneratedFeedback(student, payload, sharedFields)
+  })
+}
+
+function buildMissingGeneratedFeedback(student, payload = {}, sharedFields = {}) {
+  const courseContent = String(sharedFields.courseContent || payload.lessonTitle || '本节课围绕课件核心内容进行学习。').trim()
+  const courseKnowledgePoint = String(sharedFields.courseKnowledgePoint || '1、理解本节课的核心知识点。\n2、掌握重点方法并完成对应练习。').trim()
+  const performanceText = [
+    `${student.name}同学本节课${student.performance || '表现良好'}`,
+    student.remark || '',
+    student.exitTestScore ? `出门测成绩为${student.exitTestScore}` : ''
+  ].filter(Boolean).join('，')
+  const learningSuggestion = student.performance === '表现较差'
+    ? '建议课后回顾基础概念和典型例题，完成订正后再进行同类题巩固。'
+    : (student.performance === '表现优秀'
+        ? '建议继续保持课堂参与度，并尝试更有挑战的变式题。'
+        : '建议课后及时整理课堂重点和错题，保持稳定练习节奏。')
+
+  return {
+    studentId: student.id,
+    name: student.name,
+    feedback: [
+      '【课程内容】',
+      courseContent,
+      '【核心重点】',
+      courseKnowledgePoint,
+      '【课堂表现】',
+      `${performanceText}。${learningSuggestion}`
+    ].join('\n'),
+    templateFields: {
+      courseContent,
+      courseKnowledgePoint,
+      performanceText,
+      personalizedRemark: student.remark || '本节课整体状态稳定',
+      learningSuggestion,
+      subject: String(sharedFields.subject || '').trim()
+    }
+  }
+}
+
 function renderTeachingApplyBar() {
   if (!els.teachingApplyBar || !els.applyTeachingDataBtn) return
 
@@ -4307,15 +4393,22 @@ function renderImageReport(payload = null) {
 
   const selectedClass = getSelectedClass()
   const selectedProfile = getSelectedOneProfile()
-  const reportPayload = payload || buildGeneratePayload() || {}
+  const reportPayload = payload
+    || state.lastGeneratedPayload
+    || (state.pendingTeachingApplication && state.pendingTeachingApplication.payload)
+    || buildGeneratePayload()
+    || {}
   const reportDate = reportPayload.lessonDate ? getDateFromKey(reportPayload.lessonDate) : new Date()
   const lessonTitle = (reportPayload.lessonTitle || els.lessonTitleInput.value.trim() || '').trim()
   const homeworkText = reportPayload.homework || (els.homeworkInput ? els.homeworkInput.value.trim() : '')
-  const students = state.mode === 'oneOnOne'
-    ? getWorkingStudents()
-    : (selectedClass ? selectedClass.students : [])
+  const students = Array.isArray(reportPayload.students) && reportPayload.students.length
+    ? reportPayload.students
+    : (state.mode === 'oneOnOne'
+        ? getWorkingStudents()
+        : (selectedClass ? selectedClass.students : []))
   const reportScores = buildReportScoreRows(students, reportPayload.exitTest)
   const isClassOverall = reportPayload.feedbackScope === 'class'
+  const individualFeedbacks = normalizeGeneratedFeedbacksForPayload(state.feedbacks, reportPayload)
   const reportItems = isClassOverall
     ? [{
         name: reportPayload.className || (selectedClass && selectedClass.name) || '班级整体',
@@ -4323,7 +4416,7 @@ function renderImageReport(payload = null) {
         templateFields: state.feedbacks[0] && state.feedbacks[0].templateFields,
         scope: 'class'
       }]
-    : state.feedbacks.map((item) => ({
+    : individualFeedbacks.map((item) => ({
         studentId: item.studentId,
         name: item.name,
         feedback: item.feedback,
@@ -4381,7 +4474,22 @@ function renderImageReportSheet(options) {
       || templateFields.courseKnowledgePoint
       || '1、理解本节课课件中的核心知识点。\n2、掌握课件中的重点方法与应用要求。'
   )
-  const performanceText = reportSections.performance || item.feedback || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
+  const primaryPerformanceText = String(
+    reportSections.performance
+      || templateFields.performanceText
+      || item.feedback
+      || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
+  )
+  const performanceDetails = [
+    primaryPerformanceText,
+    templateFields.personalizedRemark && !primaryPerformanceText.includes(templateFields.personalizedRemark)
+      ? templateFields.personalizedRemark
+      : '',
+    templateFields.learningSuggestion && !primaryPerformanceText.includes(templateFields.learningSuggestion)
+      ? `后续建议：${templateFields.learningSuggestion}`
+      : ''
+  ].filter(Boolean)
+  const performanceText = normalizeReportText(performanceDetails.join('\n\n'))
   const isIndividual = item.scope !== 'class'
   const showAllScores = isIndividual
     && state.mode === 'class'
@@ -5778,7 +5886,8 @@ async function generateFeedback() {
       renderAccessState()
     }
 
-    state.feedbacks = Array.isArray(data.feedbacks) ? data.feedbacks : []
+    state.feedbacks = normalizeGeneratedFeedbacksForPayload(data.feedbacks, payload)
+    state.lastGeneratedPayload = payload
     state.debug = data.debug || null
     state.pendingTeachingApplication = {
       id: createId('pending-teaching'),
