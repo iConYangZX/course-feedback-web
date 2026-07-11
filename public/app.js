@@ -1153,7 +1153,8 @@ function renderClassTeachingDataDetail(classInfo, sessionDates) {
 }
 
 function renderClassStudentTeachingCard(classInfo, student) {
-  const scores = getStudentScoreRows(classInfo.id, student, 'class')
+  const exitScores = getStudentScoreRows(classInfo.id, student, 'class', 'exitTest')
+  const paperScores = getStudentScoreRows(classInfo.id, student, 'class', 'paperAnalysis')
   const feedbacks = getStudentFeedbackRows(classInfo.id, student)
   const attendanceDates = getStudentAttendanceDates(classInfo.id, student)
 
@@ -1162,13 +1163,17 @@ function renderClassStudentTeachingCard(classInfo, student) {
       <div class="result-head">
         <div>
           <div class="teaching-title">${escapeHtml(student.name)}</div>
-          <div class="teaching-meta">到课 ${attendanceDates.length} 次 · 出门测 ${scores.length} 条 · 反馈 ${feedbacks.length} 条</div>
+          <div class="teaching-meta">到课 ${attendanceDates.length} 次 · 出门测 ${exitScores.length} 条 · 试卷分析 ${paperScores.length} 条 · 反馈 ${feedbacks.length} 条</div>
         </div>
       </div>
       <div class="teaching-data-columns">
         <div>
           <strong>出门测成绩</strong>
-          ${renderTeachingScoreRows(scores)}
+          ${renderTeachingScoreRows(exitScores)}
+        </div>
+        <div>
+          <strong>试卷分析结果</strong>
+          ${renderTeachingScoreRows(paperScores)}
         </div>
         <div>
           <strong>反馈记录</strong>
@@ -1224,20 +1229,25 @@ function renderTeachingOneData() {
 
 function renderOneTeachingDataDetail(profile) {
   const feedbacks = getOneFeedbackRows(profile)
-  const scores = getStudentScoreRows('', { id: profile.id, name: profile.name }, 'oneOnOne')
+  const exitScores = getStudentScoreRows('', { id: profile.id, name: profile.name }, 'oneOnOne', 'exitTest')
+  const paperScores = getStudentScoreRows('', { id: profile.id, name: profile.name }, 'oneOnOne', 'paperAnalysis')
   const attendanceDates = getOneAttendanceDates(profile)
 
   return `
     <div class="result-head">
       <div>
         <div class="teaching-title">${escapeHtml(profile.name)} · ${escapeHtml(profile.grade || '')}</div>
-        <div class="teaching-meta">到课 ${attendanceDates.length} 次 · 反馈 ${feedbacks.length} 条 · 成绩 ${scores.length} 条</div>
+        <div class="teaching-meta">到课 ${attendanceDates.length} 次 · 出门测 ${exitScores.length} 条 · 试卷分析 ${paperScores.length} 条 · 反馈 ${feedbacks.length} 条</div>
       </div>
     </div>
     <div class="teaching-data-columns">
       <div>
-        <strong>成绩记录</strong>
-        ${renderTeachingScoreRows(scores)}
+        <strong>出门测成绩</strong>
+        ${renderTeachingScoreRows(exitScores)}
+      </div>
+      <div>
+        <strong>试卷分析结果</strong>
+        ${renderTeachingScoreRows(paperScores)}
       </div>
       <div>
         <strong>反馈记录</strong>
@@ -1315,9 +1325,10 @@ function isStudentExcluded(exclusions, student) {
   ))
 }
 
-function getStudentScoreRows(classId, student, scope) {
+function getStudentScoreRows(classId, student, scope, recordType = '') {
   return (state.teaching.data.scoreRecords || [])
     .filter((record) => record.scope === scope)
+    .filter((record) => !recordType || getTeachingScoreRecordType(record) === recordType)
     .filter((record) => scope === 'class' ? record.classId === classId : (record.profileId === student.id || record.studentName === student.name))
     .flatMap((record) => {
       const matched = (record.students || []).filter((score) => (
@@ -1329,6 +1340,13 @@ function getStudentScoreRows(classId, student, scope) {
       }))
     })
     .sort(compareTeachingRows)
+}
+
+function getTeachingScoreRecordType(record) {
+  if (record.recordType === 'paperAnalysis') return 'paperAnalysis'
+  if (record.recordType === 'exitTest') return 'exitTest'
+  if (String(record.sourceFeedbackId || '').startsWith('paper-report')) return 'paperAnalysis'
+  return 'exitTest'
 }
 
 function renderTeachingScoreRows(rows) {
@@ -1349,7 +1367,8 @@ function renderStudentRecordDeleteMenu(options) {
     <details class="teaching-delete-menu">
       <summary>删除记录</summary>
       <div class="teaching-delete-actions">
-        <button class="list-delete-button" data-teaching-action="delete-student-scores" ${attrs} type="button">删除出门测/成绩</button>
+        <button class="list-delete-button" data-teaching-action="delete-student-scores" ${attrs} type="button">删除出门测成绩</button>
+        <button class="list-delete-button" data-teaching-action="delete-student-paper-results" ${attrs} type="button">删除试卷分析结果</button>
         <button class="list-delete-button" data-teaching-action="delete-student-feedbacks" ${attrs} type="button">删除反馈记录</button>
         <button class="list-delete-button" data-teaching-action="delete-student-attendance" ${attrs} type="button">删除到课次数</button>
       </div>
@@ -2259,6 +2278,7 @@ function buildScoreRecordFromPaperReport(report) {
   return {
     id: createId('score'),
     sourceFeedbackId: report.id,
+    recordType: 'paperAnalysis',
     scope: report.scope === 'one' ? 'oneOnOne' : 'class',
     classId: report.scope === 'class' ? report.classId || '' : '',
     className: report.scope === 'class' ? report.targetName || '' : '',
@@ -2486,6 +2506,7 @@ async function handleTeachingClick(event) {
   if (action === 'copy-history') copyTeachingHistory(id)
   if (action === 'delete-history') deleteTeachingHistory(id)
   if (action === 'delete-student-scores') deleteStudentTeachingRecords(button, 'scores')
+  if (action === 'delete-student-paper-results') deleteStudentTeachingRecords(button, 'paper')
   if (action === 'delete-student-feedbacks') deleteStudentTeachingRecords(button, 'feedbacks')
   if (action === 'delete-student-attendance') deleteStudentTeachingRecords(button, 'attendance')
   if (action === 'add-one-profile') addTeachingOneProfile()
@@ -3224,14 +3245,16 @@ function deleteStudentTeachingRecords(button, type) {
   const scope = button.dataset.scope || 'class'
   const classId = button.dataset.classId || ''
   const profileId = button.dataset.profileId || ''
-  const label = type === 'scores' ? '出门测/成绩' : (type === 'feedbacks' ? '反馈记录' : '到课次数')
+  const label = type === 'scores' ? '出门测成绩' : (type === 'paper' ? '试卷分析结果' : (type === 'feedbacks' ? '反馈记录' : '到课次数'))
   const confirmed = window.confirm(`确认删除 ${student.name} 的${label}吗？`)
   if (!confirmed) return
 
-  if (type === 'scores') {
+  if (type === 'scores' || type === 'paper') {
+    const recordType = type === 'paper' ? 'paperAnalysis' : 'exitTest'
     state.teaching.data.scoreRecords = (state.teaching.data.scoreRecords || [])
       .map((record) => {
         if (!isTeachingRecordForTarget(record, scope, classId, profileId)) return record
+        if (getTeachingScoreRecordType(record) !== recordType) return record
         return {
           ...record,
           students: (record.students || []).filter((score) => !isSameTeachingStudent(score, student))
@@ -3431,6 +3454,7 @@ function buildScoreRecordFromFeedbackEntry(entry) {
   return {
     id: createId('score'),
     sourceFeedbackId: entry.id,
+    recordType: 'exitTest',
     scope: entry.mode,
     classId: entry.classId || '',
     className: entry.className || '',

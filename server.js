@@ -1711,6 +1711,7 @@ function normalizeScoreRecords(records) {
     return {
       id: trim(source.id) || `score-${crypto.randomUUID()}`,
       sourceFeedbackId: trim(source.sourceFeedbackId),
+      recordType: trim(source.recordType) === 'paperAnalysis' ? 'paperAnalysis' : 'exitTest',
       scope: trim(source.scope) === 'oneOnOne' ? 'oneOnOne' : 'class',
       classId: trim(source.classId),
       className: trim(source.className),
