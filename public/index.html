@@ -75,6 +75,7 @@
           <section class="nav-group">
             <div class="nav-group-title">教学工具</div>
             <div class="nav-group-list" role="tablist" aria-label="教学工具">
+              <button class="mode-button" data-mode="teaching" type="button">教学数据</button>
               <button class="mode-button" data-mode="paperAnalysis" type="button">试卷分析</button>
               <button class="mode-button" data-mode="rearrange" type="button">题卷重排</button>
             </div>
@@ -140,12 +141,8 @@
           </div>
 
           <div class="teaching-tabs" role="tablist" aria-label="教学数据功能">
-            <button class="teaching-tab active" data-teaching-tab="roster" type="button">花名册</button>
-            <button class="teaching-tab" data-teaching-tab="courses" type="button">课程库</button>
-            <button class="teaching-tab" data-teaching-tab="scores" type="button">成绩</button>
-            <button class="teaching-tab" data-teaching-tab="history" type="button">历史反馈</button>
-            <button class="teaching-tab" data-teaching-tab="one" type="button">一对一档案</button>
-            <button class="teaching-tab" data-teaching-tab="backup" type="button">备份恢复</button>
+            <button class="teaching-tab active" data-teaching-tab="classData" type="button">班课</button>
+            <button class="teaching-tab" data-teaching-tab="oneData" type="button">一对一</button>
           </div>
 
           <div class="teaching-content" id="teachingContent"></div>
@@ -497,6 +494,10 @@
             <span class="result-note" id="resultNote">生成后会显示在这里</span>
           </div>
           <div id="debugSummary" class="debug-summary hidden"></div>
+          <div class="panel-actions hidden" id="teachingApplyBar">
+            <button class="primary-button" id="applyTeachingDataBtn" type="button">确认应用到教学数据</button>
+            <span class="form-hint" id="teachingApplyHint">确认后，本次反馈会写入教学数据。</span>
+          </div>
           <div id="resultList" class="result-list"></div>
           <section class="image-report-panel hidden" id="imageReportPanel">
             <div class="result-head">

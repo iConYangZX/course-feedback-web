@@ -233,7 +233,16 @@ app.get('/api/feedback-data', requireAccessMiddleware, (req, res) => {
 app.put('/api/feedback-data', requireAccessMiddleware, async (req, res) => {
   try {
     const ownerId = getDataOwnerId(req.accessSession)
-    const data = normalizeFeedbackData(req.body || {})
+    const current = getFeedbackDataForOwner(ownerId)
+    const incoming = req.body && typeof req.body === 'object' ? req.body : {}
+    const data = normalizeFeedbackData({
+      ...current,
+      ...incoming,
+      quickOptions: {
+        ...(current.quickOptions || {}),
+        ...(incoming.quickOptions || {})
+      }
+    })
     feedbackDataState.owners[ownerId] = data
     await writeFeedbackDataState()
     res.json({
@@ -1701,6 +1710,7 @@ function normalizeScoreRecords(records) {
     const mode = trim(source.mode) === 'grade' ? 'grade' : 'percent'
     return {
       id: trim(source.id) || `score-${crypto.randomUUID()}`,
+      sourceFeedbackId: trim(source.sourceFeedbackId),
       scope: trim(source.scope) === 'oneOnOne' ? 'oneOnOne' : 'class',
       classId: trim(source.classId),
       className: trim(source.className),
@@ -1714,6 +1724,7 @@ function normalizeScoreRecords(records) {
       students: Array.isArray(source.students) ? source.students.map((student) => {
         const studentSource = student && typeof student === 'object' ? student : {}
         return {
+          studentId: trim(studentSource.studentId),
           name: trim(studentSource.name),
           score: studentSource.score === '' || studentSource.score === null ? null : Number(studentSource.score),
           grade: trim(studentSource.grade),
@@ -1731,10 +1742,17 @@ function normalizeFeedbackHistory(history) {
     return {
       id: trim(source.id) || `history-${crypto.randomUUID()}`,
       mode: trim(source.mode) === 'oneOnOne' ? 'oneOnOne' : 'class',
+      classId: trim(source.classId),
       className: trim(source.className),
+      profileId: trim(source.profileId),
       studentName: trim(source.studentName),
       lessonTitle: trim(source.lessonTitle),
+      lessonDate: trim(source.lessonDate),
+      lessonDateText: trim(source.lessonDateText),
+      feedbackScope: trim(source.feedbackScope) === 'class' ? 'class' : 'individual',
+      feedbackFormat: trim(source.feedbackFormat) === 'image' ? 'image' : 'text',
       courseNote: trim(source.courseNote),
+      exitTest: source.exitTest && typeof source.exitTest === 'object' ? source.exitTest : null,
       feedbacks: Array.isArray(source.feedbacks) ? source.feedbacks.map((feedback) => ({
         studentId: trim(feedback && feedback.studentId),
         name: trim(feedback && feedback.name),

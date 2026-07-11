@@ -124,8 +124,9 @@ const state = {
   },
   teaching: {
     loading: false,
+    loaded: false,
     saving: false,
-    tab: 'roster',
+    tab: 'classData',
     data: createEmptyTeachingData(),
     selectedClassId: '',
     selectedModuleId: '',
@@ -136,7 +137,8 @@ const state = {
     paper: createEmptyPaperState(),
     aiResult: '',
     aiBusy: false
-  }
+  },
+  pendingTeachingApplication: null
 }
 
 const els = {}
@@ -323,6 +325,9 @@ function bindElements() {
     copyAllBtn: document.querySelector('#copyAllBtn'),
     resultNote: document.querySelector('#resultNote'),
     debugSummary: document.querySelector('#debugSummary'),
+    teachingApplyBar: document.querySelector('#teachingApplyBar'),
+    applyTeachingDataBtn: document.querySelector('#applyTeachingDataBtn'),
+    teachingApplyHint: document.querySelector('#teachingApplyHint'),
     resultList: document.querySelector('#resultList'),
     imageReportPanel: document.querySelector('#imageReportPanel'),
     imageReportPreview: document.querySelector('#imageReportPreview'),
@@ -379,6 +384,7 @@ function bindEvents() {
       state.mode = button.dataset.mode
       state.feedbacks = []
       state.debug = null
+      state.pendingTeachingApplication = null
       render()
     })
   })
@@ -405,6 +411,7 @@ function bindEvents() {
   els.deleteOneProfileBtn.addEventListener('click', deleteSelectedOneProfile)
   els.generateBtn.addEventListener('click', generateFeedback)
   els.copyAllBtn.addEventListener('click', copyAllFeedbacks)
+  if (els.applyTeachingDataBtn) els.applyTeachingDataBtn.addEventListener('click', applyFeedbackToTeachingData)
   els.coursewareInput.addEventListener('change', handleCoursewareChange)
   if (els.classMaterialModeSelect) els.classMaterialModeSelect.addEventListener('change', renderClassMaterialControls)
   if (els.classTextbookInput) els.classTextbookInput.addEventListener('change', handleClassTextbookChange)
@@ -929,6 +936,7 @@ async function loadTeachingData() {
     renderTeachingPanel()
     showToast(error.message || '读取教学数据失败，已使用本机缓存')
   } finally {
+    state.teaching.loaded = true
     state.teaching.loading = false
     renderTeachingPanel()
   }
@@ -1062,12 +1070,280 @@ function renderTeachingPanel() {
     return
   }
 
+  if (!['classData', 'oneData'].includes(state.teaching.tab)) state.teaching.tab = 'classData'
+  if (state.teaching.tab === 'classData') renderTeachingClassData()
+  if (state.teaching.tab === 'oneData') renderTeachingOneData()
+  if (state.teaching.tab === 'classData' || state.teaching.tab === 'oneData') return
+
   if (state.teaching.tab === 'roster') renderTeachingRoster()
   if (state.teaching.tab === 'courses') renderTeachingCourses()
   if (state.teaching.tab === 'scores') renderTeachingScores()
   if (state.teaching.tab === 'history') renderTeachingHistory()
   if (state.teaching.tab === 'one') renderTeachingOneProfiles()
   if (state.teaching.tab === 'backup') renderTeachingBackup()
+}
+
+function renderTeachingClassData() {
+  mergePrimaryIntoTeachingData()
+  const classes = state.teaching.data.classes || []
+  const selected = classes.find((item) => item.id === state.teaching.selectedClassId) || classes[0]
+  if (selected && !state.teaching.selectedClassId) state.teaching.selectedClassId = selected.id
+
+  if (!classes.length) {
+    els.teachingContent.innerHTML = `
+      <section class="teaching-card">
+        <div class="teaching-title">班课教学数据</div>
+        <div class="student-empty">暂无班级档案。请先在反馈栏建立班级，或点击同步现有档案。</div>
+        <div class="panel-actions"><button class="primary-button" data-teaching-action="sync-primary" type="button">同步现有档案</button></div>
+      </section>
+    `
+    return
+  }
+
+  const sessionDates = selected ? getClassSessionDates(selected.id) : []
+  els.teachingContent.innerHTML = `
+    <div class="teaching-grid sidebar-layout">
+      <section class="teaching-card">
+        <div class="result-head">
+          <div>
+            <div class="teaching-title">班课</div>
+            <div class="teaching-meta">${classes.length} 个班级 · 已同步反馈档案</div>
+          </div>
+          <button class="secondary-button compact-button" data-teaching-action="sync-primary" type="button">同步档案</button>
+        </div>
+        <div class="teaching-pill-list">
+          ${classes.map((classInfo) => `
+            <button class="teaching-pill ${selected && classInfo.id === selected.id ? 'active' : ''}" data-teaching-action="select-data-class" data-id="${escapeHtml(classInfo.id)}" type="button">${escapeHtml(classInfo.name)}</button>
+          `).join('')}
+        </div>
+      </section>
+      <section class="teaching-card">
+        ${selected ? renderClassTeachingDataDetail(selected, sessionDates) : '<div class="student-empty">请选择班级</div>'}
+      </section>
+    </div>
+  `
+}
+
+function renderClassTeachingDataDetail(classInfo, sessionDates) {
+  const students = classInfo.students || []
+  return `
+    <div class="result-head">
+      <div>
+        <div class="teaching-title">${escapeHtml(classInfo.name)} · ${escapeHtml(classInfo.grade || '')}</div>
+        <div class="teaching-meta">上课 ${sessionDates.length} 次 · ${students.length} 名学生</div>
+      </div>
+    </div>
+    <section class="teaching-subsection">
+      <div class="teaching-title">上课次数记录</div>
+      ${renderDateList(sessionDates)}
+    </section>
+    <section class="teaching-subsection">
+      <div class="teaching-title">学生单独档案</div>
+      <div class="teaching-list">
+        ${students.map((student) => renderClassStudentTeachingCard(classInfo, student)).join('') || '<div class="student-empty">暂无学生名单</div>'}
+      </div>
+    </section>
+  `
+}
+
+function renderClassStudentTeachingCard(classInfo, student) {
+  const scores = getStudentScoreRows(classInfo.id, student, 'class')
+  const feedbacks = getStudentFeedbackRows(classInfo.id, student)
+  const attendanceDates = feedbacks.map((item) => item.date)
+
+  return `
+    <article class="teaching-card compact-card">
+      <div class="result-head">
+        <div>
+          <div class="teaching-title">${escapeHtml(student.name)}</div>
+          <div class="teaching-meta">到课 ${attendanceDates.length} 次 · 出门测 ${scores.length} 条 · 反馈 ${feedbacks.length} 条</div>
+        </div>
+      </div>
+      <div class="teaching-data-columns">
+        <div>
+          <strong>出门测成绩</strong>
+          ${renderScoreRows(scores)}
+        </div>
+        <div>
+          <strong>反馈记录</strong>
+          ${renderFeedbackRows(feedbacks)}
+        </div>
+        <div>
+          <strong>到课次数</strong>
+          ${renderDateList(attendanceDates)}
+        </div>
+      </div>
+    </article>
+  `
+}
+
+function renderTeachingOneData() {
+  mergePrimaryIntoTeachingData()
+  const profiles = state.teaching.data.oneProfiles || []
+  const selected = profiles.find((item) => item.id === state.teaching.selectedOneProfileId) || profiles[0]
+  if (selected && !state.teaching.selectedOneProfileId) state.teaching.selectedOneProfileId = selected.id
+
+  if (!profiles.length) {
+    els.teachingContent.innerHTML = `
+      <section class="teaching-card">
+        <div class="teaching-title">一对一教学数据</div>
+        <div class="student-empty">暂无一对一档案。请先在反馈栏建立学生档案，或点击同步现有档案。</div>
+        <div class="panel-actions"><button class="primary-button" data-teaching-action="sync-primary" type="button">同步现有档案</button></div>
+      </section>
+    `
+    return
+  }
+
+  els.teachingContent.innerHTML = `
+    <div class="teaching-grid sidebar-layout">
+      <section class="teaching-card">
+        <div class="result-head">
+          <div>
+            <div class="teaching-title">一对一</div>
+            <div class="teaching-meta">${profiles.length} 个学生档案</div>
+          </div>
+          <button class="secondary-button compact-button" data-teaching-action="sync-primary" type="button">同步档案</button>
+        </div>
+        <div class="teaching-pill-list">
+          ${profiles.map((profile) => `
+            <button class="teaching-pill ${selected && profile.id === selected.id ? 'active' : ''}" data-teaching-action="select-data-one" data-id="${escapeHtml(profile.id)}" type="button">${escapeHtml(profile.name)}</button>
+          `).join('')}
+        </div>
+      </section>
+      <section class="teaching-card">
+        ${selected ? renderOneTeachingDataDetail(selected) : '<div class="student-empty">请选择学生</div>'}
+      </section>
+    </div>
+  `
+}
+
+function renderOneTeachingDataDetail(profile) {
+  const feedbacks = getOneFeedbackRows(profile)
+  const scores = getStudentScoreRows('', { id: profile.id, name: profile.name }, 'oneOnOne')
+  const attendanceDates = feedbacks.map((item) => item.date)
+
+  return `
+    <div class="result-head">
+      <div>
+        <div class="teaching-title">${escapeHtml(profile.name)} · ${escapeHtml(profile.grade || '')}</div>
+        <div class="teaching-meta">到课 ${attendanceDates.length} 次 · 反馈 ${feedbacks.length} 条 · 成绩 ${scores.length} 条</div>
+      </div>
+    </div>
+    <div class="teaching-data-columns">
+      <div>
+        <strong>成绩记录</strong>
+        ${renderScoreRows(scores)}
+      </div>
+      <div>
+        <strong>反馈记录</strong>
+        ${renderFeedbackRows(feedbacks)}
+      </div>
+      <div>
+        <strong>到课次数</strong>
+        ${renderDateList(attendanceDates)}
+      </div>
+    </div>
+  `
+}
+
+function getClassSessionDates(classId) {
+  return uniqueSortedDates((state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'class' && item.classId === classId)
+    .map(getTeachingRecordDate))
+}
+
+function getStudentFeedbackRows(classId, student) {
+  return (state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'class' && item.classId === classId)
+    .filter((item) => {
+      if (item.feedbackScope === 'class') return true
+      return (item.feedbacks || []).some((feedback) => (
+        (student.id && feedback.studentId === student.id) || feedback.name === student.name
+      ))
+    })
+    .map((item) => ({
+      date: getTeachingRecordDate(item),
+      text: `${formatTeachingDate(getTeachingRecordDate(item))}    进行${getFeedbackFormatLabel(item)}`
+    }))
+    .sort(compareTeachingRows)
+}
+
+function getOneFeedbackRows(profile) {
+  return (state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'oneOnOne')
+    .filter((item) => item.profileId === profile.id || item.studentName === profile.name || (item.feedbacks || []).some((feedback) => feedback.name === profile.name))
+    .map((item) => ({
+      date: getTeachingRecordDate(item),
+      text: `${formatTeachingDate(getTeachingRecordDate(item))}    进行${getFeedbackFormatLabel(item)}`
+    }))
+    .sort(compareTeachingRows)
+}
+
+function getStudentScoreRows(classId, student, scope) {
+  return (state.teaching.data.scoreRecords || [])
+    .filter((record) => record.scope === scope)
+    .filter((record) => scope === 'class' ? record.classId === classId : (record.profileId === student.id || record.studentName === student.name))
+    .flatMap((record) => {
+      const matched = (record.students || []).filter((score) => (
+        (student.id && (score.studentId === student.id || score.id === student.id)) || score.name === student.name
+      ))
+      return matched.map((score) => ({
+        date: record.date || getLocalDateKey(new Date(record.createdAt || Date.now())),
+        text: `${formatTeachingDate(record.date)}    ${record.title || '出门测'}：${formatTeachingScore(score, record)}`
+      }))
+    })
+    .sort(compareTeachingRows)
+}
+
+function renderScoreRows(rows) {
+  if (!rows.length) return '<div class="teaching-empty-line">暂无成绩</div>'
+  return `<ul class="teaching-data-list">${rows.map((row) => `<li>${escapeHtml(row.text)}</li>`).join('')}</ul>`
+}
+
+function renderFeedbackRows(rows) {
+  if (!rows.length) return '<div class="teaching-empty-line">暂无反馈记录</div>'
+  return `<ul class="teaching-data-list">${rows.map((row) => `<li>${escapeHtml(row.text)}</li>`).join('')}</ul>`
+}
+
+function renderDateList(dates) {
+  const normalized = uniqueSortedDates(dates)
+  if (!normalized.length) return '<div class="teaching-empty-line">暂无记录</div>'
+  return `<ul class="teaching-data-list">${normalized.map((date) => `<li>${escapeHtml(formatTeachingDate(date))}</li>`).join('')}</ul>`
+}
+
+function uniqueSortedDates(dates) {
+  return Array.from(new Set((dates || []).filter(Boolean))).sort((left, right) => String(left).localeCompare(String(right)))
+}
+
+function compareTeachingRows(left, right) {
+  return String(left.date).localeCompare(String(right.date))
+}
+
+function getTeachingRecordDate(item) {
+  return item.lessonDate || getLocalDateKey(new Date(item.createdAt || Date.now()))
+}
+
+function getFeedbackFormatLabel(item) {
+  const format = item.feedbackFormat === 'image' ? '图片式' : '文字式'
+  const scope = item.feedbackScope === 'class' ? '班级反馈' : '个性化反馈'
+  return `${format}${scope}`
+}
+
+function formatTeachingScore(score, record) {
+  if (record.mode === 'grade') return score.grade || '-'
+  const hasScore = score.score !== null && score.score !== '' && typeof score.score !== 'undefined'
+  const value = hasScore && Number.isFinite(Number(score.score)) ? Number(score.score) : '-'
+  return `${value}/${record.totalScore || 100}`
+}
+
+function formatTeachingDate(dateValue) {
+  const raw = String(dateValue || '').trim()
+  const match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (match) return `${match[1]}-${Number(match[2])}-${Number(match[3])}`
+
+  const date = raw ? new Date(raw) : new Date()
+  if (Number.isNaN(date.getTime())) return raw
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
 }
 
 function renderTeachingRoster() {
@@ -2059,6 +2335,14 @@ async function handleTeachingClick(event) {
     mergePrimaryIntoTeachingData()
     await saveTeachingData()
   }
+  if (action === 'select-data-class') {
+    state.teaching.selectedClassId = id
+    renderTeachingPanel()
+  }
+  if (action === 'select-data-one') {
+    state.teaching.selectedOneProfileId = id
+    renderTeachingPanel()
+  }
   if (action === 'add-class') addTeachingClass()
   if (action === 'delete-class') deleteTeachingClass(id)
   if (action === 'add-module') addTeachingModule()
@@ -2882,22 +3166,90 @@ async function captureTeachingPanel() {
   }, 'image/png')
 }
 
-function saveFeedbackHistory(payload, feedbacks) {
-  if (!Array.isArray(feedbacks) || !feedbacks.length) return
+async function applyFeedbackToTeachingData() {
+  const pending = state.pendingTeachingApplication
+  if (!pending || pending.applied || pending.applying) return
 
-  state.teaching.data.feedbackHistory.unshift({
+  pending.applying = true
+  renderTeachingApplyBar()
+
+  try {
+    if (!state.teaching.loaded) await loadTeachingData()
+    mergePrimaryIntoTeachingData()
+
+    const entry = buildFeedbackHistoryEntry(pending.payload, pending.feedbacks, pending.createdAt)
+    state.teaching.data.feedbackHistory = [
+      entry,
+      ...(state.teaching.data.feedbackHistory || []).filter((item) => item.id !== entry.id)
+    ].slice(0, 500)
+
+    const scoreRecord = buildScoreRecordFromFeedbackEntry(entry)
+    if (scoreRecord) {
+      state.teaching.data.scoreRecords = [
+        scoreRecord,
+        ...(state.teaching.data.scoreRecords || []).filter((item) => item.sourceFeedbackId !== entry.id)
+      ]
+    }
+
+    await saveTeachingData({ silent: true })
+    pending.applied = true
+    showToast('已应用到教学数据')
+    if (state.mode === 'teaching') renderTeachingPanel()
+  } catch (error) {
+    showToast(error.message || '应用教学数据失败')
+  } finally {
+    pending.applying = false
+    renderTeachingApplyBar()
+  }
+}
+
+function buildFeedbackHistoryEntry(payload, feedbacks, createdAt = Date.now()) {
+  return {
     id: createId('history'),
     mode: payload.mode,
+    classId: payload.classId || '',
     feedbackScope: payload.feedbackScope || 'individual',
     feedbackFormat: payload.feedbackFormat || 'text',
     className: payload.className,
+    profileId: payload.profileId || '',
+    studentName: payload.mode === 'oneOnOne' && payload.students && payload.students[0] ? payload.students[0].name : '',
     lessonTitle: payload.lessonTitle,
+    lessonDate: payload.lessonDate || getLocalDateKey(new Date(createdAt)),
+    lessonDateText: payload.lessonDateText || '',
     courseNote: payload.courseNote,
+    exitTest: payload.exitTest || null,
     feedbacks,
+    createdAt
+  }
+}
+
+function buildScoreRecordFromFeedbackEntry(entry) {
+  const exitTest = entry.exitTest
+  if (!exitTest || !Array.isArray(exitTest.students) || !exitTest.students.length) return null
+
+  const mode = exitTest.mode === 'grade' ? 'grade' : 'percent'
+  return {
+    id: createId('score'),
+    sourceFeedbackId: entry.id,
+    scope: entry.mode,
+    classId: entry.classId || '',
+    className: entry.className || '',
+    profileId: entry.profileId || '',
+    studentName: entry.studentName || '',
+    title: exitTest.selectedLecture ? `出门测 · ${exitTest.selectedLecture}` : '出门测',
+    subject: entry.lessonTitle || '',
+    date: entry.lessonDate || getLocalDateKey(new Date(entry.createdAt)),
+    mode,
+    totalScore: mode === 'grade' ? null : Number(exitTest.totalScore || 100),
+    students: exitTest.students.map((student) => ({
+      studentId: student.id || student.studentId || '',
+      name: student.name,
+      score: mode === 'grade' ? null : Number(student.score),
+      grade: mode === 'grade' ? student.grade : '',
+      note: student.note || ''
+    })).filter((student) => student.name),
     createdAt: Date.now()
-  })
-  state.teaching.data.feedbackHistory = state.teaching.data.feedbackHistory.slice(0, 200)
-  saveTeachingData({ silent: true })
+  }
 }
 
 function getScoreRecordsForClass(classId) {
@@ -3290,7 +3642,7 @@ function renderMode() {
 
   if (state.mode === 'teaching' || state.mode === 'paperAnalysis') {
     renderTeachingPanel()
-    if (!state.teaching.loading && !state.teaching.data.updatedAt) loadTeachingData()
+    if (!state.teaching.loading && !state.teaching.loaded) loadTeachingData()
   }
 }
 
@@ -3652,6 +4004,7 @@ function renderResults() {
   els.resultNote.textContent = state.feedbacks.length
     ? (imageMode ? `${state.feedbacks.length} 张图片反馈报告已生成 · 下方可逐张查看和导出` : `${state.feedbacks.length} 条反馈 · 全部已展开`)
     : '生成后会显示在这里'
+  renderTeachingApplyBar()
   renderDebugSummary()
 
   if (!state.feedbacks.length) {
@@ -3681,6 +4034,23 @@ function renderResults() {
       <p class="result-text">${escapeHtml(item.feedback)}</p>
     </article>
   `).join('')
+}
+
+function renderTeachingApplyBar() {
+  if (!els.teachingApplyBar || !els.applyTeachingDataBtn) return
+
+  const pending = state.pendingTeachingApplication
+  const shouldShow = Boolean(pending && state.feedbacks.length)
+  els.teachingApplyBar.classList.toggle('hidden', !shouldShow)
+  els.applyTeachingDataBtn.disabled = !shouldShow || pending.applying || pending.applied
+  els.applyTeachingDataBtn.textContent = pending && pending.applied
+    ? '已应用到教学数据'
+    : (pending && pending.applying ? '正在应用...' : '确认应用到教学数据')
+  if (els.teachingApplyHint) {
+    els.teachingApplyHint.textContent = pending && pending.applied
+      ? '本次反馈已写入教学数据。'
+      : '确认后，本次反馈会写入教学数据并统计到课/成绩。'
+  }
 }
 
 function isImageFeedbackMode() {
@@ -5094,7 +5464,14 @@ async function generateFeedback() {
 
     state.feedbacks = Array.isArray(data.feedbacks) ? data.feedbacks : []
     state.debug = data.debug || null
-    saveFeedbackHistory(payload, state.feedbacks)
+    state.pendingTeachingApplication = {
+      id: createId('pending-teaching'),
+      payload,
+      feedbacks: state.feedbacks,
+      createdAt: Date.now(),
+      applying: false,
+      applied: false
+    }
     renderResults()
     renderImageReport(payload)
     showToast(data.demo ? (data.message || '已生成演示反馈，配置 API Key 后会调用 AI') : '反馈已生成')
@@ -5159,6 +5536,7 @@ function buildGeneratePayload() {
       feedbackScope,
       feedbackFormat,
       showAllScoresInIndividualReports,
+      classId: selectedClass.id,
       className: selectedClass.name,
       grade: selectedClass.grade,
       template: currentTemplate,
@@ -5207,6 +5585,7 @@ function buildGeneratePayload() {
     mode: 'oneOnOne',
     feedbackScope: 'individual',
     feedbackFormat,
+    profileId: selectedProfile.id,
     className: `${selectedProfile.name} 一对一`,
     grade: selectedProfile.grade,
     template: currentTemplate,
