@@ -2876,7 +2876,7 @@ function buildUserContent(payload, courseware) {
         '',
         '请严格返回 JSON，字段为 feedbacks，每项包含 studentId、name、feedback、templateFields。',
         'studentId 必须原样使用学生表现数据 JSON 中对应学生的 id，name 必须原样使用对应学生的 name。',
-        'templateFields 必须包含 courseContent、courseKnowledgePoint、performanceText、personalizedRemark、learningSuggestion，可额外包含 subject（根据课件判断的科目），用于程序填入老师模板。',
+        'templateFields 必须包含 courseContent、courseKnowledgePoint、performanceText、personalizedRemark、learningSuggestion、subject；subject 是根据课件判断的科目，无法判断时填空字符串。',
         payload.feedbackFormat === 'image'
           ? '图片报告文案必须包含从课件深度解析得到的【课程内容】和【学习重点】：【课程内容】用一句不带编号、不列点的完整句子总结本节课件；【学习重点】用 1、2、3 分行列出核心重点。不要用上课日期、时段、课后作业或“教材讲次”替代课程内容。'
           : '',
