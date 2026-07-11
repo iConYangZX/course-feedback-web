@@ -1444,7 +1444,7 @@ function renderTeachingRoster() {
         </div>
         <div class="form-grid two">
           <label class="field"><span>班级名称</span><input data-teaching-field="newClassName" type="text" placeholder="例如：清北4班" /></label>
-          <label class="field"><span>年级</span><select data-teaching-field="newClassGrade"><option>初三</option><option selected>高一</option><option>高二</option><option>高三</option></select></label>
+          <label class="field"><span>年级</span><select data-teaching-field="newClassGrade"><option>初一</option><option>初二</option><option>初三</option><option selected>高一</option><option>高二</option><option>高三</option></select></label>
         </div>
         <label class="field"><span>学生名单</span><textarea data-teaching-field="newClassStudents" rows="5" placeholder="每行一个学生，也可以用逗号分隔"></textarea></label>
         <div class="panel-actions"><button class="primary-button" data-teaching-action="add-class" type="button">新增花名册</button></div>
