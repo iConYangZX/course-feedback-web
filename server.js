@@ -13,10 +13,11 @@ require('dotenv').config()
 
 const app = express()
 const execFileAsync = promisify(execFile)
+const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 20 * 1024 * 1024
+    fileSize: MAX_UPLOAD_FILE_SIZE_BYTES
   }
 })
 
@@ -29,6 +30,7 @@ const USAGE_PATH = path.join(DATA_DIR, 'usage.json')
 const ACCOUNTS_PATH = path.join(DATA_DIR, 'accounts.json')
 const FEEDBACK_DATA_PATH = path.join(DATA_DIR, 'feedback-data.json')
 const MATERIAL_INDEX_PATH = path.join(DATA_DIR, 'materials.json')
+const MATERIAL_FILES_DIR = path.join(DATA_DIR, 'material-files')
 const LEGACY_USAGE_PATH = path.join(LEGACY_DATA_DIR, 'usage.json')
 const LEGACY_ACCOUNTS_PATH = path.join(LEGACY_DATA_DIR, 'accounts.json')
 const OCR_BINARY_PATH = path.join(__dirname, 'scripts', 'ocr_image')
@@ -289,7 +291,10 @@ app.post('/api/materials', requireAccessMiddleware, upload.single('material'), a
       material: getSafeMaterial(material)
     })
   } catch (error) {
-    res.status(400).json({ error: error.message || '上传教材失败' })
+    const message = getMaterialUploadErrorMessage(error)
+    const isInputError = message === '请先上传教材文件' || message.startsWith('教材目前支持')
+    if (!isInputError) console.error('Failed to upload material', error)
+    res.status(isInputError ? 400 : 500).json({ error: message })
   }
 })
 
@@ -582,7 +587,7 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
 
     const payload = parsePayload(req.body.payload)
     const storedMaterialFile = !coursewareFiles.length && payload.materialId
-      ? getStoredMaterialFile(session, payload.materialId)
+      ? await getStoredMaterialFile(session, payload.materialId)
       : null
     validatePayload(payload, Boolean(coursewareFiles.length || storedMaterialFile))
 
@@ -621,6 +626,24 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
       error: getUserFacingError(error)
     })
   }
+})
+
+app.use((error, req, res, next) => {
+  if (res.headersSent) {
+    next(error)
+    return
+  }
+
+  if (error instanceof multer.MulterError) {
+    const message = error.code === 'LIMIT_FILE_SIZE'
+      ? `单个文件不能超过 ${Math.floor(MAX_UPLOAD_FILE_SIZE_BYTES / 1024 / 1024)}MB`
+      : `文件上传失败：${error.message}`
+    res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: message })
+    return
+  }
+
+  console.error('Unhandled request error', error)
+  res.status(500).json({ error: '服务器处理文件时出错，请稍后重试' })
 })
 
 initializeStorage()
@@ -830,7 +853,11 @@ async function initializeStorage() {
   feedbackDataState = readFeedbackDataState()
   materialState = readMaterialState()
 
-  if (!DATABASE_URL) return
+  if (!DATABASE_URL) {
+    const materialsMigrated = await migrateLegacyMaterialStorage()
+    if (materialsMigrated) await writeMaterialState()
+    return
+  }
 
   databasePool = createDatabasePool()
   await ensureDatabaseSchema()
@@ -860,10 +887,20 @@ async function initializeStorage() {
   }
 
   const databaseMaterials = await readDatabaseState('materials')
+  let shouldSeedMaterialState = false
   if (databaseMaterials && typeof databaseMaterials === 'object' && Array.isArray(databaseMaterials.items)) {
     materialState = databaseMaterials
   } else {
-    await writeDatabaseState('materials', materialState)
+    shouldSeedMaterialState = true
+  }
+
+  const materialsMigrated = await migrateLegacyMaterialStorage()
+  if (materialsMigrated || shouldSeedMaterialState) {
+    try {
+      await writeMaterialState()
+    } catch (error) {
+      console.error('Failed to persist migrated material metadata', error)
+    }
   }
 }
 
@@ -891,6 +928,24 @@ async function ensureDatabaseSchema() {
       value jsonb not null,
       updated_at timestamptz not null default now()
     )
+  `)
+
+  await databasePool.query(`
+    create table if not exists course_materials (
+      id text primary key,
+      owner_id text not null,
+      original_name text not null,
+      mime text not null,
+      size bigint not null,
+      data bytea not null,
+      lectures jsonb not null default '[]'::jsonb,
+      created_at timestamptz not null default now()
+    )
+  `)
+
+  await databasePool.query(`
+    create index if not exists course_materials_owner_id_idx
+    on course_materials (owner_id)
   `)
 }
 
@@ -1490,6 +1545,43 @@ async function writeMaterialState() {
   await writeDatabaseState('materials', materialState)
 }
 
+function getMaterialUploadErrorMessage(error) {
+  const message = trim(error && error.message)
+  const code = trim(error && error.code)
+
+  if (message === '请先上传教材文件' || message.startsWith('教材目前支持')) return message
+  if (code === '57014' || /timeout|timed out|超时/i.test(message)) {
+    return '教材写入数据库超时，请稍后重试'
+  }
+  if (code === 'ENOSPC') return '服务器临时存储空间不足，请联系管理员'
+  if (/connection|connect|ECONN|数据库/i.test(message)) {
+    return '教材数据库连接失败，请稍后重试'
+  }
+  return '教材保存到数据库失败，请稍后重试'
+}
+
+async function migrateLegacyMaterialStorage() {
+  let migrated = false
+
+  for (const material of materialState.items) {
+    if (!material || !material.dataBase64) continue
+
+    const buffer = Buffer.from(material.dataBase64, 'base64')
+    if (!buffer.length) continue
+
+    try {
+      Object.assign(material, getMaterialStorageMetadata(material))
+      await writeMaterialBlob(material, buffer)
+      delete material.dataBase64
+      migrated = true
+    } catch (error) {
+      console.error(`Failed to migrate material ${trim(material.id) || 'unknown'}`, error)
+    }
+  }
+
+  return migrated
+}
+
 async function saveUploadedMaterial(ownerId, file, input = {}) {
   const originalName = normalizeUploadFileName(file.originalname, 'material.pdf')
   const lowerName = originalName.toLowerCase()
@@ -1497,21 +1589,118 @@ async function saveUploadedMaterial(ownerId, file, input = {}) {
     throw new Error('教材目前支持 PDF、Word、PPT、文本或图片文件')
   }
 
+  const requestedMaterialId = trim(input.materialId)
+  const requestedIdIsValid = /^mat-[a-z0-9-]{8,}$/i.test(requestedMaterialId)
+  const requestedIdOwner = requestedIdIsValid
+    ? materialState.items.find((item) => item.id === requestedMaterialId)
+    : null
   const material = {
-    id: `mat-${crypto.randomUUID()}`,
+    id: requestedIdIsValid && (!requestedIdOwner || requestedIdOwner.ownerId === ownerId)
+      ? requestedMaterialId
+      : `mat-${crypto.randomUUID()}`,
     ownerId,
     originalName,
     mime: getMimeType(originalName, file.mimetype || 'application/octet-stream'),
     size: file.size,
-    dataBase64: file.buffer.toString('base64'),
     lectures: parseMaterialLectures(input.lectures),
     createdAt: Date.now()
   }
 
+  const previousItems = materialState.items.slice()
+  const existed = previousItems.some((item) => item.id === material.id)
+
+  await writeMaterialBlob(material, file.buffer)
   materialState.items = materialState.items.filter((item) => item.id !== material.id)
   materialState.items.push(material)
-  await writeMaterialState()
+
+  try {
+    await writeMaterialState()
+  } catch (error) {
+    materialState.items = previousItems
+    if (!existed) await deleteMaterialBlob(material.id).catch(() => {})
+    throw error
+  }
+
   return material
+}
+
+async function writeMaterialBlob(material, buffer) {
+  const metadata = getMaterialStorageMetadata(material)
+
+  if (databasePool) {
+    await databasePool.query(`
+      insert into course_materials (
+        id, owner_id, original_name, mime, size, data, lectures, created_at
+      )
+      values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+      on conflict (id)
+      do update set
+        owner_id = excluded.owner_id,
+        original_name = excluded.original_name,
+        mime = excluded.mime,
+        size = excluded.size,
+        data = excluded.data,
+        lectures = excluded.lectures,
+        created_at = excluded.created_at
+    `, [
+      metadata.id,
+      metadata.ownerId,
+      metadata.originalName,
+      metadata.mime,
+      metadata.size,
+      buffer,
+      JSON.stringify(metadata.lectures),
+      new Date(metadata.createdAt)
+    ])
+    return
+  }
+
+  fs.mkdirSync(MATERIAL_FILES_DIR, { recursive: true })
+  fs.writeFileSync(getMaterialFilePath(metadata.id), buffer)
+}
+
+async function readMaterialBlob(material) {
+  if (material.dataBase64) return Buffer.from(material.dataBase64, 'base64')
+
+  if (databasePool) {
+    const result = await databasePool.query(`
+      select data
+      from course_materials
+      where id = $1 and owner_id = $2
+      limit 1
+    `, [material.id, material.ownerId])
+    return result.rows.length ? result.rows[0].data : null
+  }
+
+  const filePath = getMaterialFilePath(material.id)
+  return fs.existsSync(filePath) ? fs.readFileSync(filePath) : null
+}
+
+async function deleteMaterialBlob(materialId) {
+  if (databasePool) {
+    await databasePool.query('delete from course_materials where id = $1', [materialId])
+    return
+  }
+
+  const filePath = getMaterialFilePath(materialId)
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+}
+
+function getMaterialStorageMetadata(material = {}) {
+  return {
+    id: trim(material.id) || `mat-${crypto.randomUUID()}`,
+    ownerId: trim(material.ownerId),
+    originalName: normalizeUploadFileName(material.originalName || material.name, 'material.pdf'),
+    mime: trim(material.mime) || getMimeType(material.originalName || material.name, 'application/octet-stream'),
+    size: Math.max(0, Number(material.size || 0)),
+    lectures: parseMaterialLectures(material.lectures),
+    createdAt: Number(material.createdAt || Date.now())
+  }
+}
+
+function getMaterialFilePath(materialId) {
+  const safeId = trim(materialId).replace(/[^a-z0-9_-]/gi, '_')
+  return path.join(MATERIAL_FILES_DIR, safeId || 'material')
 }
 
 function parseMaterialLectures(rawLectures) {
@@ -1527,18 +1716,21 @@ function parseMaterialLectures(rawLectures) {
   }))
 }
 
-function getStoredMaterialFile(session, materialId) {
+async function getStoredMaterialFile(session, materialId) {
   const ownerId = getDataOwnerId(session)
   const material = materialState.items.find((item) => item.id === materialId && item.ownerId === ownerId)
 
-  if (!material || !material.dataBase64) {
+  if (!material) {
     throw new Error('没有找到班级教材，请重新上传')
   }
+
+  const buffer = await readMaterialBlob(material)
+  if (!buffer || !buffer.length) throw new Error('没有找到班级教材，请重新上传')
 
   return {
     originalname: normalizeUploadFileName(material.originalName || material.name, 'material.pdf'),
     mimetype: material.mime,
-    buffer: Buffer.from(material.dataBase64, 'base64')
+    buffer
   }
 }
 

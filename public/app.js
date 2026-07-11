@@ -106,6 +106,10 @@ const state = {
   },
   adminUsers: [],
   coursewareFiles: [],
+  classTextbook: {
+    fileKey: '',
+    lectures: []
+  },
   pdfSelection: {
     items: [],
     activeFileKey: '',
@@ -5243,9 +5247,14 @@ async function handleClassTextbookChange() {
     ? els.classTextbookInput.files[0]
     : null
   updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
-  if (!file || !els.classTextbookStatus) return
+  if (!file) {
+    state.classTextbook = { fileKey: '', lectures: [] }
+    return
+  }
+  if (!els.classTextbookStatus) return
 
   if (!isPdfFile(file)) {
+    state.classTextbook = { fileKey: getFileKey(file), lectures: [] }
     els.classTextbookStatus.textContent = `已选择：${file.name}。保存班级时会上传为整本教材。`
     return
   }
@@ -5254,28 +5263,80 @@ async function handleClassTextbookChange() {
 
   try {
     const lectures = await detectPdfLecturesFromFile(file)
+    state.classTextbook = { fileKey: getFileKey(file), lectures }
     els.classTextbookStatus.textContent = lectures.length
       ? `已选择：${file.name}，检测到 ${lectures.length} 个讲次，保存班级后可直接选择。`
       : `已选择：${file.name}，未检测到明显讲次，保存后默认读取整本教材。`
   } catch (error) {
+    state.classTextbook = { fileKey: getFileKey(file), lectures: [] }
     els.classTextbookStatus.textContent = `已选择：${file.name}，讲次检测失败，保存后仍可作为整本教材使用。`
   }
 }
 
 async function uploadClassTextbook(file) {
-  const formData = new FormData()
-  const lectures = isPdfFile(file) ? await detectPdfLecturesFromFile(file).catch(() => []) : []
-  formData.append('material', file, file.name)
-  formData.append('lectures', JSON.stringify(lectures))
+  const cachedLectures = state.classTextbook.fileKey === getFileKey(file)
+    ? state.classTextbook.lectures
+    : null
+  const lectures = Array.isArray(cachedLectures)
+    ? cachedLectures
+    : (isPdfFile(file) ? await detectPdfLecturesFromFile(file).catch(() => []) : [])
+  const materialId = createMaterialUploadId()
 
-  const response = await fetch('/api/materials', {
-    method: 'POST',
-    body: formData
-  })
-  const data = await response.json().catch(() => ({}))
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const formData = new FormData()
+    formData.append('material', file, file.name)
+    formData.append('lectures', JSON.stringify(lectures))
+    formData.append('materialId', materialId)
 
-  if (!response.ok || data.error) throw new Error(data.error || '教材上传失败')
-  return data.material
+    let response
+    try {
+      response = await fetch('/api/materials', {
+        method: 'POST',
+        body: formData
+      })
+    } catch (error) {
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 900))
+        continue
+      }
+      throw new Error('无法连接教材服务器，请刷新页面后重试')
+    }
+
+    const responseText = await response.text()
+    let data = {}
+    try {
+      data = responseText ? JSON.parse(responseText) : {}
+    } catch (error) {
+      data = {}
+    }
+
+    if (response.ok && !data.error && data.material) return data.material
+
+    const retryable = [500, 502, 503, 504].includes(response.status)
+    if (retryable && attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 900))
+      continue
+    }
+
+    throw new Error(data.error || getMaterialUploadStatusMessage(response.status))
+  }
+
+  throw new Error('教材上传失败，请刷新页面后重试')
+}
+
+function createMaterialUploadId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return `mat-${window.crypto.randomUUID()}`
+  }
+  return `mat-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function getMaterialUploadStatusMessage(status) {
+  if (status === 401) return '登录状态已失效，请重新登录后上传教材'
+  if (status === 413) return '教材文件超过服务器允许的大小'
+  if ([502, 503, 504].includes(status)) return '教材服务器正在重启，请稍后重试'
+  if (status >= 500) return '教材保存到数据库失败，请稍后重试'
+  return `教材上传失败（错误码 ${status || '未知'}）`
 }
 
 async function detectPdfLecturesFromFile(file) {
@@ -5405,6 +5466,7 @@ function appendKeywordToTextarea(textarea, keyword) {
 
 function resetClassForm() {
   state.editingClassId = ''
+  state.classTextbook = { fileKey: '', lectures: [] }
   els.classNameInput.value = ''
   els.gradeSelect.value = '高一'
   els.studentListInput.value = ''
@@ -5441,6 +5503,7 @@ function fillClassForm(classInfo) {
   }
 
   state.editingClassId = classInfo.id
+  state.classTextbook = { fileKey: '', lectures: [] }
   els.classNameInput.value = classInfo.name
   els.gradeSelect.value = classInfo.grade
   els.studentListInput.value = classInfo.students.map((student) => student.name).join('\n')
