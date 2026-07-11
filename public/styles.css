@@ -2202,50 +2202,100 @@ textarea:focus {
 
 .courseware-selection-item {
   display: grid;
-  grid-template-columns: minmax(66px, auto) minmax(160px, 1fr) minmax(180px, 240px) minmax(170px, auto) auto;
+  grid-template-areas:
+    "check main lecture remove"
+    "check range range remove";
+  grid-template-columns: 52px minmax(0, 1fr) minmax(160px, 220px) auto;
   align-items: center;
-  gap: 10px 12px;
+  gap: 8px 12px;
   min-width: 0;
-  padding: 10px;
+  padding: 12px;
   border: 1px solid rgba(36, 48, 89, 0.08);
   border-radius: 8px;
   background: #fff;
 }
 
 .courseware-selection-check {
+  grid-area: check;
   display: inline-flex;
   align-items: center;
+  align-self: start;
+  min-height: 36px;
   gap: 6px;
   color: #454866;
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 800;
   white-space: nowrap;
 }
 
+.courseware-selection-check input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  accent-color: var(--green);
+  box-shadow: none;
+}
+
+.courseware-selection-check input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
 .courseware-selection-main {
+  grid-area: main;
   display: grid;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
 }
 
 .courseware-selection-name {
   overflow: hidden;
   color: #252842;
+  font-size: 14px;
+  line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .courseware-selection-meta {
+  overflow: hidden;
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.courseware-selection-lecture {
+  grid-area: lecture;
+  min-width: 0;
+}
+
+.courseware-selection-range {
+  grid-area: range;
+  min-width: 0;
+}
+
+.courseware-selection-item > .list-delete-button {
+  grid-area: remove;
+  align-self: center;
 }
 
 .courseware-selection-loading,
 .courseware-selection-placeholder {
+  overflow: hidden;
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .courseware-lecture-select {
@@ -2272,7 +2322,7 @@ textarea:focus {
 .courseware-word-range {
   display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
@@ -2470,22 +2520,26 @@ textarea:focus {
   }
 
   .courseware-selection-item {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "check main"
+      ". lecture"
+      ". range"
+      ". remove";
+    grid-template-columns: 52px minmax(0, 1fr);
   }
 
-  .courseware-selection-meta,
-  .courseware-selection-main,
-  .courseware-lecture-select,
-  .courseware-selection-loading,
-  .courseware-selection-placeholder,
-  .courseware-word-range,
   .courseware-selection-item .list-delete-button {
-    grid-column: 2;
+    justify-self: start;
   }
 
   .courseware-word-range {
     justify-content: flex-start;
-    flex-wrap: wrap;
+    gap: 4px;
+    flex-wrap: nowrap;
+  }
+
+  .courseware-word-range input {
+    width: 52px;
   }
 
   .modal-backdrop {

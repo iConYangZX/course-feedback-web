@@ -6448,21 +6448,23 @@ function renderCoursewareSelectionList() {
   const items = state.pdfSelection.items || []
   return `
     <div class="courseware-selection-list">
-      ${items.map((item) => `
-        <div class="courseware-selection-item">
-          <label class="courseware-selection-check">
-            <input data-courseware-include="${escapeHtml(item.fileKey)}" type="checkbox" ${item.included === false ? '' : 'checked'} />
+      ${items.map((item) => {
+        const selectionMeta = getCoursewareSelectionMeta(item)
+        return `
+        <div class="courseware-selection-item" data-included="${item.included === false ? 'false' : 'true'}">
+          <label class="courseware-selection-check" title="是否让 AI 读取此文件">
+            <input data-courseware-include="${escapeHtml(item.fileKey)}" type="checkbox" aria-label="读取 ${escapeHtml(item.fileName)}" ${item.included === false ? '' : 'checked'} />
             <span>读取</span>
           </label>
           <div class="courseware-selection-main">
-            <span class="courseware-selection-name">${escapeHtml(item.fileName)}</span>
-            <span class="courseware-selection-meta">${escapeHtml(getCoursewareSelectionMeta(item))}</span>
+            <span class="courseware-selection-name" title="${escapeHtml(item.fileName)}">${escapeHtml(item.fileName)}</span>
+            <span class="courseware-selection-meta" title="${escapeHtml(selectionMeta)}">${escapeHtml(selectionMeta)}</span>
           </div>
-          ${renderCoursewareLectureControl(item)}
-          ${renderCoursewareRangeControl(item)}
+          <div class="courseware-selection-lecture">${renderCoursewareLectureControl(item)}</div>
+          <div class="courseware-selection-range">${renderCoursewareRangeControl(item)}</div>
           <button class="list-delete-button" data-courseware-remove="${escapeHtml(item.fileKey)}" type="button">移除</button>
         </div>
-      `).join('')}
+      `}).join('')}
     </div>
   `
 }
