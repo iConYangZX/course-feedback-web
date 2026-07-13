@@ -483,6 +483,16 @@
 
           <div id="studentTable" class="student-table"></div>
 
+          <label class="field generation-instruction-field">
+            <span>本次生成要求（仅本次有效）</span>
+            <textarea
+              id="generationInstructionInput"
+              rows="4"
+              maxlength="1200"
+              placeholder="例如：语气更温和；先肯定进步，再具体说明需要改进的地方；课堂表现控制在 200 字左右"
+            ></textarea>
+          </label>
+
           <div class="panel-actions">
             <button class="primary-button" id="generateBtn" type="button">AI 生成反馈</button>
             <button class="secondary-button" id="copyAllBtn" type="button">复制全部</button>

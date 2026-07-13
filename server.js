@@ -686,6 +686,8 @@ function validatePayload(payload, hasCourseware = false) {
     throw new Error('请填写课程主题、补充课程内容或上传课件')
   }
 
+  payload.generationInstruction = trim(payload.generationInstruction).slice(0, 1200)
+
   payload.students = payload.students
     .map((student, index) => ({
       id: trim(student.id) || `student-${index + 1}`,
@@ -3270,6 +3272,9 @@ function buildSystemPrompt() {
     '不能编造课件或课堂中没有依据的细节；课件信息不足时，用课程主题和老师备注生成稳妥反馈。',
     '每个学生反馈建议 120 到 220 个汉字。',
     '每一条反馈必须包含：1 个本节课/课件里的具体知识点，1 个该学生的课堂表现等级，若老师填写了备注则必须自然写入备注。',
+    '学生 remark、特殊情况和具体表现必须融入【课堂表现】的同一个连续段落，不能在课堂表现之后另起一行或另起一段重复说明。',
+    'templateFields.performanceText 必须已经包含该学生 remark 的核心信息；personalizedRemark 只用于结构化记录，不能作为独立段落再次输出。',
+    '如果老师提供了“本次生成要求”，只在当前请求中按其调整语气、详略、重点和写法；不得因此违反模板、事实准确性、学生姓名对应和必填结构。',
     '如果反馈类型是班级整体反馈，请面向整个班级生成课堂表现总结，不要写成单个学生逐条反馈。',
     '如果提供了上课日期，可以自然使用；如果上课时段为空或未填写，任何文字反馈和图片报告文案都不要出现时段，也不要自行编造时段。',
     '如果提供了出门测成绩，必须写入反馈：个性化学生反馈只写当前学生自己的成绩；班级整体反馈要按从高到低列出全班所有学生成绩。',
@@ -3302,6 +3307,10 @@ function buildUserContent(payload, courseware) {
         '',
         getTemplateRules(),
         '',
+        payload.generationInstruction
+          ? `老师对本次生成的临时要求（仅本次有效）：\n${payload.generationInstruction}`
+          : '',
+        '',
         payload.courseNote ? `老师补充的课程内容：\n${payload.courseNote}` : '',
         payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
         payload.homework ? `课后作业：${payload.homework}` : '',
@@ -3319,7 +3328,7 @@ function buildUserContent(payload, courseware) {
           : '',
         'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
         '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
-        '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须写入该学生 remark 的核心信息。',
+        '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须把其核心信息融入【课堂表现】同一段，不能另起一行或单独重复。',
         '一对一学生数据里若 personality 或 habit 非空，必须结合这些长期档案信息给出更贴合该学生的表达和建议。',
         '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
         '不同学生不要套用完全相同的句子。',
@@ -3412,6 +3421,10 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     '',
     getTemplateRules(),
     '',
+    payload.generationInstruction
+      ? `老师对本次生成的临时要求（仅本次有效）：\n${payload.generationInstruction}`
+      : '',
+    '',
     payload.courseNote ? `老师补充的课程内容：\n${payload.courseNote}` : '',
     payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
     payload.homework ? `课后作业：${payload.homework}` : '',
@@ -3432,7 +3445,7 @@ function buildPlainPrompt(payload, courseware, options = {}) {
       : '',
     'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
     '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
-    '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须写入该学生 remark 的核心信息。',
+    '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须把其核心信息融入【课堂表现】同一段，不能另起一行或单独重复。',
     '一对一学生数据里若 personality 或 habit 非空，必须结合这些长期档案信息给出更贴合该学生的表达和建议。',
     '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
     '不同学生不要套用完全相同的句子。',
@@ -3696,7 +3709,12 @@ function normalizeFeedbacks(feedbacks, students, payload = {}) {
     const modelFeedback = trim(matched && matched.feedback) || fallback
     const templateFields = normalizeTemplateFields(matched && matched.templateFields, student, payload, modelFeedback)
     const templatedFeedback = applyFeedbackTemplate(payload.template, student, payload, matched, modelFeedback)
-    const feedback = sanitizeFeedbackStudentNames(templatedFeedback || modelFeedback, student, students)
+    const integratedFeedback = normalizeFeedbackPerformanceParagraph(
+      templatedFeedback || modelFeedback,
+      templateFields.performanceText,
+      student.remark
+    )
+    const feedback = sanitizeFeedbackStudentNames(integratedFeedback, student, students)
 
     return {
       studentId: student.id,
@@ -3795,16 +3813,112 @@ function normalizeTemplateFields(rawFields = {}, student, payload = {}, modelFee
   const courseContentFallback = buildCourseContentFallback(payload)
   const performanceFallback = buildPerformanceFallback(student)
   const personalizedFallback = buildPersonalizedFallback(student)
+  const personalizedRemark = trim(fields.personalizedRemark) || personalizedFallback
+  const performanceText = mergeStudentRemarkIntoPerformance(
+    trim(fields.performanceText) || performanceFallback,
+    student.remark
+  )
 
   return {
     courseContent: trim(fields.courseContent) || courseContentFallback,
     courseKnowledgePoint: trim(fields.courseKnowledgePoint) || courseContentFallback,
-    performanceText: trim(fields.performanceText) || performanceFallback,
-    personalizedRemark: trim(fields.personalizedRemark) || personalizedFallback,
+    performanceText,
+    personalizedRemark,
     learningSuggestion: trim(fields.learningSuggestion) || buildAdviceFallback(student),
     subject: trim(fields.subject),
     modelFeedback: trim(modelFeedback)
   }
+}
+
+function normalizeFeedbackPerformanceParagraph(feedback, performanceText, studentRemark) {
+  const source = trim(feedback)
+  if (!source) return source
+
+  const headingMatch = /【(?:课堂表现|学生表现)】/.exec(source)
+  if (!headingMatch) return source
+
+  const bodyStart = headingMatch.index + headingMatch[0].length
+  const remaining = source.slice(bodyStart)
+  const nextHeadingOffset = remaining.search(/【[^】]+】/)
+  const body = nextHeadingOffset >= 0 ? remaining.slice(0, nextHeadingOffset) : remaining
+  const suffix = nextHeadingOffset >= 0 ? remaining.slice(nextHeadingOffset) : ''
+  const mergedBody = mergeStudentRemarkIntoPerformance(
+    dedupeFeedbackParagraph(body) || performanceText,
+    studentRemark
+  )
+
+  return [
+    source.slice(0, bodyStart).trimEnd(),
+    mergedBody,
+    suffix.trimStart()
+  ].filter(Boolean).join('\n').trim()
+}
+
+function dedupeFeedbackParagraph(value) {
+  const tokens = normalizeInlineFeedbackText(value).split(/([，,；;。！？!?]+)/)
+  const seenParts = new Set()
+  const output = []
+
+  for (let index = 0; index < tokens.length; index += 2) {
+    const part = trim(tokens[index])
+    const punctuation = tokens[index + 1] || ''
+    const comparable = normalizeFeedbackComparisonText(part)
+    if (!part || (comparable && seenParts.has(comparable))) continue
+    if (comparable) seenParts.add(comparable)
+    output.push(`${part}${punctuation}`)
+  }
+
+  return normalizeInlineFeedbackText(output.join(' '))
+    .replace(/\s+([，,；;。！？!?])/g, '$1')
+    .replace(/([，,；;。！？!?])\s+/g, '$1')
+    .replace(/[，,；;]$/, '。')
+}
+
+function mergeStudentRemarkIntoPerformance(performanceText, studentRemark) {
+  const base = normalizeInlineFeedbackText(performanceText)
+  const remark = normalizeInlineFeedbackText(studentRemark)
+  if (!remark) return base
+
+  const missingRemarkParts = remark
+    .split(/[，,；;。！？!?]+/)
+    .map((part) => trim(part))
+    .filter(Boolean)
+    .filter((part) => !isFeedbackDetailCovered(base, part))
+  if (!missingRemarkParts.length) return base
+
+  const missingRemark = missingRemarkParts.join('，')
+  const integratedRemark = /^(课堂|本节课|该生|学生)/.test(missingRemark)
+    ? missingRemark
+    : `课堂中，${missingRemark}`
+  return `${ensureChineseSentence(base)}${ensureChineseSentence(integratedRemark)}`
+}
+
+function normalizeInlineFeedbackText(value) {
+  return trim(value)
+    .replace(/\s*\r?\n+\s*/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+}
+
+function isFeedbackDetailCovered(text, detail) {
+  const source = normalizeFeedbackComparisonText(text)
+  const target = normalizeFeedbackComparisonText(detail)
+  if (!target) return false
+  if (source.includes(target)) return true
+
+  const prefixLength = Math.min(target.length, Math.max(6, Math.floor(target.length * 0.55)))
+  return target.length >= 6 && source.includes(target.slice(0, prefixLength))
+}
+
+function normalizeFeedbackComparisonText(value) {
+  return normalizeInlineFeedbackText(value)
+    .replace(/[，,。；;：:！？!?、（）()“”\"'\s]/g, '')
+    .replace(/(?:本次|本节课|课堂中|课堂上|再)/g, '')
+}
+
+function ensureChineseSentence(value) {
+  const text = normalizeInlineFeedbackText(value)
+  if (!text) return ''
+  return /[。！？!?]$/.test(text) ? text : `${text}。`
 }
 
 function getTemplateValue(key, fields, student, payload, modelFeedback) {
@@ -3881,7 +3995,8 @@ function buildAdviceFallback(student) {
 function buildFallbackFeedback(student, payload = {}) {
   const lesson = payload.lessonTitle ? `本节课围绕“${payload.lessonTitle}”展开，` : '本节课整体学习状态较为清晰，'
   const schedule = buildFallbackScheduleText(payload)
-  const remark = student.remark ? `课堂中特别需要关注的是：${student.remark}。` : ''
+  const normalizedRemark = trim(student.remark).replace(/[。！？!?]+$/, '')
+  const remark = normalizedRemark ? `课堂中特别需要关注的是：${normalizedRemark}。` : ''
   const exitTestText = getFallbackExitTestText(student, payload)
   const advice = student.performance === '表现较差'
     ? '后续建议先把基础概念和典型题步骤补扎实，课后用少量高频题巩固。'

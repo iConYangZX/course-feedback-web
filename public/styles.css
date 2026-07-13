@@ -961,6 +961,17 @@ textarea:focus {
   gap: 10px;
 }
 
+.generation-instruction-field {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.generation-instruction-field textarea {
+  min-height: 92px;
+  background: #ffffff;
+}
+
 .student-row {
   display: grid;
   grid-template-columns: minmax(110px, 0.9fr) 136px 150px minmax(180px, 2fr) 34px;

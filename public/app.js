@@ -330,6 +330,7 @@ function bindElements() {
     studentToolbar: document.querySelector('.student-toolbar'),
     studentCount: document.querySelector('#studentCount'),
     studentTable: document.querySelector('#studentTable'),
+    generationInstructionInput: document.querySelector('#generationInstructionInput'),
     generateBtn: document.querySelector('#generateBtn'),
     copyAllBtn: document.querySelector('#copyAllBtn'),
     resultNote: document.querySelector('#resultNote'),
@@ -395,6 +396,7 @@ function bindEvents() {
       state.lastGeneratedPayload = null
       state.debug = null
       state.pendingTeachingApplication = null
+      clearGenerationInstruction()
       render()
     })
   })
@@ -508,7 +510,10 @@ function bindEvents() {
 
     state.selectedClassId = selectButton.dataset.id
     state.feedbacks = []
+    state.lastGeneratedPayload = null
     state.debug = null
+    state.pendingTeachingApplication = null
+    clearGenerationInstruction()
     fillClassForm(getSelectedClass())
     render()
   })
@@ -525,7 +530,10 @@ function bindEvents() {
 
     state.selectedOneProfileId = selectButton.dataset.id
     state.feedbacks = []
+    state.lastGeneratedPayload = null
     state.debug = null
+    state.pendingTeachingApplication = null
+    clearGenerationInstruction()
     fillOneProfileForm(getSelectedOneProfile())
     resetOneLesson()
     render()
@@ -4338,6 +4346,9 @@ function buildMissingGeneratedFeedback(student, payload = {}, sharedFields = {})
     : (student.performance === '表现优秀'
         ? '建议继续保持课堂参与度，并尝试更有挑战的变式题。'
         : '建议课后及时整理课堂重点和错题，保持稳定练习节奏。')
+  const performanceSentence = /[。！？!?]$/.test(performanceText)
+    ? performanceText
+    : `${performanceText}。`
 
   return {
     studentId: student.id,
@@ -4348,7 +4359,7 @@ function buildMissingGeneratedFeedback(student, payload = {}, sharedFields = {})
       '【核心重点】',
       courseKnowledgePoint,
       '【课堂表现】',
-      `${performanceText}。${learningSuggestion}`
+      `${performanceSentence}${learningSuggestion}`
     ].join('\n'),
     templateFields: {
       courseContent,
@@ -4482,14 +4493,13 @@ function renderImageReportSheet(options) {
   )
   const performanceDetails = [
     primaryPerformanceText,
-    templateFields.personalizedRemark && !primaryPerformanceText.includes(templateFields.personalizedRemark)
-      ? templateFields.personalizedRemark
-      : '',
-    templateFields.learningSuggestion && !primaryPerformanceText.includes(templateFields.learningSuggestion)
+    !reportSections.performance
+      && templateFields.learningSuggestion
+      && !primaryPerformanceText.includes(templateFields.learningSuggestion)
       ? `后续建议：${templateFields.learningSuggestion}`
       : ''
   ].filter(Boolean)
-  const performanceText = normalizeReportText(performanceDetails.join('\n\n'))
+  const performanceText = normalizeReportParagraphText(performanceDetails.join(' '))
   const isIndividual = item.scope !== 'class'
   const showAllScores = isIndividual
     && state.mode === 'class'
@@ -4607,6 +4617,13 @@ function normalizeReportText(text) {
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/^\s*[：:，,。；;]\s*/, '')
+    .trim()
+}
+
+function normalizeReportParagraphText(text) {
+  return normalizeReportText(text)
+    .replace(/\s*\n+\s*/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
     .trim()
 }
 
@@ -5897,6 +5914,7 @@ async function generateFeedback() {
       applying: false,
       applied: false
     }
+    clearGenerationInstruction()
     renderResults()
     renderImageReport(payload)
     showToast(data.demo ? (data.message || '已生成演示反馈，配置 API Key 后会调用 AI') : '反馈已生成')
@@ -5911,6 +5929,9 @@ async function generateFeedback() {
 function buildGeneratePayload() {
   const lessonTitle = els.lessonTitleInput.value.trim()
   const courseNote = els.courseNoteInput.value.trim()
+  const generationInstruction = els.generationInstructionInput
+    ? els.generationInstructionInput.value.trim()
+    : ''
 
   if (state.mode === 'class') {
     const selectedClass = getSelectedClass()
@@ -5965,6 +5986,7 @@ function buildGeneratePayload() {
       className: selectedClass.name,
       grade: selectedClass.grade,
       template: currentTemplate,
+      generationInstruction,
       lessonTitle,
       lessonDate: schedule.date,
       lessonDateText: schedule.dateText,
@@ -6014,6 +6036,7 @@ function buildGeneratePayload() {
     className: `${selectedProfile.name} 一对一`,
     grade: selectedProfile.grade,
     template: currentTemplate,
+    generationInstruction,
     lessonTitle,
     lessonDate: schedule.date,
     lessonDateText: schedule.dateText,
@@ -6037,6 +6060,10 @@ function buildGeneratePayload() {
 function setGenerating(isGenerating) {
   els.generateBtn.disabled = isGenerating
   els.generateBtn.textContent = isGenerating ? 'AI 生成中...' : 'AI 生成反馈'
+}
+
+function clearGenerationInstruction() {
+  if (els.generationInstructionInput) els.generationInstructionInput.value = ''
 }
 
 function isPdfFile(file) {
