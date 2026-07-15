@@ -1152,7 +1152,7 @@ textarea:focus {
 
 .exit-test-row {
   display: grid;
-  grid-template-columns: minmax(110px, 0.9fr) minmax(140px, 0.8fr) minmax(180px, 1.4fr);
+  grid-template-columns: minmax(110px, 0.9fr) minmax(140px, 0.8fr) minmax(180px, 1.4fr) 96px;
   gap: 10px;
   align-items: center;
   padding: 12px;
@@ -1169,6 +1169,39 @@ textarea:focus {
 .exit-test-row.grade-mode select {
   border-color: #b8ddd2;
   background: #f3fbf8;
+}
+
+.exit-test-absence-value {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 13px;
+  border: 1px solid #e4c6ae;
+  border-radius: 8px;
+  background: #fff8f0;
+  color: var(--amber);
+  font-weight: 800;
+}
+
+.exit-test-leave-button {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.exit-test-leave-button:hover {
+  border-color: #d7aa86;
+  color: var(--amber);
+}
+
+.exit-test-leave-button.active {
+  border-color: #d7aa86;
+  background: #fff3e8;
+  color: var(--amber);
 }
 
 .student-empty,

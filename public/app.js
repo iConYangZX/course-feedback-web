@@ -80,7 +80,8 @@ const state = {
   debug: null,
   oneLesson: {
     performance: '表现良好',
-    remark: ''
+    remark: '',
+    keywords: ''
   },
   classSchedule: {
     selectedDate: getLocalDateKey(new Date()),
@@ -327,7 +328,7 @@ function bindElements() {
     exitTestTotalInput: document.querySelector('#exitTestTotalInput'),
     exitTestCount: document.querySelector('#exitTestCount'),
     exitTestTable: document.querySelector('#exitTestTable'),
-    studentToolbar: document.querySelector('.student-toolbar'),
+    studentToolbar: document.querySelector('#studentToolbar'),
     studentCount: document.querySelector('#studentCount'),
     studentTable: document.querySelector('#studentTable'),
     generationInstructionInput: document.querySelector('#generationInstructionInput'),
@@ -447,6 +448,7 @@ function bindEvents() {
     state.lastGeneratedPayload = null
     state.debug = null
     state.pendingTeachingApplication = null
+    renderStudentTable()
     renderFeedbackModeControls()
     renderResults()
   })
@@ -476,6 +478,7 @@ function bindEvents() {
   if (els.exitTestTable) {
     els.exitTestTable.addEventListener('input', handleExitTestInput)
     els.exitTestTable.addEventListener('change', handleExitTestInput)
+    els.exitTestTable.addEventListener('click', handleExitTestAction)
   }
   if (els.pdfPageSelectBtn) els.pdfPageSelectBtn.addEventListener('click', openPdfPageSelection)
   if (els.pdfPageSelectAllBtn) els.pdfPageSelectAllBtn.addEventListener('click', selectAllPdfPages)
@@ -1432,6 +1435,7 @@ function getFeedbackFormatLabel(item) {
 }
 
 function formatTeachingScore(score, record) {
+  if (score.absent) return '请假'
   if (record.mode === 'grade') return score.grade || '-'
   const hasScore = score.score !== null && score.score !== '' && typeof score.score !== 'undefined'
   const value = hasScore && Number.isFinite(Number(score.score)) ? Number(score.score) : '-'
@@ -1599,7 +1603,10 @@ function renderClassStats(classInfo, records) {
 
   const latest = records[records.length - 1]
   const scores = latest.mode === 'percent'
-    ? latest.students.map((student) => Number(student.score)).filter(Number.isFinite)
+    ? latest.students
+        .filter((student) => !student.absent && student.score !== null && student.score !== '')
+        .map((student) => Number(student.score))
+        .filter(Number.isFinite)
     : []
   const avg = scores.length ? (scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1) : '-'
   const max = scores.length ? Math.max(...scores) : '-'
@@ -3494,8 +3501,9 @@ function buildScoreRecordFromFeedbackEntry(entry) {
     students: exitTest.students.map((student) => ({
       studentId: student.id || student.studentId || '',
       name: student.name,
-      score: mode === 'grade' ? null : Number(student.score),
-      grade: mode === 'grade' ? student.grade : '',
+      absent: Boolean(student.absent),
+      score: mode === 'grade' || student.absent ? null : Number(student.score),
+      grade: mode === 'grade' && !student.absent ? student.grade : '',
       note: student.note || ''
     })).filter((student) => student.name),
     createdAt: Date.now()
@@ -3589,7 +3597,10 @@ function drawScoreChart(canvas, points, title) {
 function getRecordAverageRate(record) {
   if (!record || record.mode === 'grade') return NaN
   const total = Number(record.totalScore || 100)
-  const scores = (record.students || []).map((student) => Number(student.score)).filter(Number.isFinite)
+  const scores = (record.students || [])
+    .filter((student) => !student.absent && student.score !== null && student.score !== '')
+    .map((student) => Number(student.score))
+    .filter(Number.isFinite)
   if (!scores.length || !total) return NaN
   const avg = scores.reduce((sum, score) => sum + score, 0) / scores.length
   return Math.max(0, Math.min(100, (avg / total) * 100))
@@ -4150,16 +4161,20 @@ function renderExitTestTable() {
 
   els.exitTestTable.innerHTML = students.map((student) => {
     const score = state.exitTest.scores[student.id] || {}
+    const isAbsent = Boolean(score.absent)
     return `
-      <div class="exit-test-row ${state.exitTest.mode === 'grade' ? 'grade-mode' : 'score-mode'}" data-student-id="${escapeHtml(student.id)}">
+      <div class="exit-test-row ${state.exitTest.mode === 'grade' ? 'grade-mode' : 'score-mode'} ${isAbsent ? 'is-absent' : ''}" data-student-id="${escapeHtml(student.id)}">
         <div class="student-name">${escapeHtml(student.name)}</div>
-        ${state.exitTest.mode === 'grade'
+        ${isAbsent
+          ? '<div class="exit-test-absence-value" aria-label="出门测状态">请假</div>'
+          : (state.exitTest.mode === 'grade'
           ? `<select data-exit-field="grade" aria-label="${escapeHtml(student.name)}出门测等级">
               <option value="">选择等级</option>
               ${['A', 'B', 'C', 'D'].map((grade) => `<option value="${grade}" ${score.grade === grade ? 'selected' : ''}>${grade}</option>`).join('')}
             </select>`
-          : `<input data-exit-field="score" type="number" min="0" max="${state.exitTest.totalScore || 100}" value="${escapeHtml(score.score ?? '')}" placeholder="填写分数" aria-label="${escapeHtml(student.name)}出门测分数" />`}
+          : `<input data-exit-field="score" type="number" min="0" max="${state.exitTest.totalScore || 100}" value="${escapeHtml(score.score ?? '')}" placeholder="填写分数" aria-label="${escapeHtml(student.name)}出门测分数" />`)}
         <input data-exit-field="note" type="text" value="${escapeHtml(score.note || '')}" placeholder="可选：错因或特殊情况" />
+        <button class="exit-test-leave-button ${isAbsent ? 'active' : ''}" data-exit-action="toggle-absence" type="button" aria-pressed="${isAbsent}" aria-label="${escapeHtml(student.name)}${isAbsent ? '取消请假' : '标记请假'}">${isAbsent ? '取消请假' : '请假'}</button>
       </div>
     `
   }).join('')
@@ -4246,6 +4261,19 @@ function handleExitTestInput(event) {
   const studentId = row.dataset.studentId
   if (!state.exitTest.scores[studentId]) state.exitTest.scores[studentId] = {}
   state.exitTest.scores[studentId][field] = event.target.value
+}
+
+function handleExitTestAction(event) {
+  const button = event.target.closest('[data-exit-action="toggle-absence"]')
+  if (!button) return
+
+  const row = button.closest('[data-student-id]')
+  if (!row) return
+
+  const studentId = row.dataset.studentId
+  if (!state.exitTest.scores[studentId]) state.exitTest.scores[studentId] = {}
+  state.exitTest.scores[studentId].absent = !state.exitTest.scores[studentId].absent
+  renderExitTestTable()
 }
 
 function renderResults() {
@@ -4338,8 +4366,10 @@ function buildMissingGeneratedFeedback(student, payload = {}, sharedFields = {})
   const courseKnowledgePoint = String(sharedFields.courseKnowledgePoint || '1、理解本节课的核心知识点。\n2、掌握重点方法并完成对应练习。').trim()
   const performanceText = [
     `${student.name}同学本节课${student.performance || '表现良好'}`,
-    student.remark || '',
-    student.exitTestScore ? `出门测成绩为${student.exitTestScore}` : ''
+    student.remark || student.keywords || '',
+    student.exitTestScore === '请假'
+      ? '本次出门测请假，成绩不计入统计'
+      : (student.exitTestScore ? `出门测成绩为${student.exitTestScore}` : '')
   ].filter(Boolean).join('，')
   const learningSuggestion = student.performance === '表现较差'
     ? '建议课后回顾基础概念和典型例题，完成订正后再进行同类题巩固。'
@@ -4513,13 +4543,20 @@ function renderImageReportSheet(options) {
           }))
     : sortReportScoreRows(reportScores)
   const hasScoreRows = scoreRows.length > 0
-  const numericScores = scoreRows.map((score) => Number(score.score)).filter(Number.isFinite)
+  const scoredRows = scoreRows.filter((score) => (
+    !score.absent
+    && score.score !== null
+    && score.score !== ''
+    && Number.isFinite(Number(score.score))
+  ))
+  const numericScores = scoredRows.map((score) => Number(score.score))
   const avg = numericScores.length
     ? (numericScores.reduce((sum, score) => sum + score, 0) / numericScores.length).toFixed(1)
     : '-'
   const max = numericScores.length ? Math.max(...numericScores) : '-'
   const min = numericScores.length ? Math.min(...numericScores) : '-'
-  const rate = numericScores.length ? `${(scoreRows.reduce((sum, score) => sum + Number(score.rate || 0), 0) / scoreRows.length).toFixed(1)}%` : '-'
+  const rates = scoredRows.map((score) => Number(score.rate)).filter(Number.isFinite)
+  const rate = rates.length ? `${(rates.reduce((sum, value) => sum + value, 0) / rates.length).toFixed(1)}%` : '-'
   const className = reportPayload.className || (selectedClass && selectedClass.name) || ''
   const studentName = state.mode === 'oneOnOne'
     ? ((selectedProfile && selectedProfile.name) || item.name || reportPayload.className || '')
@@ -4678,10 +4715,22 @@ function extractReportLines(text) {
 function buildReportScoreRows(students, exitTest = null) {
   if (exitTest && Array.isArray(exitTest.students) && exitTest.students.length) {
     return exitTest.students.map((student) => {
+      if (student.absent) {
+        return {
+          name: student.name,
+          studentId: student.id,
+          absent: true,
+          score: null,
+          displayScore: '请假',
+          rate: null
+        }
+      }
+
       if (exitTest.mode === 'grade') {
         return {
           name: student.name,
           studentId: student.id,
+          absent: false,
           score: null,
           displayScore: student.grade || '—',
           rate: null
@@ -4691,6 +4740,7 @@ function buildReportScoreRows(students, exitTest = null) {
       return {
         name: student.name,
         studentId: student.id,
+        absent: false,
         score: Number(student.score),
         displayScore: `${student.score}/${exitTest.totalScore || 100}`,
         rate: exitTest.totalScore ? (Number(student.score) / Number(exitTest.totalScore)) * 100 : null
@@ -4710,10 +4760,12 @@ function sortReportScoreRows(rows) {
   }
 
   return [...rows].sort((left, right) => {
+    if (left.absent !== right.absent) return left.absent ? 1 : -1
+
     const leftScore = Number(left.score)
     const rightScore = Number(right.score)
-    const leftHasScore = Number.isFinite(leftScore)
-    const rightHasScore = Number.isFinite(rightScore)
+    const leftHasScore = left.score !== null && left.score !== '' && Number.isFinite(leftScore)
+    const rightHasScore = right.score !== null && right.score !== '' && Number.isFinite(rightScore)
 
     if (leftHasScore || rightHasScore) {
       if (!leftHasScore) return 1
@@ -5617,7 +5669,8 @@ function resetOneProfileForm() {
 function resetOneLesson() {
   state.oneLesson = {
     performance: '表现良好',
-    remark: ''
+    remark: '',
+    keywords: ''
   }
 }
 
@@ -5970,7 +6023,8 @@ function buildGeneratePayload() {
           id: `${selectedClass.id}-class-summary`,
           name: selectedClass.name,
           performance: '班级整体反馈',
-          remark: classRemark || '请根据班级关键词和课程内容生成整班反馈'
+          remark: '',
+          keywords: classRemark
         }]
       : selectedClass.students.map((student) => ({
           ...student,
@@ -6051,6 +6105,7 @@ function buildGeneratePayload() {
       name: selectedProfile.name,
       performance: state.oneLesson.performance,
       remark: state.oneLesson.remark,
+      keywords: state.oneLesson.keywords,
       personality: els.onePersonalityInput.value.trim() || selectedProfile.personality,
       habit: els.oneHabitInput.value.trim() || selectedProfile.habit
     }]
@@ -7286,9 +7341,9 @@ function buildExitTestPayload(classInfo) {
   const selectedLecture = getSelectedExitTestLecture()
   const hasAnyScoreInput = students.some((student) => {
     const saved = state.exitTest.scores[student.id] || {}
-    return mode === 'grade'
+    return Boolean(saved.absent) || (mode === 'grade'
       ? Boolean(String(saved.grade || '').trim() || String(saved.note || '').trim())
-      : Boolean(String(saved.score ?? '').trim() || String(saved.note || '').trim())
+      : Boolean(String(saved.score ?? '').trim() || String(saved.note || '').trim()))
   })
   const hasExitTestData = Boolean(file || hasAnyScoreInput)
 
@@ -7312,16 +7367,18 @@ function buildExitTestPayload(classInfo) {
 
   const rows = students.map((student) => {
     const saved = state.exitTest.scores[student.id] || {}
+    const absent = Boolean(saved.absent)
     return {
       id: student.id,
       name: student.name,
-      score: mode === 'percent' ? normalizeScoreValue(saved.score) : null,
-      grade: mode === 'grade' ? String(saved.grade || '').trim() : '',
+      absent,
+      score: mode === 'percent' && !absent ? normalizeScoreValue(saved.score) : null,
+      grade: mode === 'grade' && !absent ? String(saved.grade || '').trim() : '',
       note: String(saved.note || '').trim()
     }
   })
 
-  const missing = rows.find((row) => mode === 'grade' ? !row.grade : row.score === null)
+  const missing = rows.find((row) => !row.absent && (mode === 'grade' ? !row.grade : row.score === null))
   if (missing) {
     showToast(`请填写 ${missing.name} 的出门测${mode === 'grade' ? '等级' : '成绩'}`)
     return false
@@ -7353,6 +7410,8 @@ function normalizeScoreValue(value) {
 }
 
 function compareExitTestRows(left, right, mode) {
+  if (left.absent !== right.absent) return left.absent ? 1 : -1
+
   if (mode === 'grade') {
     const order = { A: 4, B: 3, C: 2, D: 1 }
     return (order[right.grade] || 0) - (order[left.grade] || 0)
@@ -7366,6 +7425,7 @@ function getExitTestScoreText(exitTest, studentName) {
     ? exitTest.students.find((item) => item.name === studentName)
     : null
   if (!row) return ''
+  if (row.absent) return '请假'
   if (exitTest.mode === 'grade') return `${row.grade} 等`
   return `${row.score}/${exitTest.totalScore}`
 }
@@ -7399,7 +7459,8 @@ function getWorkingStudents() {
       id: profile.id,
       name: profile.name,
       performance: state.oneLesson.performance,
-      remark: state.oneLesson.remark
+      remark: state.oneLesson.remark,
+      keywords: state.oneLesson.keywords
     }]
   }
 
@@ -7441,6 +7502,7 @@ function appendStudentKeyword(index, keyword) {
     : [remark, keyword].filter(Boolean).join('；')
 
   if (state.mode === 'oneOnOne') {
+    state.oneLesson.keywords = student.keywords
     state.oneLesson.remark = student.remark
     return
   }

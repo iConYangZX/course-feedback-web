@@ -1940,11 +1940,13 @@ function normalizeScoreRecords(records) {
       totalScore: mode === 'grade' ? null : Math.max(1, Number(source.totalScore || 100)),
       students: Array.isArray(source.students) ? source.students.map((student) => {
         const studentSource = student && typeof student === 'object' ? student : {}
+        const absent = Boolean(studentSource.absent)
         return {
           studentId: trim(studentSource.studentId),
           name: trim(studentSource.name),
-          score: studentSource.score === '' || studentSource.score === null ? null : Number(studentSource.score),
-          grade: trim(studentSource.grade),
+          absent,
+          score: absent || studentSource.score === '' || studentSource.score === null ? null : Number(studentSource.score),
+          grade: absent ? '' : trim(studentSource.grade),
           note: trim(studentSource.note)
         }
       }).filter((student) => student.name) : [],
@@ -3273,17 +3275,19 @@ function buildSystemPrompt() {
     '每个学生反馈建议 120 到 220 个汉字。',
     '每一条反馈必须包含：1 个本节课/课件里的具体知识点，1 个该学生的课堂表现等级，若老师填写了备注则必须自然写入备注。',
     '学生 remark、特殊情况和具体表现必须融入【课堂表现】的同一个连续段落，不能在课堂表现之后另起一行或另起一段重复说明。',
+    '学生或班级选择的 keywords 也必须改写成自然语句并融入【课堂表现】同一段；不能单独输出“关键词”“表现关键词”标题，也不能把关键词原样另起一行罗列。',
     'templateFields.performanceText 必须已经包含该学生 remark 的核心信息；personalizedRemark 只用于结构化记录，不能作为独立段落再次输出。',
     '如果老师提供了“本次生成要求”，只在当前请求中按其调整语气、详略、重点和写法；不得因此违反模板、事实准确性、学生姓名对应和必填结构。',
     '如果反馈类型是班级整体反馈，请面向整个班级生成课堂表现总结，不要写成单个学生逐条反馈。',
     '如果提供了上课日期，可以自然使用；如果上课时段为空或未填写，任何文字反馈和图片报告文案都不要出现时段，也不要自行编造时段。',
     '如果提供了出门测成绩，必须写入反馈：个性化学生反馈只写当前学生自己的成绩；班级整体反馈要按从高到低列出全班所有学生成绩。',
+    '出门测标记 absent/请假的学生只显示“请假”，不得写成 0 分，也不得计入平均分、最高分、最低分或得分率。',
     '如果提供了出门测文件内容，请结合文件里的测试知识点、题型或讲次内容评价学习情况；不要只写分数。',
     '如果反馈呈现形式是图片报告文案，请语言更适合放入报告里的“课堂表现”段落，结构清晰、少寒暄。',
     '如果反馈正文、标题或模板字段涉及科目/学科，必须根据上传课件、讲义或试卷内容判断正确科目；不能默认写数学。无法可靠判断科目时，不要主动写具体科目。',
     '一对一反馈里如果包含 personality 或 habit，要把它们作为长期档案背景，用自然、克制的方式融入建议，不要写得像诊断。',
     '所有未填写、未上传、为空的内容都视为不存在，反馈正文里不要提及这些空内容，也不要用“未填写”“未上传”等字样。',
-    '不同学生的反馈必须根据 performance、remark、personality 和 habit 明显区分，不允许只替换姓名。'
+    '不同学生的反馈必须根据 performance、keywords、remark、personality 和 habit 明显区分，不允许只替换姓名。'
   ].join('\n')
 }
 
@@ -3328,7 +3332,7 @@ function buildUserContent(payload, courseware) {
           : '',
         'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
         '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
-        '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须把其核心信息融入【课堂表现】同一段，不能另起一行或单独重复。',
+        '每个 feedback 都必须明确体现对应学生的 performance；keywords 与 remark 非空时，必须把其核心信息改写成自然语句并融入【课堂表现】同一段，不能另起一行、单列关键词或重复。',
         '一对一学生数据里若 personality 或 habit 非空，必须结合这些长期档案信息给出更贴合该学生的表达和建议。',
         '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
         '不同学生不要套用完全相同的句子。',
@@ -3445,7 +3449,7 @@ function buildPlainPrompt(payload, courseware, options = {}) {
       : '',
     'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
     '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
-    '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须把其核心信息融入【课堂表现】同一段，不能另起一行或单独重复。',
+    '每个 feedback 都必须明确体现对应学生的 performance；keywords 与 remark 非空时，必须把其核心信息改写成自然语句并融入【课堂表现】同一段，不能另起一行、单列关键词或重复。',
     '一对一学生数据里若 personality 或 habit 非空，必须结合这些长期档案信息给出更贴合该学生的表达和建议。',
     '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
     '不同学生不要套用完全相同的句子。',
@@ -3466,7 +3470,9 @@ function formatExitTestSummary(payload = {}) {
     if (students.length) {
       lines.push('学生成绩：')
       students.forEach((student) => {
-        if (exitTest.mode === 'grade') {
+        if (student.absent) {
+          lines.push(`- ${student.name}：请假（不计入成绩统计）${student.note ? `；${student.note}` : ''}`)
+        } else if (exitTest.mode === 'grade') {
           lines.push(`- ${student.name}：${student.grade || '-'}${student.note ? `；${student.note}` : ''}`)
         } else {
           lines.push(`- ${student.name}：${student.score ?? '-'}/${exitTest.totalScore || 100}${student.note ? `；${student.note}` : ''}`)
@@ -3499,7 +3505,7 @@ function getTemplateRules() {
     '模板使用规则（必须遵守）：',
     '1. 反馈模板是每条 feedback 的正文骨架，不是参考风格。',
     '2. 必须尽量保留模板原有段落、句子顺序、称呼方式和固定文字；只替换模板里的占位符、括号提示或明显需要补充的位置。',
-    '3. 常见占位符含义：{{学生姓名}}=当前学生姓名；{{课程内容}}/{{课程主题}}=课程主题、课件知识点和老师补充内容；{{课堂表现}}=该学生 performance；{{个性化备注}}/{{特殊情况}}=remark、personality 或 habit；{{学习建议}}=结合课堂表现给出的后续建议。',
+    '3. 常见占位符含义：{{学生姓名}}=当前学生姓名；{{课程内容}}/{{课程主题}}=课程主题、课件知识点和老师补充内容；{{课堂表现}}=该学生 performance、keywords 和 remark 融合后的自然段；{{个性化备注}}/{{特殊情况}}=remark、personality 或 habit；{{学习建议}}=结合课堂表现给出的后续建议。',
     '4. 如果模板没有占位符，也必须按照模板原有句式和段落改写，不要另起一套反馈格式。',
     '5. 如果模板和默认字数要求冲突，以模板为准。'
   ].join('\n')
@@ -3712,7 +3718,7 @@ function normalizeFeedbacks(feedbacks, students, payload = {}) {
     const integratedFeedback = normalizeFeedbackPerformanceParagraph(
       templatedFeedback || modelFeedback,
       templateFields.performanceText,
-      student.remark
+      student
     )
     const feedback = sanitizeFeedbackStudentNames(integratedFeedback, student, students)
 
@@ -3784,13 +3790,7 @@ function escapeRegExp(value) {
 }
 
 function buildDemoFeedbacks(payload) {
-  return payload.students.map((student) => ({
-    studentId: student.id,
-    name: student.name,
-    templateFields: normalizeTemplateFields(null, student, payload, buildFallbackFeedback(student, payload)),
-    feedback: applyFeedbackTemplate(payload.template, student, payload, null, buildFallbackFeedback(student, payload))
-      || buildFallbackFeedback(student, payload)
-  }))
+  return normalizeFeedbacks([], payload.students, payload)
 }
 
 function applyFeedbackTemplate(template, student, payload, aiItem, modelFeedback) {
@@ -3814,10 +3814,9 @@ function normalizeTemplateFields(rawFields = {}, student, payload = {}, modelFee
   const performanceFallback = buildPerformanceFallback(student)
   const personalizedFallback = buildPersonalizedFallback(student)
   const personalizedRemark = trim(fields.personalizedRemark) || personalizedFallback
-  const performanceText = mergeStudentRemarkIntoPerformance(
-    trim(fields.performanceText) || performanceFallback,
-    student.remark
-  )
+  let performanceText = trim(fields.performanceText) || performanceFallback
+  performanceText = mergeStudentRemarkIntoPerformance(performanceText, student.keywords)
+  performanceText = mergeStudentRemarkIntoPerformance(performanceText, student.remark)
 
   return {
     courseContent: trim(fields.courseContent) || courseContentFallback,
@@ -3830,25 +3829,64 @@ function normalizeTemplateFields(rawFields = {}, student, payload = {}, modelFee
   }
 }
 
-function normalizeFeedbackPerformanceParagraph(feedback, performanceText, studentRemark) {
+function normalizeFeedbackPerformanceParagraph(feedback, performanceText, student = {}) {
   const source = trim(feedback)
   if (!source) return source
 
-  const headingMatch = /【(?:课堂表现|学生表现)】/.exec(source)
-  if (!headingMatch) return source
+  const extractedDetails = []
+  let normalizedSource = source.replace(
+    /【(?:表现关键词|课堂关键词|关键词|班级亮点关键词|班级需改进关键词|特殊情况|个性化备注|学生情况|备注)】([\s\S]*?)(?=【[^】]+】|$)/g,
+    (section, content) => {
+      if (trim(content)) extractedDetails.push(content)
+      return ''
+    }
+  )
+
+  normalizedSource = normalizedSource.replace(
+    /(?:^|\n)\s*(?:表现关键词|课堂关键词|关键词|班级亮点关键词|班级需改进关键词|特殊情况|个性化备注|学生情况|备注)\s*[：:]\s*([^\n]*)/g,
+    (section, content) => {
+      if (trim(content)) extractedDetails.push(content)
+      return ''
+    }
+  )
+
+  const headingMatch = /【(?:课堂表现|学生表现)】/.exec(normalizedSource)
+  const hasStructuredSections = /【[^】]+】/.test(normalizedSource)
+  const mergeDetails = (base) => {
+    let result = base
+    ;[...extractedDetails, student.keywords, student.remark].forEach((detail) => {
+      result = mergeStudentRemarkIntoPerformance(result, detail)
+    })
+    return result
+  }
+
+  if (!headingMatch) {
+    const detailText = [...extractedDetails, student.keywords, student.remark]
+      .map((detail) => trim(detail))
+      .filter(Boolean)
+
+    if (!detailText.length) return normalizedSource.trim()
+
+    if (hasStructuredSections) {
+      const performanceBody = mergeDetails(trim(performanceText) || '本节课课堂表现稳定')
+      return [normalizedSource.trim(), '【课堂表现】', performanceBody]
+        .filter(Boolean)
+        .join('\n')
+        .trim()
+    }
+
+    return mergeDetails(normalizedSource.trim() || performanceText)
+  }
 
   const bodyStart = headingMatch.index + headingMatch[0].length
-  const remaining = source.slice(bodyStart)
+  const remaining = normalizedSource.slice(bodyStart)
   const nextHeadingOffset = remaining.search(/【[^】]+】/)
   const body = nextHeadingOffset >= 0 ? remaining.slice(0, nextHeadingOffset) : remaining
   const suffix = nextHeadingOffset >= 0 ? remaining.slice(nextHeadingOffset) : ''
-  const mergedBody = mergeStudentRemarkIntoPerformance(
-    dedupeFeedbackParagraph(body) || performanceText,
-    studentRemark
-  )
+  const mergedBody = mergeDetails(dedupeFeedbackParagraph(body) || performanceText)
 
   return [
-    source.slice(0, bodyStart).trimEnd(),
+    normalizedSource.slice(0, bodyStart).trimEnd(),
     mergedBody,
     suffix.trimStart()
   ].filter(Boolean).join('\n').trim()
@@ -3968,8 +4006,9 @@ function sanitizeCourseNoteForCourseContent(courseNote = '') {
 }
 
 function buildPerformanceFallback(student) {
-  const remark = student.remark ? `，${student.remark}` : ''
-  return `${student.performance || '表现良好'}${remark}`
+  let performanceText = student.performance || '表现良好'
+  performanceText = mergeStudentRemarkIntoPerformance(performanceText, student.keywords)
+  return mergeStudentRemarkIntoPerformance(performanceText, student.remark)
 }
 
 function buildPersonalizedFallback(student) {
@@ -3995,14 +4034,13 @@ function buildAdviceFallback(student) {
 function buildFallbackFeedback(student, payload = {}) {
   const lesson = payload.lessonTitle ? `本节课围绕“${payload.lessonTitle}”展开，` : '本节课整体学习状态较为清晰，'
   const schedule = buildFallbackScheduleText(payload)
-  const normalizedRemark = trim(student.remark).replace(/[。！？!?]+$/, '')
-  const remark = normalizedRemark ? `课堂中特别需要关注的是：${normalizedRemark}。` : ''
+  const performanceText = ensureChineseSentence(buildPerformanceFallback(student))
   const exitTestText = getFallbackExitTestText(student, payload)
   const advice = student.performance === '表现较差'
     ? '后续建议先把基础概念和典型题步骤补扎实，课后用少量高频题巩固。'
     : '后续建议继续整理本节课重点和错题，保持稳定练习节奏。'
 
-  return `${student.name}同学${schedule}${lesson}${student.performance}。${remark}${exitTestText}${advice}`
+  return `${student.name}同学${schedule}${lesson}${performanceText}${exitTestText}${advice}`
 }
 
 function buildFallbackScheduleText(payload = {}) {
@@ -4015,6 +4053,7 @@ function buildFallbackScheduleText(payload = {}) {
 }
 
 function getFallbackExitTestText(student, payload = {}) {
+  if (student.exitTestScore === '请假') return '本次出门测请假，成绩不计入班级统计。'
   if (student.exitTestScore) return `出门测成绩为${student.exitTestScore}。`
 
   const rows = payload.exitTest && Array.isArray(payload.exitTest.students)
@@ -4022,6 +4061,7 @@ function getFallbackExitTestText(student, payload = {}) {
     : []
   const row = rows.find((item) => item.name === student.name)
   if (!row) return ''
+  if (row.absent) return '本次出门测请假，成绩不计入班级统计。'
   if (payload.exitTest.mode === 'grade') return row.grade ? `出门测等级为${row.grade}。` : ''
   return row.score !== null && row.score !== undefined && row.score !== ''
     ? `出门测成绩为${row.score}/${payload.exitTest.totalScore || 100}。`
