@@ -228,7 +228,8 @@ app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, async (
 app.get('/api/feedback-data', requireAccessMiddleware, (req, res) => {
   const ownerId = getDataOwnerId(req.accessSession)
   res.json({
-    data: getFeedbackDataForOwner(ownerId)
+    data: getFeedbackDataForOwner(ownerId),
+    ownerId
   })
 })
 
@@ -237,14 +238,14 @@ app.put('/api/feedback-data', requireAccessMiddleware, async (req, res) => {
     const ownerId = getDataOwnerId(req.accessSession)
     const current = getFeedbackDataForOwner(ownerId)
     const incoming = req.body && typeof req.body === 'object' ? req.body : {}
-    const data = normalizeFeedbackData({
+    const data = isolateFeedbackDataForOwner(ownerId, normalizeFeedbackData({
       ...current,
       ...incoming,
       quickOptions: {
         ...(current.quickOptions || {}),
         ...(incoming.quickOptions || {})
       }
-    })
+    }))
     feedbackDataState.owners[ownerId] = data
     await writeFeedbackDataState()
     res.json({
@@ -267,7 +268,7 @@ app.get('/api/teaching-data', requireAccessMiddleware, (req, res) => {
 app.put('/api/teaching-data', requireAccessMiddleware, async (req, res) => {
   try {
     const ownerId = getDataOwnerId(req.accessSession)
-    const data = normalizeFeedbackData(req.body && req.body.data)
+    const data = isolateFeedbackDataForOwner(ownerId, normalizeFeedbackData(req.body && req.body.data))
     data.updatedAt = Date.now()
     feedbackDataState.owners[ownerId] = data
     await writeFeedbackDataState()
@@ -856,6 +857,7 @@ async function initializeStorage() {
   materialState = readMaterialState()
 
   if (!DATABASE_URL) {
+    if (removeAdminCopiesOfUserClasses()) await writeFeedbackDataState()
     const materialsMigrated = await migrateLegacyMaterialStorage()
     if (materialsMigrated) await writeMaterialState()
     return
@@ -886,6 +888,10 @@ async function initializeStorage() {
     feedbackDataState = normalizeFeedbackDataState(databaseFeedbackData)
   } else {
     await writeDatabaseState('feedback-data', feedbackDataState)
+  }
+
+  if (removeAdminCopiesOfUserClasses()) {
+    await writeFeedbackDataState()
   }
 
   const databaseMaterials = await readDatabaseState('materials')
@@ -1434,7 +1440,89 @@ function getDataOwnerId(session = {}) {
 }
 
 function getFeedbackDataForOwner(ownerId) {
-  return normalizeFeedbackData(feedbackDataState.owners[ownerId] || {})
+  return isolateFeedbackDataForOwner(ownerId, feedbackDataState.owners[ownerId] || {})
+}
+
+function getAdminOwnerIds() {
+  return new Set(
+    accountState.users
+      .filter((account) => account && account.role === 'admin')
+      .map((account) => `account:${account.id}`)
+  )
+}
+
+function getNonAdminClassIds() {
+  const adminOwnerIds = getAdminOwnerIds()
+  const classIds = new Set()
+
+  Object.entries(feedbackDataState.owners).forEach(([ownerId, data]) => {
+    if (adminOwnerIds.has(ownerId)) return
+    ;(data && data.classes || []).forEach((classInfo) => {
+      if (classInfo && classInfo.id) classIds.add(classInfo.id)
+    })
+  })
+
+  return classIds
+}
+
+function isolateFeedbackDataForOwner(ownerId, input) {
+  const data = normalizeFeedbackData(input)
+  if (!getAdminOwnerIds().has(ownerId)) return data
+
+  const nonAdminClassIds = getNonAdminClassIds()
+  if (!nonAdminClassIds.size) return data
+
+  const allowedClassIds = new Set(
+    data.classes
+      .filter((classInfo) => !nonAdminClassIds.has(classInfo.id))
+      .map((classInfo) => classInfo.id)
+  )
+  const isAllowedRecord = (record) => !record.classId || allowedClassIds.has(record.classId)
+
+  return {
+    ...data,
+    classes: data.classes.filter((classInfo) => allowedClassIds.has(classInfo.id)),
+    scoreRecords: data.scoreRecords.filter(isAllowedRecord),
+    feedbackHistory: data.feedbackHistory.filter(isAllowedRecord),
+    paperAnalyses: data.paperAnalyses.filter(isAllowedRecord)
+  }
+}
+
+function removeAdminCopiesOfUserClasses() {
+  const adminIds = getAdminOwnerIds()
+  if (!adminIds.size) return false
+
+  const userClassIds = new Set()
+  Object.entries(feedbackDataState.owners).forEach(([ownerId, data]) => {
+    if (adminIds.has(ownerId)) return
+    ;(data.classes || []).forEach((classInfo) => {
+      if (classInfo && classInfo.id) userClassIds.add(classInfo.id)
+    })
+  })
+
+  if (!userClassIds.size) return false
+
+  let changed = false
+  adminIds.forEach((ownerId) => {
+    const data = feedbackDataState.owners[ownerId]
+    if (!data || !Array.isArray(data.classes)) return
+
+    const removedIds = new Set(
+      data.classes
+        .filter((classInfo) => classInfo && userClassIds.has(classInfo.id))
+        .map((classInfo) => classInfo.id)
+    )
+    if (!removedIds.size) return
+
+    data.classes = data.classes.filter((classInfo) => !removedIds.has(classInfo.id))
+    data.scoreRecords = (data.scoreRecords || []).filter((record) => !removedIds.has(record.classId))
+    data.feedbackHistory = (data.feedbackHistory || []).filter((record) => !removedIds.has(record.classId))
+    data.paperAnalyses = (data.paperAnalyses || []).filter((record) => !removedIds.has(record.classId))
+    data.updatedAt = Date.now()
+    changed = true
+  })
+
+  return changed
 }
 
 function normalizeFeedbackData(input) {

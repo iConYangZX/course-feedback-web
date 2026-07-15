@@ -197,11 +197,14 @@ function createEmptyTeachingData() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   bindElements()
-  loadClasses()
-  loadOneProfiles()
   bindEvents()
   await checkAccessStatus()
-  if (state.access.authenticated) await loadFeedbackDataFromServer()
+  if (state.access.authenticated) {
+    loadClasses()
+    loadOneProfiles()
+    loadTeachingCache()
+    await loadFeedbackDataFromServer()
+  }
   if (state.access.user && state.access.user.isAdmin) loadAdminUsers()
   checkServer()
   if (!state.access.publicMode) loadAIConfig()
@@ -699,6 +702,10 @@ async function loginWithAccessCode() {
       usage: data.usage,
       user: data.user
     })
+    resetAccountWorkspaceState()
+    loadClasses()
+    loadOneProfiles()
+    loadTeachingCache()
     els.loginPasswordInput.value = ''
     showAccessMessage('')
     renderAccessState()
@@ -725,10 +732,13 @@ async function logout() {
     // Ignore network errors; the next status check will correct the UI.
   }
 
+  resetAccountWorkspaceState()
   state.access.authenticated = false
   state.access.user = null
   state.access.usage = null
   state.mode = 'class'
+  resetClassForm()
+  resetOneProfileForm()
   render()
 }
 
@@ -937,9 +947,11 @@ function renderAdminUsers() {
 
 function loadTeachingCache() {
   try {
-    const cached = JSON.parse(localStorage.getItem(TEACHING_CACHE_KEY) || 'null')
+    const cached = JSON.parse(localStorage.getItem(getAccountStorageKey(TEACHING_CACHE_KEY)) || 'null')
     if (cached && typeof cached === 'object') {
       state.teaching.data = normalizeTeachingDataClient(cached)
+    } else {
+      state.teaching.data = createEmptyTeachingData()
     }
   } catch (error) {
     state.teaching.data = createEmptyTeachingData()
@@ -973,7 +985,7 @@ async function loadTeachingData() {
 }
 
 function persistTeachingCache() {
-  localStorage.setItem(TEACHING_CACHE_KEY, JSON.stringify(state.teaching.data))
+  localStorage.setItem(getAccountStorageKey(TEACHING_CACHE_KEY), JSON.stringify(state.teaching.data))
 }
 
 async function syncTeachingProfiles() {
@@ -3734,9 +3746,37 @@ function getProviderName(provider) {
   return 'OpenAI'
 }
 
+function getAccountStorageKey(baseKey) {
+  const accountId = state.access.user && state.access.user.id
+  return accountId ? `${baseKey}.${accountId}` : `${baseKey}.anonymous`
+}
+
+function resetAccountWorkspaceState() {
+  clearTimeout(scheduleFeedbackDataSync.timer)
+  clearTimeout(scheduleTeachingSave.timer)
+  state.classes = []
+  state.oneProfiles = []
+  state.selectedClassId = ''
+  state.selectedOneProfileId = ''
+  state.editingClassId = ''
+  state.editingOneProfileId = ''
+  state.feedbacks = []
+  state.lastGeneratedPayload = null
+  state.debug = null
+  state.adminUsers = []
+  state.pendingTeachingApplication = null
+  state.teaching.data = createEmptyTeachingData()
+  state.teaching.loaded = false
+  state.teaching.loading = false
+  state.teaching.selectedClassId = ''
+  state.teaching.selectedScoreClassId = ''
+  state.teaching.selectedOneProfileId = ''
+  state.exitTest.scores = {}
+}
+
 function loadClasses() {
   try {
-    const classes = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
+    const classes = JSON.parse(localStorage.getItem(getAccountStorageKey(STORAGE_KEY)) || '[]')
     state.classes = Array.isArray(classes) ? classes : []
   } catch (error) {
     state.classes = []
@@ -3749,7 +3789,7 @@ function loadClasses() {
 
 function loadOneProfiles() {
   try {
-    const profiles = JSON.parse(localStorage.getItem(ONE_PROFILE_STORAGE_KEY) || '[]')
+    const profiles = JSON.parse(localStorage.getItem(getAccountStorageKey(ONE_PROFILE_STORAGE_KEY)) || '[]')
     state.oneProfiles = Array.isArray(profiles) ? profiles : []
   } catch (error) {
     state.oneProfiles = []
@@ -3761,12 +3801,12 @@ function loadOneProfiles() {
 }
 
 function persistClasses(options = {}) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.classes))
+  localStorage.setItem(getAccountStorageKey(STORAGE_KEY), JSON.stringify(state.classes))
   if (!options.localOnly) scheduleFeedbackDataSync()
 }
 
 function persistOneProfiles(options = {}) {
-  localStorage.setItem(ONE_PROFILE_STORAGE_KEY, JSON.stringify(state.oneProfiles))
+  localStorage.setItem(getAccountStorageKey(ONE_PROFILE_STORAGE_KEY), JSON.stringify(state.oneProfiles))
   if (!options.localOnly) scheduleFeedbackDataSync()
 }
 
@@ -3780,48 +3820,17 @@ async function loadFeedbackDataFromServer() {
     if (!response.ok) throw new Error(data.error || '读取档案数据失败')
 
     const remote = data.data || {}
-    const localHadData = state.classes.length || state.oneProfiles.length
-    state.classes = mergeRecordsById(state.classes, Array.isArray(remote.classes) ? remote.classes : [])
-    state.oneProfiles = mergeRecordsById(state.oneProfiles, Array.isArray(remote.oneProfiles) ? remote.oneProfiles : [])
-
-    if (!state.selectedClassId && state.classes.length) state.selectedClassId = state.classes[0].id
-    if (!state.selectedOneProfileId && state.oneProfiles.length) state.selectedOneProfileId = state.oneProfiles[0].id
+    state.classes = Array.isArray(remote.classes) ? remote.classes : []
+    state.oneProfiles = Array.isArray(remote.oneProfiles) ? remote.oneProfiles : []
+    state.selectedClassId = state.classes[0] ? state.classes[0].id : ''
+    state.selectedOneProfileId = state.oneProfiles[0] ? state.oneProfiles[0].id : ''
+    state.editingClassId = state.selectedClassId
+    state.editingOneProfileId = state.selectedOneProfileId
 
     persistClasses({ localOnly: true })
     persistOneProfiles({ localOnly: true })
-    if (localHadData) await saveFeedbackDataToServer({ silent: true })
   } catch (error) {
     showToast(error.message || '档案数据暂时使用本机缓存')
-  }
-}
-
-function mergeRecordsById(localRecords, remoteRecords) {
-  const records = new Map()
-
-  remoteRecords.forEach((record) => {
-    if (record && record.id) records.set(record.id, record)
-  })
-
-  localRecords.forEach((record) => {
-    if (!record || !record.id) return
-    const existed = records.get(record.id)
-    if (!existed || Number(record.updatedAt || 0) >= Number(existed.updatedAt || 0)) {
-      records.set(record.id, mergeRecordPreservingMaterial(record, existed))
-    }
-  })
-
-  return Array.from(records.values())
-}
-
-function mergeRecordPreservingMaterial(record, existed) {
-  if (!existed || record.textbook) return record
-  if (record.materialMode === 'lesson') return record
-  if (!existed.textbook) return record
-
-  return {
-    ...record,
-    materialMode: record.materialMode || existed.materialMode || 'book',
-    textbook: existed.textbook
   }
 }
 
