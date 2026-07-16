@@ -13,22 +13,34 @@ require('dotenv').config()
 
 const app = express()
 const execFileAsync = promisify(execFile)
+const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 60 * 1024 * 1024
+    fileSize: MAX_UPLOAD_FILE_SIZE_BYTES
   }
 })
 
 const PORT = Number(process.env.PORT || 5177)
 const DEFAULT_PROVIDER = 'openai'
 const ENV_PATH = path.join(__dirname, '.env')
-const DATA_DIR = path.join(__dirname, 'data')
+const LEGACY_DATA_DIR = path.join(__dirname, 'data')
+const DEPLOYMENT_TARGET = trim(process.env.DEPLOYMENT_TARGET).toLowerCase()
+const RENDER_GIT_BRANCH = trim(process.env.RENDER_GIT_BRANCH).toLowerCase()
+const RENDER_SERVICE_NAME = trim(process.env.RENDER_SERVICE_NAME).toLowerCase()
+const RENDER_EXTERNAL_HOSTNAME = trim(process.env.RENDER_EXTERNAL_HOSTNAME).toLowerCase()
+const IS_STAGING_DEPLOYMENT = DEPLOYMENT_TARGET === 'staging'
+  || RENDER_GIT_BRANCH === 'staging'
+  || /(^|[-_.])(staging|test)([-_.]|$)/.test(RENDER_SERVICE_NAME)
+  || /(^|[-_.])(staging|test)([-_.]|$)/.test(RENDER_EXTERNAL_HOSTNAME)
+const DATA_DIR = resolveDataDir()
 const USAGE_PATH = path.join(DATA_DIR, 'usage.json')
 const ACCOUNTS_PATH = path.join(DATA_DIR, 'accounts.json')
-const TEACHING_DATA_PATH = path.join(DATA_DIR, 'teaching-data.json')
+const FEEDBACK_DATA_PATH = path.join(DATA_DIR, 'feedback-data.json')
 const MATERIAL_INDEX_PATH = path.join(DATA_DIR, 'materials.json')
-const MATERIAL_DIR = path.join(DATA_DIR, 'materials')
+const MATERIAL_FILES_DIR = path.join(DATA_DIR, 'material-files')
+const LEGACY_USAGE_PATH = path.join(LEGACY_DATA_DIR, 'usage.json')
+const LEGACY_ACCOUNTS_PATH = path.join(LEGACY_DATA_DIR, 'accounts.json')
 const OCR_BINARY_PATH = path.join(__dirname, 'scripts', 'ocr_image')
 const OCR_SCRIPT_PATH = path.join(__dirname, 'scripts', 'ocr_image.swift')
 const PDFTOPPM_PATHS = [
@@ -38,6 +50,7 @@ const PDFTOPPM_PATHS = [
   '/opt/homebrew/bin/pdftoppm',
   '/usr/local/bin/pdftoppm'
 ]
+const DATABASE_URL = IS_STAGING_DEPLOYMENT ? '' : trim(process.env.DATABASE_URL)
 const proxyUrl = trim(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.ALL_PROXY)
 const proxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null
 const PUBLIC_MODE = parseBoolean(process.env.PUBLIC_MODE)
@@ -45,7 +58,6 @@ const ACCESS_CODE = trim(process.env.ACCESS_CODE)
 const DAILY_LIMIT = parseDailyLimit(process.env.DAILY_LIMIT)
 const SESSION_COOKIE = 'course_feedback_session'
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
-const QUESTION_RECOGNITION_BATCH_SIZE = 2
 const DEFAULT_ACCOUNTS = [
   {
     id: 'admin-iconyang',
@@ -66,12 +78,13 @@ const DEFAULT_ACCOUNTS = [
     passwordHash: '3766097707db5944e26b203f98e804fa47b36fd27cfc7b66c0e12ea7282b4847'
   }
 ]
-const usageState = readUsageState()
-const accountState = readAccountState()
-const teachingDataState = readTeachingDataState()
-const materialState = readMaterialState()
+let databasePool = null
+let usageState = {}
+let accountState = { users: [] }
+let feedbackDataState = { owners: {} }
+let materialState = { items: [] }
 
-app.use(express.json({ limit: '8mb' }))
+app.use(express.json({ limit: '1mb' }))
 app.use(express.static(path.join(__dirname, 'public')))
 
 app.get('/api/health', (req, res) => {
@@ -88,6 +101,7 @@ app.get('/api/health', (req, res) => {
     accessRequired: isAccessRequired(),
     authenticated: Boolean(session),
     dailyLimit: getSessionDailyLimit(session),
+    storage: getStorageStatus(),
     user: session ? getSafeSessionUser(session) : null,
     usage: session ? getUsageInfoForSession(session) : null
   })
@@ -164,10 +178,10 @@ app.get('/api/admin/users', requireAdminMiddleware, (req, res) => {
   })
 })
 
-app.post('/api/admin/users', requireAdminMiddleware, (req, res) => {
+app.post('/api/admin/users', requireAdminMiddleware, async (req, res) => {
   try {
     const account = createAccount(req.body || {})
-    writeAccountState()
+    await writeAccountState()
     res.json({
       ok: true,
       user: getAccountForAdmin(account)
@@ -177,10 +191,10 @@ app.post('/api/admin/users', requireAdminMiddleware, (req, res) => {
   }
 })
 
-app.patch('/api/admin/users/:userId', requireAdminMiddleware, (req, res) => {
+app.patch('/api/admin/users/:userId', requireAdminMiddleware, async (req, res) => {
   try {
     const account = updateAccount(req.params.userId, req.body || {})
-    writeAccountState()
+    await writeAccountState()
     res.json({
       ok: true,
       user: getAccountForAdmin(account)
@@ -190,12 +204,11 @@ app.patch('/api/admin/users/:userId', requireAdminMiddleware, (req, res) => {
   }
 })
 
-app.delete('/api/admin/users/:userId', requireAdminMiddleware, (req, res) => {
+app.delete('/api/admin/users/:userId', requireAdminMiddleware, async (req, res) => {
   try {
     const account = deleteAccount(req.params.userId, req.accessSession)
-    writeAccountState()
-    clearUsageForClient(getUsageClientIdForAccount(account))
-    writeUsageState()
+    await writeAccountState()
+    await clearUsageForClient(getUsageClientIdForAccount(account))
     res.json({
       ok: true,
       userId: account.id
@@ -205,12 +218,12 @@ app.delete('/api/admin/users/:userId', requireAdminMiddleware, (req, res) => {
   }
 })
 
-app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, (req, res) => {
+app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, async (req, res) => {
   try {
     const account = findAccountById(req.params.userId)
     if (!account) throw new Error('账号不存在')
 
-    resetUsage(getUsageClientIdForAccount(account))
+    await resetUsage(getUsageClientIdForAccount(account))
     res.json({
       ok: true,
       user: getAccountForAdmin(account)
@@ -220,21 +233,53 @@ app.post('/api/admin/users/:userId/reset-usage', requireAdminMiddleware, (req, r
   }
 })
 
-app.get('/api/teaching-data', requireAccessMiddleware, (req, res) => {
-  const ownerId = getTeachingOwnerId(req.accessSession)
+app.get('/api/feedback-data', requireAccessMiddleware, (req, res) => {
+  const ownerId = getDataOwnerId(req.accessSession)
   res.json({
-    data: getTeachingDataForOwner(ownerId),
+    data: getFeedbackDataForOwner(ownerId),
     ownerId
   })
 })
 
-app.put('/api/teaching-data', requireAccessMiddleware, (req, res) => {
+app.put('/api/feedback-data', requireAccessMiddleware, async (req, res) => {
   try {
-    const ownerId = getTeachingOwnerId(req.accessSession)
-    const data = normalizeTeachingData(req.body && req.body.data)
+    const ownerId = getDataOwnerId(req.accessSession)
+    const current = getFeedbackDataForOwner(ownerId)
+    const incoming = req.body && typeof req.body === 'object' ? req.body : {}
+    const data = isolateFeedbackDataForOwner(ownerId, normalizeFeedbackData({
+      ...current,
+      ...incoming,
+      quickOptions: {
+        ...(current.quickOptions || {}),
+        ...(incoming.quickOptions || {})
+      }
+    }))
+    feedbackDataState.owners[ownerId] = data
+    await writeFeedbackDataState()
+    res.json({
+      ok: true,
+      data
+    })
+  } catch (error) {
+    res.status(400).json({ error: error.message || '保存档案数据失败' })
+  }
+})
+
+app.get('/api/teaching-data', requireAccessMiddleware, (req, res) => {
+  const ownerId = getDataOwnerId(req.accessSession)
+  res.json({
+    data: getFeedbackDataForOwner(ownerId),
+    ownerId
+  })
+})
+
+app.put('/api/teaching-data', requireAccessMiddleware, async (req, res) => {
+  try {
+    const ownerId = getDataOwnerId(req.accessSession)
+    const data = isolateFeedbackDataForOwner(ownerId, normalizeFeedbackData(req.body && req.body.data))
     data.updatedAt = Date.now()
-    teachingDataState[ownerId] = data
-    writeTeachingDataState()
+    feedbackDataState.owners[ownerId] = data
+    await writeFeedbackDataState()
     res.json({
       ok: true,
       data
@@ -244,18 +289,21 @@ app.put('/api/teaching-data', requireAccessMiddleware, (req, res) => {
   }
 })
 
-app.post('/api/materials', requireAccessMiddleware, upload.single('material'), (req, res) => {
+app.post('/api/materials', requireAccessMiddleware, upload.single('material'), async (req, res) => {
   try {
     if (!req.file) throw new Error('请先上传教材文件')
 
-    const ownerId = getTeachingOwnerId(req.accessSession)
-    const material = saveUploadedMaterial(ownerId, req.file, req.body || {})
+    const ownerId = getDataOwnerId(req.accessSession)
+    const material = await saveUploadedMaterial(ownerId, req.file, req.body || {})
     res.json({
       ok: true,
       material: getSafeMaterial(material)
     })
   } catch (error) {
-    res.status(400).json({ error: error.message || '上传教材失败' })
+    const message = getMaterialUploadErrorMessage(error)
+    const isInputError = message === '请先上传教材文件' || message.startsWith('教材目前支持')
+    if (!isInputError) console.error('Failed to upload material', error)
+    res.status(isInputError ? 400 : 500).json({ error: message })
   }
 })
 
@@ -285,7 +333,7 @@ app.post('/api/teaching-data/ai-polish', requireAccessMiddleware, async (req, re
       result = await requestTeachingTextAI(buildPolishPrompt(text, context), aiConfig)
     }
 
-    const usage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    const usage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
     res.json({
       ok: true,
       demo,
@@ -333,7 +381,7 @@ app.post('/api/teaching-data/ai-analysis', requireAccessMiddleware, async (req, 
       }), aiConfig)
     }
 
-    const usage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    const usage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
     res.json({
       ok: true,
       demo,
@@ -384,7 +432,7 @@ app.post('/api/teaching-data/paper-analysis', requireAccessMiddleware, upload.fi
       analysis = normalizePaperAnalysis(parsePaperAnalysisResponse(aiResponse, aiConfig.provider), payload)
     }
 
-    const usage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    const usage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
     res.json({
       ok: true,
       demo,
@@ -437,7 +485,7 @@ app.post('/api/teaching-data/paper-score-recognition', requireAccessMiddleware, 
       scores = normalizePaperScoreRecognition(parsePaperScoreRecognitionResponse(aiResponse, aiConfig.provider), payload)
     }
 
-    const usage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    const usage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
     res.json({
       ok: true,
       demo,
@@ -498,14 +546,41 @@ app.post('/api/config', (req, res) => {
   })
 })
 
+app.post('/api/courseware-lectures', requireAccessMiddleware, upload.single('courseware'), async (req, res) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ error: '请先上传课件文件' })
+      return
+    }
+
+    const courseware = await normalizeCourseware(req.file)
+    const detection = detectTextCoursewareLectures(courseware.extractedText, {
+      pageCount: courseware.ocrPageCount
+    })
+
+    res.json({
+      lectures: detection.lectures,
+      pageCount: detection.pageCount,
+      extractionSource: courseware.extractionSource,
+      textLength: trim(courseware.extractedText).length
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({
+      error: getUserFacingError(error)
+    })
+  }
+})
+
 app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
-  { name: 'courseware', maxCount: 1 },
+  { name: 'courseware', maxCount: 12 },
   { name: 'exitTest', maxCount: 1 },
-  { name: 'pdfPageImage', maxCount: 500 }
+  { name: 'pdfPageImage', maxCount: 1000 }
 ]), async (req, res) => {
   try {
     const session = req.accessSession
-    const coursewareFile = getUploadedFile(req, 'courseware')
+    const coursewareFiles = getUploadedFiles(req, 'courseware')
+    const coursewareFile = coursewareFiles[0] || null
     const exitTestFile = getUploadedFile(req, 'exitTest')
     const pdfPageImages = getUploadedFiles(req, 'pdfPageImage')
 
@@ -520,25 +595,20 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     }
 
     const payload = parsePayload(req.body.payload)
-    const storedMaterialFile = !coursewareFile && payload.materialId
-      ? getStoredMaterialFile(session, payload.materialId)
+    const storedMaterialFile = !coursewareFiles.length && payload.materialId
+      ? await getStoredMaterialFile(session, payload.materialId)
       : null
-    validatePayload(payload, Boolean(coursewareFile || storedMaterialFile))
+    validatePayload(payload, Boolean(coursewareFiles.length || storedMaterialFile))
 
     const aiConfig = getAIConfig()
-    const sourceCoursewareFile = coursewareFile || storedMaterialFile
-    const courseware = sourceCoursewareFile ? await normalizeCourseware(sourceCoursewareFile, {
-      clientPdfText: payload.clientPdfText,
-      pdfPageImages,
-      selectedPdfPages: payload.selectedPdfPages
-    }) : null
+    const courseware = await normalizeCoursewareUploads(coursewareFiles, storedMaterialFile, payload, pdfPageImages)
     const exitTestCourseware = exitTestFile ? await normalizeCourseware(exitTestFile, {
       selectedPdfPages: payload.exitTest && payload.exitTest.selectedPdfPages
     }) : null
     if (exitTestCourseware) payload.exitTestFile = buildUploadedFileSummary(exitTestCourseware)
 
     if (!aiConfig.apiKey) {
-      const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+      const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
       res.json({
         demo: true,
         message: `当前未配置 ${aiConfig.keyName}，已返回演示反馈。`,
@@ -549,7 +619,7 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     }
 
     const aiResponse = await requestAI(payload, courseware, aiConfig)
-    const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
     const parsed = parseFeedbackResponse(aiResponse, aiConfig.provider)
 
     res.json({
@@ -567,84 +637,34 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
   }
 })
 
-app.post('/api/rearrange/recognize', requireAccessMiddleware, upload.fields([
-  { name: 'rearrangePageImage', maxCount: 12 },
-  { name: 'sourceFile', maxCount: 3 }
-]), async (req, res) => {
-  try {
-    const session = req.accessSession
-    const usageClientId = getUsageClientId(session)
-    const usageInfo = getUsageInfoForSession(session)
-
-    if (!usageInfo.unlimited && usageInfo.remaining <= 0) {
-      res.status(429).json({
-        error: `今天的生成次数已用完。每日最多 ${usageInfo.limit} 次，请联系管理员或明天再试。`,
-        usage: usageInfo
-      })
-      return
-    }
-
-    const payload = parsePayload(req.body.payload)
-    const pageFiles = getUploadedFiles(req, 'rearrangePageImage')
-    const sourceFiles = getUploadedFiles(req, 'sourceFile')
-
-    if (!pageFiles.length && !sourceFiles.length) {
-      throw new Error('请先上传 PDF、图片或 Word 文件')
-    }
-
-    const aiConfig = getAIConfig()
-    const pages = await buildQuestionPageInputs(pageFiles)
-    const docTexts = sourceFiles.map((file) => extractQuestionSourceText(file)).filter((item) => item.text)
-
-    let questions
-    if (!aiConfig.apiKey) {
-      questions = buildDemoQuestions(payload, docTexts)
-    } else {
-      questions = await recognizeQuestionList(payload, pages, docTexts, aiConfig)
-    }
-
-    const nextUsage = incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
-
-    res.json({
-      provider: aiConfig.provider,
-      model: aiConfig.model,
-      usage: nextUsage,
-      questions: normalizeQuestions(questions)
-    })
-  } catch (error) {
-    console.error(error)
-    res.status(400).json({
-      error: getUserFacingError(error)
-    })
+app.use((error, req, res, next) => {
+  if (res.headersSent) {
+    next(error)
+    return
   }
-})
 
-app.post('/api/rearrange/export-word', requireAccessMiddleware, (req, res) => {
-  try {
-    const title = trim(req.body && req.body.title) || '题卷重排'
-    const questions = normalizeQuestions(req.body && req.body.questions)
-
-    if (!questions.length) {
-      throw new Error('没有可导出的题目')
-    }
-
-    const buffer = buildQuestionDocx(title, questions)
-    const fileName = encodeURIComponent(`${title}.docx`)
-
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${fileName}`)
-    res.send(buffer)
-  } catch (error) {
-    console.error(error)
-    res.status(400).json({
-      error: getUserFacingError(error)
-    })
+  if (error instanceof multer.MulterError) {
+    const message = error.code === 'LIMIT_FILE_SIZE'
+      ? `单个文件不能超过 ${Math.floor(MAX_UPLOAD_FILE_SIZE_BYTES / 1024 / 1024)}MB`
+      : `文件上传失败：${error.message}`
+    res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: message })
+    return
   }
+
+  console.error('Unhandled request error', error)
+  res.status(500).json({ error: '服务器处理文件时出错，请稍后重试' })
 })
 
-app.listen(PORT, () => {
-  console.log(`Course feedback web app running at http://localhost:${PORT}`)
-})
+initializeStorage()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Course feedback web app running at http://localhost:${PORT}`)
+    })
+  })
+  .catch((error) => {
+    console.error('Failed to initialize storage', error)
+    process.exit(1)
+  })
 
 function parsePayload(rawPayload) {
   if (!rawPayload) return {}
@@ -675,12 +695,16 @@ function validatePayload(payload, hasCourseware = false) {
     throw new Error('请填写课程主题、补充课程内容或上传课件')
   }
 
+  payload.generationInstruction = trim(payload.generationInstruction).slice(0, 1200)
+
   payload.students = payload.students
     .map((student, index) => ({
       id: trim(student.id) || `student-${index + 1}`,
       name: trim(student.name),
       performance: trim(student.performance) || '表现良好',
       remark: trim(student.remark),
+      keywords: trim(student.keywords),
+      exitTestScore: trim(student.exitTestScore),
       personality: trim(student.personality),
       habit: trim(student.habit)
     }))
@@ -781,6 +805,8 @@ function writeEnvMap(envMap) {
     'ACCESS_CODE',
     'DAILY_LIMIT',
     'SESSION_SECRET',
+    'DATA_DIR',
+    'DATABASE_URL',
     'AI_PROVIDER',
     'CUSTOM_API_KEY',
     'CUSTOM_MODEL',
@@ -809,6 +835,167 @@ function writeEnvMap(envMap) {
   })
 
   fs.writeFileSync(ENV_PATH, `${lines.join('\n')}\n`)
+}
+
+function resolveDataDir() {
+  if (IS_STAGING_DEPLOYMENT) {
+    return path.join(os.tmpdir(), 'course-feedback-web-staging-data')
+  }
+
+  const configuredDir = trim(process.env.DATA_DIR || process.env.RENDER_DATA_DIR)
+  if (configuredDir) return path.resolve(configuredDir)
+
+  if (process.env.RENDER && isWritableDirectory('/var/data')) {
+    return '/var/data'
+  }
+
+  return LEGACY_DATA_DIR
+}
+
+function isWritableDirectory(dirPath) {
+  try {
+    if (!fs.existsSync(dirPath)) return false
+    fs.accessSync(dirPath, fs.constants.W_OK)
+    return true
+  } catch (error) {
+    return false
+  }
+}
+
+async function initializeStorage() {
+  usageState = readUsageState()
+  accountState = readAccountState()
+  feedbackDataState = readFeedbackDataState()
+  materialState = readMaterialState()
+
+  if (!DATABASE_URL) {
+    if (removeAdminCopiesOfUserClasses()) await writeFeedbackDataState()
+    const materialsMigrated = await migrateLegacyMaterialStorage()
+    if (materialsMigrated) await writeMaterialState()
+    return
+  }
+
+  databasePool = createDatabasePool()
+  await ensureDatabaseSchema()
+
+  const databaseAccounts = await readDatabaseState('accounts')
+  if (databaseAccounts && Array.isArray(databaseAccounts.users)) {
+    accountState = databaseAccounts
+    if (mergeDefaultAccounts(accountState)) {
+      await writeDatabaseState('accounts', accountState)
+    }
+  } else {
+    await writeDatabaseState('accounts', accountState)
+  }
+
+  const databaseUsage = await readDatabaseState('usage')
+  if (databaseUsage && typeof databaseUsage === 'object' && !Array.isArray(databaseUsage)) {
+    usageState = databaseUsage
+  } else {
+    await writeDatabaseState('usage', usageState)
+  }
+
+  const databaseFeedbackData = await readDatabaseState('feedback-data')
+  if (databaseFeedbackData && typeof databaseFeedbackData === 'object' && !Array.isArray(databaseFeedbackData)) {
+    feedbackDataState = normalizeFeedbackDataState(databaseFeedbackData)
+  } else {
+    await writeDatabaseState('feedback-data', feedbackDataState)
+  }
+
+  if (removeAdminCopiesOfUserClasses()) {
+    await writeFeedbackDataState()
+  }
+
+  const databaseMaterials = await readDatabaseState('materials')
+  let shouldSeedMaterialState = false
+  if (databaseMaterials && typeof databaseMaterials === 'object' && Array.isArray(databaseMaterials.items)) {
+    materialState = databaseMaterials
+  } else {
+    shouldSeedMaterialState = true
+  }
+
+  const materialsMigrated = await migrateLegacyMaterialStorage()
+  if (materialsMigrated || shouldSeedMaterialState) {
+    try {
+      await writeMaterialState()
+    } catch (error) {
+      console.error('Failed to persist migrated material metadata', error)
+    }
+  }
+}
+
+function createDatabasePool() {
+  let Pool
+
+  try {
+    ;({ Pool } = require('pg'))
+  } catch (error) {
+    throw new Error('已配置 DATABASE_URL，但缺少 pg 依赖。请重新部署以安装数据库依赖。')
+  }
+
+  return new Pool({
+    connectionString: DATABASE_URL,
+    ssl: {
+      rejectUnauthorized: false
+    }
+  })
+}
+
+async function ensureDatabaseSchema() {
+  await databasePool.query(`
+    create table if not exists app_state (
+      key text primary key,
+      value jsonb not null,
+      updated_at timestamptz not null default now()
+    )
+  `)
+
+  await databasePool.query(`
+    create table if not exists course_materials (
+      id text primary key,
+      owner_id text not null,
+      original_name text not null,
+      mime text not null,
+      size bigint not null,
+      data bytea not null,
+      lectures jsonb not null default '[]'::jsonb,
+      created_at timestamptz not null default now()
+    )
+  `)
+
+  await databasePool.query(`
+    create index if not exists course_materials_owner_id_idx
+    on course_materials (owner_id)
+  `)
+}
+
+async function readDatabaseState(key) {
+  const result = await databasePool.query('select value from app_state where key = $1', [key])
+  if (!result.rows.length) return null
+  return result.rows[0].value
+}
+
+async function writeDatabaseState(key, value) {
+  if (!databasePool) return
+
+  await databasePool.query(`
+    insert into app_state (key, value, updated_at)
+    values ($1, $2::jsonb, now())
+    on conflict (key)
+    do update set value = excluded.value, updated_at = now()
+  `, [key, JSON.stringify(value)])
+}
+
+function getStorageStatus() {
+  return {
+    deploymentTarget: IS_STAGING_DEPLOYMENT ? 'staging' : (DEPLOYMENT_TARGET || 'production'),
+    mode: databasePool ? 'database' : 'file',
+    databaseConfigured: Boolean(DATABASE_URL),
+    databaseConnected: Boolean(databasePool),
+    databaseDisabledForStaging: IS_STAGING_DEPLOYMENT,
+    dataDir: DATA_DIR,
+    persistent: IS_STAGING_DEPLOYMENT ? false : (databasePool ? true : DATA_DIR !== LEGACY_DATA_DIR)
+  }
 }
 
 function isAccessRequired() {
@@ -983,17 +1170,22 @@ function getRequestFingerprint(req) {
 
 function readAccountState() {
   try {
-    const raw = fs.existsSync(ACCOUNTS_PATH) ? fs.readFileSync(ACCOUNTS_PATH, 'utf8') : ''
+    const { raw, migrated } = readStateFile(ACCOUNTS_PATH, LEGACY_ACCOUNTS_PATH)
     const parsed = raw ? JSON.parse(raw) : null
     const state = parsed && Array.isArray(parsed.users) ? parsed : { users: [] }
-    mergeDefaultAccounts(state)
+    const changed = mergeDefaultAccounts(state)
+    if (migrated || changed) writeJsonState(ACCOUNTS_PATH, state)
     return state
   } catch (error) {
-    return { users: DEFAULT_ACCOUNTS.map((account) => ({ ...account })) }
+    const state = { users: DEFAULT_ACCOUNTS.map((account) => ({ ...account })) }
+    writeJsonState(ACCOUNTS_PATH, state)
+    return state
   }
 }
 
 function mergeDefaultAccounts(state) {
+  let changed = false
+
   DEFAULT_ACCOUNTS.forEach((defaultAccount) => {
     const existed = state.users.find((account) => account.username === defaultAccount.username)
     if (!existed) {
@@ -1002,13 +1194,16 @@ function mergeDefaultAccounts(state) {
         createdAt: Date.now(),
         updatedAt: Date.now()
       })
+      changed = true
     }
   })
+
+  return changed
 }
 
-function writeAccountState() {
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(ACCOUNTS_PATH, `${JSON.stringify(accountState, null, 2)}\n`)
+async function writeAccountState() {
+  writeJsonState(ACCOUNTS_PATH, accountState)
+  await writeDatabaseState('accounts', accountState)
 }
 
 function findAccountByUsername(username) {
@@ -1178,27 +1373,28 @@ function getUsageInfo(clientId, limit = DAILY_LIMIT, unlimited = false) {
   }
 }
 
-function incrementUsage(clientId, limit = DAILY_LIMIT, unlimited = false) {
+async function incrementUsage(clientId, limit = DAILY_LIMIT, unlimited = false) {
   const today = getTodayKey()
   cleanupUsageState(today)
   if (!usageState[today]) usageState[today] = {}
   usageState[today][clientId] = Number(usageState[today][clientId] || 0) + 1
-  writeUsageState()
+  await writeUsageState()
   return getUsageInfo(clientId, limit, unlimited)
 }
 
-function resetUsage(clientId) {
+async function resetUsage(clientId) {
   const today = getTodayKey()
   if (usageState[today]) {
     usageState[today][clientId] = 0
-    writeUsageState()
+    await writeUsageState()
   }
 }
 
-function clearUsageForClient(clientId) {
+async function clearUsageForClient(clientId) {
   Object.keys(usageState).forEach((date) => {
     if (usageState[date]) delete usageState[date][clientId]
   })
+  await writeUsageState()
 }
 
 function getTodayKey() {
@@ -1212,193 +1408,151 @@ function getTodayKey() {
 
 function readUsageState() {
   try {
-    const raw = fs.existsSync(USAGE_PATH) ? fs.readFileSync(USAGE_PATH, 'utf8') : '{}'
+    const { raw, migrated } = readStateFile(USAGE_PATH, LEGACY_USAGE_PATH, '{}')
     const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' ? parsed : {}
+    const state = parsed && typeof parsed === 'object' ? parsed : {}
+    if (migrated) writeJsonState(USAGE_PATH, state)
+    return state
   } catch (error) {
     return {}
   }
 }
 
-function writeUsageState() {
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(USAGE_PATH, `${JSON.stringify(usageState, null, 2)}\n`)
+async function writeUsageState() {
+  writeJsonState(USAGE_PATH, usageState)
+  await writeDatabaseState('usage', usageState)
 }
 
-function cleanupUsageState(today) {
-  Object.keys(usageState).forEach((date) => {
-    if (date !== today) delete usageState[date]
-  })
-}
-
-function getTeachingOwnerId(session) {
-  if (session && session.accountId) return `account:${session.accountId}`
-  if (session && session.clientId) return `client:${session.clientId}`
-  return 'client:anonymous'
-}
-
-function getTeachingDataForOwner(ownerId) {
-  const data = teachingDataState[ownerId]
-  const normalized = normalizeTeachingData(data)
-  if (!data) {
-    teachingDataState[ownerId] = normalized
-    writeTeachingDataState()
-  }
-  return normalized
-}
-
-function readTeachingDataState() {
+function readFeedbackDataState() {
   try {
-    const raw = fs.existsSync(TEACHING_DATA_PATH) ? fs.readFileSync(TEACHING_DATA_PATH, 'utf8') : '{}'
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    const raw = fs.existsSync(FEEDBACK_DATA_PATH) ? fs.readFileSync(FEEDBACK_DATA_PATH, 'utf8') : '{"owners":{}}'
+    return normalizeFeedbackDataState(JSON.parse(raw))
   } catch (error) {
-    return {}
+    return { owners: {} }
   }
 }
 
-function writeTeachingDataState() {
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(TEACHING_DATA_PATH, `${JSON.stringify(teachingDataState, null, 2)}\n`)
-}
-
-function readMaterialState() {
-  try {
-    const raw = fs.existsSync(MATERIAL_INDEX_PATH) ? fs.readFileSync(MATERIAL_INDEX_PATH, 'utf8') : '{"items":[]}'
-    const parsed = JSON.parse(raw)
-    return parsed && Array.isArray(parsed.items) ? parsed : { items: [] }
-  } catch (error) {
-    return { items: [] }
-  }
-}
-
-function writeMaterialState() {
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  fs.writeFileSync(MATERIAL_INDEX_PATH, `${JSON.stringify(materialState, null, 2)}\n`)
-}
-
-function saveUploadedMaterial(ownerId, file, input = {}) {
-  const originalName = file.originalname || 'material.pdf'
-  const lowerName = originalName.toLowerCase()
-  if (!/\.(pdf|docx|pptx|txt|md)$/i.test(lowerName)) {
-    throw new Error('整本教材目前支持 PDF、Word、PPT 或文本文件')
-  }
-
-  const id = `mat-${crypto.randomUUID()}`
-  const ownerDir = path.join(MATERIAL_DIR, safePathSegment(ownerId))
-  const extension = path.extname(originalName) || '.bin'
-  const storedName = `${id}${extension.toLowerCase()}`
-  const storedPath = path.join(ownerDir, storedName)
-  const lectures = parseMaterialLectures(input.lectures)
-
-  fs.mkdirSync(ownerDir, { recursive: true })
-  fs.writeFileSync(storedPath, file.buffer)
-
-  const material = {
-    id,
-    ownerId,
-    originalName,
-    storedPath,
-    mime: getMimeType(originalName, file.mimetype || 'application/octet-stream'),
-    size: file.size,
-    lectures,
-    createdAt: Date.now()
-  }
-
-  materialState.items = materialState.items.filter((item) => item.id !== id)
-  materialState.items.push(material)
-  writeMaterialState()
-  return material
-}
-
-function parseMaterialLectures(rawLectures) {
-  if (!rawLectures) return []
-  const source = typeof rawLectures === 'string' ? parseJsonText(rawLectures) : rawLectures
-  const list = Array.isArray(source) ? source : []
-
-  return list.map((lecture, index) => ({
-    key: trim(lecture && lecture.key) || `lecture-${index + 1}`,
-    title: trim(lecture && lecture.title) || `第 ${index + 1} 讲`,
-    startPage: Math.max(1, Number(lecture && lecture.startPage) || 1),
-    endPage: Math.max(1, Number(lecture && lecture.endPage) || Number(lecture && lecture.startPage) || 1)
-  }))
-}
-
-function getStoredMaterialFile(session, materialId) {
-  const ownerId = getTeachingOwnerId(session)
-  const material = materialState.items.find((item) => item.id === materialId && item.ownerId === ownerId)
-
-  if (!material || !material.storedPath || !fs.existsSync(material.storedPath)) {
-    throw new Error('没有找到班级教材，请重新上传')
-  }
-
-  return {
-    originalname: material.originalName,
-    mimetype: material.mime,
-    buffer: fs.readFileSync(material.storedPath)
-  }
-}
-
-function getSafeMaterial(material) {
-  return {
-    id: material.id,
-    name: material.originalName,
-    mime: material.mime,
-    size: material.size,
-    lectures: Array.isArray(material.lectures) ? material.lectures : [],
-    createdAt: material.createdAt
-  }
-}
-
-function safePathSegment(value) {
-  return String(value || 'default').replace(/[^A-Za-z0-9_.:-]+/g, '_')
-}
-
-function normalizeTeachingData(input) {
+function normalizeFeedbackDataState(input) {
   const source = input && typeof input === 'object' ? input : {}
-  const quickOptions = source.quickOptions && typeof source.quickOptions === 'object'
-    ? source.quickOptions
-    : {}
-  const performancePositiveFallback = [
-    '主动发言',
-    '回答质量高',
-    '笔记认真',
-    '思路清晰',
-    '步骤规范',
-    '课堂练习完成度高'
-  ]
-  const performanceNegativeFallback = [
-    '注意力波动',
-    '反应较慢',
-    '参与度待提高',
-    '预习不充分',
-    '作业质量不稳定',
-    '计算细节易错'
-  ]
-  const classPerformancePositiveFallback = [
-    '互动积极',
-    '回答问题踊跃',
-    '小组讨论热烈',
-    '笔记整理认真',
-    '思维活跃有深度',
-    '课前预习充分',
-    '课堂练习完成度高'
-  ]
-  const classPerformanceNegativeFallback = [
-    '个别学生走神',
-    '部分学生反应较慢',
-    '互动参与度有待提高',
-    '课前预习不充分',
-    '纪律偶有松散',
-    '作业完成质量参差不齐'
-  ]
+  const owners = source.owners && typeof source.owners === 'object' ? source.owners : {}
+  const nextOwners = {}
+
+  Object.entries(owners).forEach(([ownerId, data]) => {
+    nextOwners[ownerId] = normalizeFeedbackData(data)
+  })
+
+  return { owners: nextOwners }
+}
+
+async function writeFeedbackDataState() {
+  writeJsonState(FEEDBACK_DATA_PATH, feedbackDataState)
+  await writeDatabaseState('feedback-data', feedbackDataState)
+}
+
+function getDataOwnerId(session = {}) {
+  return session.accountId ? `account:${session.accountId}` : getUsageClientId(session)
+}
+
+function getFeedbackDataForOwner(ownerId) {
+  return isolateFeedbackDataForOwner(ownerId, feedbackDataState.owners[ownerId] || {})
+}
+
+function getAdminOwnerIds() {
+  return new Set(
+    accountState.users
+      .filter((account) => account && account.role === 'admin')
+      .map((account) => `account:${account.id}`)
+  )
+}
+
+function getNonAdminClassIds() {
+  const adminOwnerIds = getAdminOwnerIds()
+  const classIds = new Set()
+
+  Object.entries(feedbackDataState.owners).forEach(([ownerId, data]) => {
+    if (adminOwnerIds.has(ownerId)) return
+    ;(data && data.classes || []).forEach((classInfo) => {
+      if (classInfo && classInfo.id) classIds.add(classInfo.id)
+    })
+  })
+
+  return classIds
+}
+
+function isolateFeedbackDataForOwner(ownerId, input) {
+  const data = normalizeFeedbackData(input)
+  if (!getAdminOwnerIds().has(ownerId)) return data
+
+  const nonAdminClassIds = getNonAdminClassIds()
+  if (!nonAdminClassIds.size) return data
+
+  const allowedClassIds = new Set(
+    data.classes
+      .filter((classInfo) => !nonAdminClassIds.has(classInfo.id))
+      .map((classInfo) => classInfo.id)
+  )
+  const isAllowedRecord = (record) => !record.classId || allowedClassIds.has(record.classId)
 
   return {
-    classes: normalizeTeachingClasses(source.classes),
+    ...data,
+    classes: data.classes.filter((classInfo) => allowedClassIds.has(classInfo.id)),
+    scoreRecords: data.scoreRecords.filter(isAllowedRecord),
+    feedbackHistory: data.feedbackHistory.filter(isAllowedRecord),
+    paperAnalyses: data.paperAnalyses.filter(isAllowedRecord)
+  }
+}
+
+function removeAdminCopiesOfUserClasses() {
+  const adminIds = getAdminOwnerIds()
+  if (!adminIds.size) return false
+
+  const userClassIds = new Set()
+  Object.entries(feedbackDataState.owners).forEach(([ownerId, data]) => {
+    if (adminIds.has(ownerId)) return
+    ;(data.classes || []).forEach((classInfo) => {
+      if (classInfo && classInfo.id) userClassIds.add(classInfo.id)
+    })
+  })
+
+  if (!userClassIds.size) return false
+
+  let changed = false
+  adminIds.forEach((ownerId) => {
+    const data = feedbackDataState.owners[ownerId]
+    if (!data || !Array.isArray(data.classes)) return
+
+    const removedIds = new Set(
+      data.classes
+        .filter((classInfo) => classInfo && userClassIds.has(classInfo.id))
+        .map((classInfo) => classInfo.id)
+    )
+    if (!removedIds.size) return
+
+    data.classes = data.classes.filter((classInfo) => !removedIds.has(classInfo.id))
+    data.scoreRecords = (data.scoreRecords || []).filter((record) => !removedIds.has(record.classId))
+    data.feedbackHistory = (data.feedbackHistory || []).filter((record) => !removedIds.has(record.classId))
+    data.paperAnalyses = (data.paperAnalyses || []).filter((record) => !removedIds.has(record.classId))
+    data.updatedAt = Date.now()
+    changed = true
+  })
+
+  return changed
+}
+
+function normalizeFeedbackData(input) {
+  const source = input && typeof input === 'object' ? input : {}
+  const quickOptions = source.quickOptions && typeof source.quickOptions === 'object' ? source.quickOptions : {}
+  const performancePositiveFallback = ['主动发言', '回答质量高', '笔记认真', '思路清晰', '步骤规范', '课堂练习完成度高']
+  const performanceNegativeFallback = ['注意力波动', '反应较慢', '参与度待提高', '预习不充分', '作业质量不稳定', '计算细节易错']
+  const classPerformancePositiveFallback = ['互动积极', '回答问题踊跃', '小组讨论热烈', '笔记整理认真', '思维活跃有深度', '课前预习充分', '课堂练习完成度高']
+  const classPerformanceNegativeFallback = ['个别学生走神', '部分学生反应较慢', '互动参与度有待提高', '课前预习不充分', '纪律偶有松散', '作业完成质量参差不齐']
+
+  return {
+    classes: normalizeFeedbackClasses(source.classes),
+    oneProfiles: normalizeFeedbackOneProfiles(source.oneProfiles),
     courseModules: normalizeCourseModules(source.courseModules),
     scoreRecords: normalizeScoreRecords(source.scoreRecords),
     feedbackHistory: normalizeFeedbackHistory(source.feedbackHistory),
-    oneProfiles: normalizeTeachingOneProfiles(source.oneProfiles),
     paperAnalyses: normalizePaperAnalysisHistory(source.paperAnalyses),
     quickOptions: {
       performancePositive: normalizeStringList(quickOptions.performancePositive, performancePositiveFallback),
@@ -1424,6 +1578,313 @@ function normalizeTeachingData(input) {
     },
     updatedAt: Number(source.updatedAt || Date.now())
   }
+}
+
+function normalizeFeedbackClasses(classes) {
+  return Array.isArray(classes) ? classes.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `class-${crypto.randomUUID()}`,
+      name: trim(source.name) || '未命名班级',
+      grade: trim(source.grade) || '高一',
+      template: trim(source.template),
+      materialMode: trim(source.materialMode) === 'book' ? 'book' : 'lesson',
+      textbook: source.textbook && typeof source.textbook === 'object' ? getSafeMaterial(source.textbook) : null,
+      students: normalizeFeedbackStudents(source.students),
+      updatedAt: Number(source.updatedAt || Date.now())
+    }
+  }) : []
+}
+
+function normalizeFeedbackStudents(students) {
+  return Array.isArray(students) ? students
+    .map((student) => {
+      if (typeof student === 'string') {
+        return {
+          id: `stu-${crypto.randomUUID()}`,
+          name: trim(student),
+          performance: '表现良好',
+          remark: ''
+        }
+      }
+      const source = student && typeof student === 'object' ? student : {}
+      return {
+        id: trim(source.id) || `stu-${crypto.randomUUID()}`,
+        name: trim(source.name),
+        performance: trim(source.performance) || '表现良好',
+        remark: trim(source.remark),
+        keywords: trim(source.keywords)
+      }
+    })
+    .filter((student) => student.name) : []
+}
+
+function normalizeFeedbackOneProfiles(profiles) {
+  return Array.isArray(profiles) ? profiles.map((item) => {
+    const source = item && typeof item === 'object' ? item : {}
+    return {
+      id: trim(source.id) || `one-${crypto.randomUUID()}`,
+      name: trim(source.name) || '未命名学生',
+      grade: trim(source.grade) || '高一',
+      personality: trim(source.personality),
+      habit: trim(source.habit),
+      template: trim(source.template),
+      updatedAt: Number(source.updatedAt || Date.now())
+    }
+  }) : []
+}
+
+function readMaterialState() {
+  try {
+    const raw = fs.existsSync(MATERIAL_INDEX_PATH) ? fs.readFileSync(MATERIAL_INDEX_PATH, 'utf8') : '{"items":[]}'
+    const parsed = JSON.parse(raw)
+    return parsed && Array.isArray(parsed.items) ? parsed : { items: [] }
+  } catch (error) {
+    return { items: [] }
+  }
+}
+
+async function writeMaterialState() {
+  writeJsonState(MATERIAL_INDEX_PATH, materialState)
+  await writeDatabaseState('materials', materialState)
+}
+
+function getMaterialUploadErrorMessage(error) {
+  const message = trim(error && error.message)
+  const code = trim(error && error.code)
+
+  if (message === '请先上传教材文件' || message.startsWith('教材目前支持')) return message
+  if (code === '57014' || /timeout|timed out|超时/i.test(message)) {
+    return '教材写入数据库超时，请稍后重试'
+  }
+  if (code === 'ENOSPC') return '服务器临时存储空间不足，请联系管理员'
+  if (/connection|connect|ECONN|数据库/i.test(message)) {
+    return '教材数据库连接失败，请稍后重试'
+  }
+  return '教材保存到数据库失败，请稍后重试'
+}
+
+async function migrateLegacyMaterialStorage() {
+  let migrated = false
+
+  for (const material of materialState.items) {
+    if (!material || !material.dataBase64) continue
+
+    const buffer = Buffer.from(material.dataBase64, 'base64')
+    if (!buffer.length) continue
+
+    try {
+      Object.assign(material, getMaterialStorageMetadata(material))
+      await writeMaterialBlob(material, buffer)
+      delete material.dataBase64
+      migrated = true
+    } catch (error) {
+      console.error(`Failed to migrate material ${trim(material.id) || 'unknown'}`, error)
+    }
+  }
+
+  return migrated
+}
+
+async function saveUploadedMaterial(ownerId, file, input = {}) {
+  const originalName = normalizeUploadFileName(file.originalname, 'material.pdf')
+  const lowerName = originalName.toLowerCase()
+  if (!/\.(pdf|docx|pptx|txt|md|png|jpg|jpeg|webp)$/i.test(lowerName)) {
+    throw new Error('教材目前支持 PDF、Word、PPT、文本或图片文件')
+  }
+
+  const requestedMaterialId = trim(input.materialId)
+  const requestedIdIsValid = /^mat-[a-z0-9-]{8,}$/i.test(requestedMaterialId)
+  const requestedIdOwner = requestedIdIsValid
+    ? materialState.items.find((item) => item.id === requestedMaterialId)
+    : null
+  const material = {
+    id: requestedIdIsValid && (!requestedIdOwner || requestedIdOwner.ownerId === ownerId)
+      ? requestedMaterialId
+      : `mat-${crypto.randomUUID()}`,
+    ownerId,
+    originalName,
+    mime: getMimeType(originalName, file.mimetype || 'application/octet-stream'),
+    size: file.size,
+    lectures: parseMaterialLectures(input.lectures),
+    createdAt: Date.now()
+  }
+
+  const previousItems = materialState.items.slice()
+  const existed = previousItems.some((item) => item.id === material.id)
+
+  await writeMaterialBlob(material, file.buffer)
+  materialState.items = materialState.items.filter((item) => item.id !== material.id)
+  materialState.items.push(material)
+
+  try {
+    await writeMaterialState()
+  } catch (error) {
+    materialState.items = previousItems
+    if (!existed) await deleteMaterialBlob(material.id).catch(() => {})
+    throw error
+  }
+
+  return material
+}
+
+async function writeMaterialBlob(material, buffer) {
+  const metadata = getMaterialStorageMetadata(material)
+
+  if (databasePool) {
+    await databasePool.query(`
+      insert into course_materials (
+        id, owner_id, original_name, mime, size, data, lectures, created_at
+      )
+      values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+      on conflict (id)
+      do update set
+        owner_id = excluded.owner_id,
+        original_name = excluded.original_name,
+        mime = excluded.mime,
+        size = excluded.size,
+        data = excluded.data,
+        lectures = excluded.lectures,
+        created_at = excluded.created_at
+    `, [
+      metadata.id,
+      metadata.ownerId,
+      metadata.originalName,
+      metadata.mime,
+      metadata.size,
+      buffer,
+      JSON.stringify(metadata.lectures),
+      new Date(metadata.createdAt)
+    ])
+    return
+  }
+
+  fs.mkdirSync(MATERIAL_FILES_DIR, { recursive: true })
+  fs.writeFileSync(getMaterialFilePath(metadata.id), buffer)
+}
+
+async function readMaterialBlob(material) {
+  if (material.dataBase64) return Buffer.from(material.dataBase64, 'base64')
+
+  if (databasePool) {
+    const result = await databasePool.query(`
+      select data
+      from course_materials
+      where id = $1 and owner_id = $2
+      limit 1
+    `, [material.id, material.ownerId])
+    return result.rows.length ? result.rows[0].data : null
+  }
+
+  const filePath = getMaterialFilePath(material.id)
+  return fs.existsSync(filePath) ? fs.readFileSync(filePath) : null
+}
+
+async function deleteMaterialBlob(materialId) {
+  if (databasePool) {
+    await databasePool.query('delete from course_materials where id = $1', [materialId])
+    return
+  }
+
+  const filePath = getMaterialFilePath(materialId)
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+}
+
+function getMaterialStorageMetadata(material = {}) {
+  return {
+    id: trim(material.id) || `mat-${crypto.randomUUID()}`,
+    ownerId: trim(material.ownerId),
+    originalName: normalizeUploadFileName(material.originalName || material.name, 'material.pdf'),
+    mime: trim(material.mime) || getMimeType(material.originalName || material.name, 'application/octet-stream'),
+    size: Math.max(0, Number(material.size || 0)),
+    lectures: parseMaterialLectures(material.lectures),
+    createdAt: Number(material.createdAt || Date.now())
+  }
+}
+
+function getMaterialFilePath(materialId) {
+  const safeId = trim(materialId).replace(/[^a-z0-9_-]/gi, '_')
+  return path.join(MATERIAL_FILES_DIR, safeId || 'material')
+}
+
+function parseMaterialLectures(rawLectures) {
+  if (!rawLectures) return []
+  const source = typeof rawLectures === 'string' ? parseJsonText(rawLectures) : rawLectures
+  const list = Array.isArray(source) ? source : []
+
+  return list.map((lecture, index) => ({
+    key: trim(lecture && lecture.key) || `lecture-${index + 1}`,
+    title: trim(lecture && lecture.title) || `第 ${index + 1} 讲`,
+    startPage: Math.max(1, Number(lecture && lecture.startPage) || 1),
+    endPage: Math.max(1, Number(lecture && lecture.endPage) || Number(lecture && lecture.startPage) || 1)
+  }))
+}
+
+async function getStoredMaterialFile(session, materialId) {
+  const ownerId = getDataOwnerId(session)
+  const material = materialState.items.find((item) => item.id === materialId && item.ownerId === ownerId)
+
+  if (!material) {
+    throw new Error('没有找到班级教材，请重新上传')
+  }
+
+  const buffer = await readMaterialBlob(material)
+  if (!buffer || !buffer.length) throw new Error('没有找到班级教材，请重新上传')
+
+  return {
+    originalname: normalizeUploadFileName(material.originalName || material.name, 'material.pdf'),
+    mimetype: material.mime,
+    buffer
+  }
+}
+
+function getSafeMaterial(material = {}) {
+  const safeName = normalizeUploadFileName(material.name || material.originalName, '整本教材')
+  return {
+    id: trim(material.id),
+    name: safeName,
+    mime: trim(material.mime),
+    size: Number(material.size || 0),
+    lectures: Array.isArray(material.lectures) ? material.lectures.map((lecture, index) => ({
+      key: trim(lecture && lecture.key) || `lecture-${index + 1}`,
+      title: trim(lecture && lecture.title) || `第 ${index + 1} 讲`,
+      startPage: Math.max(1, Number(lecture && lecture.startPage) || 1),
+      endPage: Math.max(1, Number(lecture && lecture.endPage) || Number(lecture && lecture.startPage) || 1)
+    })) : [],
+    createdAt: Number(material.createdAt || Date.now())
+  }
+}
+
+function readStateFile(primaryPath, legacyPath, emptyValue = '') {
+  if (fs.existsSync(primaryPath)) {
+    return {
+      raw: fs.readFileSync(primaryPath, 'utf8'),
+      migrated: false
+    }
+  }
+
+  if (primaryPath !== legacyPath && fs.existsSync(legacyPath)) {
+    return {
+      raw: fs.readFileSync(legacyPath, 'utf8'),
+      migrated: true
+    }
+  }
+
+  return {
+    raw: emptyValue,
+    migrated: false
+  }
+}
+
+function writeJsonState(filePath, state) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`)
+}
+
+function cleanupUsageState(today) {
+  Object.keys(usageState).forEach((date) => {
+    if (date !== today) delete usageState[date]
+  })
 }
 
 function normalizeTeachingClasses(classes) {
@@ -1567,6 +2028,8 @@ function normalizeScoreRecords(records) {
     const mode = trim(source.mode) === 'grade' ? 'grade' : 'percent'
     return {
       id: trim(source.id) || `score-${crypto.randomUUID()}`,
+      sourceFeedbackId: trim(source.sourceFeedbackId),
+      recordType: trim(source.recordType) === 'paperAnalysis' ? 'paperAnalysis' : 'exitTest',
       scope: trim(source.scope) === 'oneOnOne' ? 'oneOnOne' : 'class',
       classId: trim(source.classId),
       className: trim(source.className),
@@ -1579,10 +2042,13 @@ function normalizeScoreRecords(records) {
       totalScore: mode === 'grade' ? null : Math.max(1, Number(source.totalScore || 100)),
       students: Array.isArray(source.students) ? source.students.map((student) => {
         const studentSource = student && typeof student === 'object' ? student : {}
+        const absent = Boolean(studentSource.absent)
         return {
+          studentId: trim(studentSource.studentId),
           name: trim(studentSource.name),
-          score: studentSource.score === '' || studentSource.score === null ? null : Number(studentSource.score),
-          grade: trim(studentSource.grade),
+          absent,
+          score: absent || studentSource.score === '' || studentSource.score === null ? null : Number(studentSource.score),
+          grade: absent ? '' : trim(studentSource.grade),
           note: trim(studentSource.note)
         }
       }).filter((student) => student.name) : [],
@@ -1597,10 +2063,19 @@ function normalizeFeedbackHistory(history) {
     return {
       id: trim(source.id) || `history-${crypto.randomUUID()}`,
       mode: trim(source.mode) === 'oneOnOne' ? 'oneOnOne' : 'class',
+      classId: trim(source.classId),
       className: trim(source.className),
+      profileId: trim(source.profileId),
       studentName: trim(source.studentName),
       lessonTitle: trim(source.lessonTitle),
+      lessonDate: trim(source.lessonDate),
+      lessonDateText: trim(source.lessonDateText),
+      feedbackScope: trim(source.feedbackScope) === 'class' ? 'class' : 'individual',
+      feedbackFormat: trim(source.feedbackFormat) === 'image' ? 'image' : 'text',
       courseNote: trim(source.courseNote),
+      exitTest: source.exitTest && typeof source.exitTest === 'object' ? source.exitTest : null,
+      feedbackExclusions: normalizeStudentExclusions(source.feedbackExclusions),
+      attendanceExclusions: normalizeStudentExclusions(source.attendanceExclusions),
       feedbacks: Array.isArray(source.feedbacks) ? source.feedbacks.map((feedback) => ({
         studentId: trim(feedback && feedback.studentId),
         name: trim(feedback && feedback.name),
@@ -1609,6 +2084,13 @@ function normalizeFeedbackHistory(history) {
       createdAt: Number(source.createdAt || Date.now())
     }
   }) : []
+}
+
+function normalizeStudentExclusions(exclusions) {
+  return Array.isArray(exclusions) ? exclusions.map((item) => ({
+    studentId: trim(item && item.studentId),
+    name: trim(item && item.name)
+  })).filter((item) => item.studentId || item.name) : []
 }
 
 function normalizePaperAnalysisHistory(history) {
@@ -1620,13 +2102,17 @@ function normalizePaperAnalysisHistory(history) {
       examType: trim(source.examType),
       fileName: trim(source.fileName),
       scope: ['class', 'one', 'single'].includes(trim(source.scope)) ? trim(source.scope) : 'single',
+      classId: trim(source.classId),
+      profileId: trim(source.profileId),
       targetName: trim(source.targetName),
+      date: trim(source.date),
       totalScore: Number(source.totalScore || 0),
       classAverageTotal: Number(source.classAverageTotal || 0),
       sections: Array.isArray(source.sections) ? source.sections : [],
       questionAverages: source.questionAverages && typeof source.questionAverages === 'object' ? source.questionAverages : {},
       students: Array.isArray(source.students) ? source.students : [],
       summary: trim(source.summary),
+      applied: Boolean(source.applied),
       createdAt: Number(source.createdAt || Date.now())
     }
   }).slice(0, 80) : []
@@ -2331,7 +2817,7 @@ function safeEqual(left, right) {
 }
 
 async function normalizeCourseware(file, options = {}) {
-  const originalName = file.originalname || 'courseware'
+  const originalName = normalizeUploadFileName(file.originalname, 'courseware')
   const mime = getMimeType(originalName, file.mimetype)
   const isImage = mime.startsWith('image/')
   const isPdf = mime === 'application/pdf'
@@ -2339,17 +2825,17 @@ async function normalizeCourseware(file, options = {}) {
   const selectedPdfPages = normalizePageNumbers(options.selectedPdfPages)
   const clientPdfText = trim(options.clientPdfText)
   const shouldUseSelectedPdfPages = isPdf && (selectedPdfPages.length || pdfPageImages.length || clientPdfText)
-  const canExtractServerSelectedPages = isPdf && selectedPdfPages.length && !pdfPageImages.length && !clientPdfText
   const extraction = shouldUseSelectedPdfPages
-    ? (canExtractServerSelectedPages
-        ? await extractPdfSelectedPagesText(file.buffer, selectedPdfPages)
-        : { text: '', source: 'pdf-selected-pages', pageCount: selectedPdfPages.length || pdfPageImages.length })
+    ? { text: '', source: 'pdf-selected-pages', pageCount: selectedPdfPages.length || pdfPageImages.length }
     : (isImage
         ? { text: await extractImageText(file.buffer, originalName), source: 'image-ocr', pageCount: 1 }
         : await extractCoursewareText(file.buffer, originalName))
-  const extractedText = shouldUseSelectedPdfPages
+  const rawExtractedText = shouldUseSelectedPdfPages
     ? clientPdfText
     : (extraction.text || clientPdfText)
+  const extractedText = !isPdf && selectedPdfPages.length
+    ? sliceTextByApproxPages(rawExtractedText, selectedPdfPages)
+    : rawExtractedText
   const extractionSource = extractedText && shouldUseSelectedPdfPages
     ? 'pdf-selected-pages'
     : (extraction.text ? extraction.source : (clientPdfText ? 'browser-pdf-text' : extraction.source))
@@ -2375,15 +2861,269 @@ async function normalizeCourseware(file, options = {}) {
   }
 }
 
-function buildUploadedFileSummary(courseware) {
-  if (!courseware) return null
+function sliceTextByApproxPages(text, selectedPages) {
+  const source = trim(text)
+  if (!source || !selectedPages.length) return source
+
+  const pageSize = 1400
+  const chunks = []
+  for (let index = 0; index < source.length; index += pageSize) {
+    chunks.push(source.slice(index, index + pageSize))
+  }
+  return selectedPages
+    .map((pageNumber) => chunks[pageNumber - 1])
+    .filter(Boolean)
+    .join('\n')
+    .trim() || source
+}
+
+function detectTextCoursewareLectures(text, options = {}) {
+  const source = trim(text)
+  const pageSize = 1400
+  const estimatedPageCount = Math.max(1, Number(options.pageCount || 0), Math.ceil(source.length / pageSize) || 1)
+  if (!source) {
+    return {
+      lectures: [],
+      pageCount: estimatedPageCount
+    }
+  }
+
+  const headings = []
+  const lines = source.split(/\r?\n/)
+  let offset = 0
+  let sawContentsNearStart = false
+
+  lines.forEach((rawLine) => {
+    const raw = String(rawLine || '')
+    const lineStart = offset
+    offset += raw.length + 1
+
+    const normalizedLine = raw.replace(/　/g, ' ').replace(/\s+/g, ' ').trim()
+    if (!normalizedLine) return
+    if (lineStart < pageSize * 3 && /目录|contents/i.test(normalizedLine)) sawContentsNearStart = true
+
+    const pageLabelMatch = normalizedLine.match(/^第\s*(\d{1,4})\s*页\s*[:：、，.\-—_ ]*(.*)$/)
+    const explicitPage = pageLabelMatch ? Number(pageLabelMatch[1]) : 0
+    const contentLine = pageLabelMatch ? pageLabelMatch[2] : normalizedLine
+    const pageNumber = explicitPage || Math.min(estimatedPageCount, Math.floor(lineStart / pageSize) + 1)
+    const heading = matchTextLectureHeadingLine(contentLine, pageNumber)
+      || matchTextLectureHeadingLine(normalizedLine, pageNumber)
+
+    if (!heading) return
+
+    const looksLikeContentsLine = sawContentsNearStart
+      && lineStart < pageSize * 3
+      && (/\.{2,}|…{2,}|[·•∙]{2,}|\s+\d{1,4}$/.test(normalizedLine))
+    if (looksLikeContentsLine) return
+
+    headings.push({
+      ...heading,
+      offset: lineStart
+    })
+  })
 
   return {
-    name: courseware.name,
-    source: courseware.extractionSource,
-    text: truncateText(courseware.extractedText || '', 18000),
-    selectedPdfPages: courseware.selectedPdfPages || [],
-    ocrPageCount: courseware.ocrPageCount || 0
+    lectures: buildTextLecturePageRanges(headings, estimatedPageCount),
+    pageCount: estimatedPageCount
+  }
+}
+
+function matchTextLectureHeadingLine(line, pageNumber) {
+  if (!line || line.length > 160) return null
+
+  const chineseMatch = line.match(/第\s*([零〇一二两三四五六七八九十百\d]{1,8})\s*(讲|课|章|节)\s*[:：、，.．\-—_ ]*\s*(.{0,80})$/)
+  if (chineseMatch) {
+    return buildTextLectureHeading({
+      pageNumber,
+      rawNumber: chineseMatch[1],
+      unit: chineseMatch[2],
+      marker: `第${chineseMatch[1]}${chineseMatch[2]}`,
+      title: chineseMatch[3]
+    })
+  }
+
+  const lessonMatch = line.match(/\b(Lesson|Lecture)\s*([0-9]{1,3})\s*[:：.．\-—_ ]*\s*(.{0,80})$/i)
+  if (lessonMatch) {
+    return buildTextLectureHeading({
+      pageNumber,
+      rawNumber: lessonMatch[2],
+      unit: lessonMatch[1],
+      marker: `${lessonMatch[1]} ${lessonMatch[2]}`,
+      title: lessonMatch[3]
+    })
+  }
+
+  const topicMatch = line.match(/专题\s*([零〇一二两三四五六七八九十百\d]{1,8})\s*[:：、，.．\-—_ ]*\s*(.{0,80})$/)
+  if (topicMatch) {
+    return buildTextLectureHeading({
+      pageNumber,
+      rawNumber: topicMatch[1],
+      unit: '专题',
+      marker: `专题${topicMatch[1]}`,
+      title: topicMatch[2]
+    })
+  }
+
+  return null
+}
+
+function buildTextLectureHeading({ pageNumber, rawNumber, unit, marker, title }) {
+  const normalizedNumber = normalizeTextLectureNumber(rawNumber)
+  const cleanTitle = cleanTextLectureHeadingTitle(title)
+  const headingTitle = cleanTitle ? `${marker} ${cleanTitle}` : marker
+
+  return {
+    pageNumber,
+    number: normalizedNumber,
+    unit,
+    key: normalizedNumber ? `${unit}-${normalizedNumber}` : `${unit}-${marker}`,
+    title: headingTitle
+  }
+}
+
+function cleanTextLectureHeadingTitle(value) {
+  let title = String(value || '').replace(/\s+/g, ' ').trim()
+  const nextHeadingIndex = title.search(/\s第\s*[零〇一二两三四五六七八九十百\d]{1,8}\s*(讲|课|章|节)/)
+  if (nextHeadingIndex > 0) title = title.slice(0, nextHeadingIndex)
+
+  return title
+    .replace(/\.{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/…{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/[·•∙]{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/\s+(?:P\.?\s*)?\d{1,4}\s*$/i, '')
+    .replace(/^[：:、，,.\-—_]+/, '')
+    .trim()
+    .slice(0, 60)
+}
+
+function normalizeTextLectureNumber(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return 0
+  if (/^\d+$/.test(raw)) return Number(raw)
+  return chineseTextNumberToNumber(raw)
+}
+
+function chineseTextNumberToNumber(value) {
+  const map = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9
+  }
+  const text = String(value || '').replace(/[零〇]/g, '')
+  if (!text) return 0
+  if (text.includes('百')) {
+    const [hundredsText, restText = ''] = text.split('百')
+    const hundreds = hundredsText ? map[hundredsText] || 0 : 1
+    return hundreds * 100 + chineseTextNumberToNumber(restText)
+  }
+  if (text.includes('十')) {
+    const [tensText, onesText = ''] = text.split('十')
+    const tens = tensText ? map[tensText] || 0 : 1
+    const ones = onesText ? map[onesText] || 0 : 0
+    return tens * 10 + ones
+  }
+  return map[text] || 0
+}
+
+function buildTextLecturePageRanges(headings, pageCount) {
+  const lectures = []
+
+  headings
+    .sort((left, right) => left.pageNumber - right.pageNumber || left.offset - right.offset)
+    .forEach((heading) => {
+      const previous = lectures[lectures.length - 1]
+      if (previous && previous.key === heading.key) return
+      const duplicatedIndex = lectures.findIndex((lecture) => lecture.key === heading.key)
+      if (duplicatedIndex >= 0) {
+        const duplicated = lectures[duplicatedIndex]
+        const duplicatedLooksLikeContents = Number(duplicated.offset || 0) < 4200
+          && Number(heading.offset || 0) > Number(duplicated.offset || 0)
+        if (duplicatedLooksLikeContents) {
+          lectures[duplicatedIndex] = {
+            ...duplicated,
+            startPage: Math.max(1, Math.min(pageCount, heading.pageNumber)),
+            endPage: pageCount,
+            offset: heading.offset
+          }
+        }
+        return
+      }
+
+      lectures.push({
+        key: heading.key,
+        title: heading.title,
+        startPage: Math.max(1, Math.min(pageCount, heading.pageNumber)),
+        endPage: pageCount,
+        offset: heading.offset
+      })
+    })
+
+  if (lectures.length <= 1) return []
+
+  return lectures.map((lecture, index) => ({
+    key: lecture.key,
+    title: lecture.title,
+    startPage: lecture.startPage,
+    endPage: lectures[index + 1] ? Math.max(lecture.startPage, lectures[index + 1].startPage - 1) : pageCount
+  }))
+}
+
+async function normalizeCoursewareUploads(files, storedMaterialFile, payload = {}, pdfPageImages = []) {
+  const uploadFiles = Array.isArray(files) ? files : []
+  if (!uploadFiles.length && storedMaterialFile) {
+    return normalizeCourseware(storedMaterialFile, {
+      clientPdfText: payload.clientPdfText,
+      pdfPageImages,
+      selectedPdfPages: payload.selectedPdfPages
+    })
+  }
+
+  const metaList = Array.isArray(payload.coursewareMeta) ? payload.coursewareMeta : []
+  const coursewares = []
+  for (let index = 0; index < uploadFiles.length; index += 1) {
+    const file = uploadFiles[index]
+    const meta = metaList[index] && typeof metaList[index] === 'object' ? metaList[index] : {}
+    const fileImages = pdfPageImages.filter((imageFile) => String(imageFile.originalname || '').startsWith(`courseware-${index}-`))
+    coursewares.push(await normalizeCourseware(file, {
+      clientPdfText: meta.clientPdfText,
+      pdfPageImages: fileImages,
+      selectedPdfPages: meta.selectedPdfPages
+    }))
+  }
+
+  if (coursewares.length <= 1) return coursewares[0] || null
+  return combineCoursewares(coursewares)
+}
+
+function combineCoursewares(coursewares) {
+  const valid = coursewares.filter(Boolean)
+  return {
+    name: valid.map((item) => item.name).join('、'),
+    mime: 'application/x-multiple-courseware',
+    buffer: Buffer.alloc(0),
+    extractedText: valid.map((item, index) => [
+      `【课件 ${index + 1}：${item.name}】`,
+      item.extractedText || '未提取到可用文字，请结合图片或文件内容分析。'
+    ].join('\n')).join('\n\n'),
+    extractionSource: 'multiple-courseware',
+    ocrPageCount: valid.reduce((sum, item) => sum + Number(item.ocrPageCount || 0), 0),
+    selectedPdfPages: [],
+    isImage: false,
+    dataUrl: '',
+    visionImages: valid.flatMap((item) => getCoursewareVisionImages(item)),
+    imageSendAttempted: false,
+    imageSendSucceeded: false,
+    imageFallbackUsed: false,
+    files: valid
   }
 }
 
@@ -2469,14 +3209,16 @@ async function requestOpenAI(payload, courseware, aiConfig) {
                       courseKnowledgePoint: { type: 'string' },
                       performanceText: { type: 'string' },
                       personalizedRemark: { type: 'string' },
-                      learningSuggestion: { type: 'string' }
+                      learningSuggestion: { type: 'string' },
+                      subject: { type: 'string' }
                     },
                     required: [
                       'courseContent',
                       'courseKnowledgePoint',
                       'performanceText',
                       'personalizedRemark',
-                      'learningSuggestion'
+                      'learningSuggestion',
+                      'subject'
                     ]
                   }
                 },
@@ -2626,61 +3368,33 @@ function buildSystemPrompt() {
   return [
     '你是一名严谨、温和、具体的课程反馈助手。',
     '你要根据老师提供的反馈模板、课程内容、课件和学生表现，为每个学生生成中文课后反馈。',
+    '必须严格按学生数据里的 studentId 和 name 一一对应生成反馈，不能把一个学生的姓名、表现或备注写到另一个学生的反馈里。',
+    '每条反馈正文只能出现当前这一个学生的姓名；不要提到其他学生姓名。',
     '老师提供的反馈模板是最高优先级的输出格式；除非模板为空，否则必须按模板的段落、顺序、称呼方式和固定句生成。',
     '模板优先于默认字数限制；如果模板较长，可以适当超过 220 个汉字。',
     '反馈要像老师写给家长的文字，具体、自然、可直接复制发送。',
     '不能编造课件或课堂中没有依据的细节；课件信息不足时，用课程主题和老师备注生成稳妥反馈。',
     '每个学生反馈建议 120 到 220 个汉字。',
     '每一条反馈必须包含：1 个本节课/课件里的具体知识点，1 个该学生的课堂表现等级，若老师填写了备注则必须自然写入备注。',
+    '学生 remark、特殊情况和具体表现必须融入【课堂表现】的同一个连续段落，不能在课堂表现之后另起一行或另起一段重复说明。',
+    '学生或班级选择的 keywords 也必须改写成自然语句并融入【课堂表现】同一段；不能单独输出“关键词”“表现关键词”标题，也不能把关键词原样另起一行罗列。',
+    'templateFields.performanceText 必须已经包含该学生 remark 的核心信息；personalizedRemark 只用于结构化记录，不能作为独立段落再次输出。',
+    '如果老师提供了“本次生成要求”，只在当前请求中按其调整语气、详略、重点和写法；不得因此违反模板、事实准确性、学生姓名对应和必填结构。',
     '如果反馈类型是班级整体反馈，请面向整个班级生成课堂表现总结，不要写成单个学生逐条反馈。',
     '如果提供了上课日期，可以自然使用；如果上课时段为空或未填写，任何文字反馈和图片报告文案都不要出现时段，也不要自行编造时段。',
     '如果提供了出门测成绩，必须写入反馈：个性化学生反馈只写当前学生自己的成绩；班级整体反馈要按从高到低列出全班所有学生成绩。',
+    '出门测标记 absent/请假的学生只显示“请假”，不得写成 0 分，也不得计入平均分、最高分、最低分或得分率。',
     '如果提供了出门测文件内容，请结合文件里的测试知识点、题型或讲次内容评价学习情况；不要只写分数。',
     '如果反馈呈现形式是图片报告文案，请语言更适合放入报告里的“课堂表现”段落，结构清晰、少寒暄。',
+    '如果反馈正文、标题或模板字段涉及科目/学科，必须根据上传课件、讲义或试卷内容判断正确科目；不能默认写数学。无法可靠判断科目时，不要主动写具体科目。',
     '一对一反馈里如果包含 personality 或 habit，要把它们作为长期档案背景，用自然、克制的方式融入建议，不要写得像诊断。',
     '所有未填写、未上传、为空的内容都视为不存在，反馈正文里不要提及这些空内容，也不要用“未填写”“未上传”等字样。',
-    '不同学生的反馈必须根据 performance、remark、personality 和 habit 明显区分，不允许只替换姓名。'
+    '不同学生的反馈必须根据 performance、keywords、remark、personality 和 habit 明显区分，不允许只替换姓名。'
   ].join('\n')
 }
 
-function buildExitTestPromptText(payload) {
-  const lines = []
-  const exitTest = payload && payload.exitTest
-  const hasScores = exitTest && Array.isArray(exitTest.students) && exitTest.students.length
-
-  if (hasScores) {
-    lines.push('出门测成绩（已按成绩/等级从高到低排序）：')
-    lines.push(JSON.stringify(exitTest, null, 2))
-    lines.push(exitTest.mode === 'grade'
-      ? '成绩制度：等级制，只能使用学生对应的 A/B/C/D 等级。'
-      : `成绩制度：分数制，满分 ${exitTest.totalScore || 100} 分。`)
-    lines.push(payload.feedbackScope === 'class'
-      ? '班级整体反馈中必须从高到低列出所有学生的出门测成绩，并概括整体得分情况。'
-      : '个性化反馈中每个学生只写自己的出门测成绩，不要泄露或罗列其他学生成绩。')
-  }
-
-  const file = payload && payload.exitTestFile
-  if (file && file.name) {
-    lines.push('')
-    lines.push(`出门测文件：${file.name}`)
-    lines.push(`出门测文件识别来源：${file.source || '未识别'}`)
-    if (file.selectedPdfPages && file.selectedPdfPages.length) {
-      lines.push(`出门测文件页码：${file.selectedPdfPages.join('、')}`)
-    }
-    if (file.ocrPageCount) {
-      lines.push(`出门测 OCR 页数：${file.ocrPageCount}`)
-    }
-    if (file.text) {
-      lines.push('出门测文件识别内容：')
-      lines.push(file.text)
-    }
-  }
-
-  return lines.join('\n')
-}
-
 function buildUserContent(payload, courseware) {
-  const exitTestPromptText = buildExitTestPromptText(payload)
+  const exitTestPromptText = formatExitTestSummary(payload)
   const content = [
     {
       type: 'input_text',
@@ -2699,19 +3413,28 @@ function buildUserContent(payload, courseware) {
         '',
         getTemplateRules(),
         '',
+        payload.generationInstruction
+          ? `老师对本次生成的临时要求（仅本次有效）：\n${payload.generationInstruction}`
+          : '',
+        '',
         payload.courseNote ? `老师补充的课程内容：\n${payload.courseNote}` : '',
-        '',
-        exitTestPromptText ? `出门测数据：\n${exitTestPromptText}` : '',
-        '',
-        '学生表现数据 JSON：',
-        JSON.stringify(payload.students, null, 2),
         payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
         payload.homework ? `课后作业：${payload.homework}` : '',
         '',
+        exitTestPromptText ? `出门测信息：\n${exitTestPromptText}` : '',
+        '',
+        '学生表现数据 JSON：',
+        JSON.stringify(payload.students, null, 2),
+        '',
         '请严格返回 JSON，字段为 feedbacks，每项包含 studentId、name、feedback、templateFields。',
-        'templateFields 必须包含 courseContent、courseKnowledgePoint、performanceText、personalizedRemark、learningSuggestion，用于程序填入老师模板。',
+        'studentId 必须原样使用学生表现数据 JSON 中对应学生的 id，name 必须原样使用对应学生的 name。',
+        'templateFields 必须包含 courseContent、courseKnowledgePoint、performanceText、personalizedRemark、learningSuggestion、subject；subject 是根据课件判断的科目，无法判断时填空字符串。',
+        payload.feedbackFormat === 'image'
+          ? '图片报告文案必须包含从课件深度解析得到的【课程内容】和【学习重点】：【课程内容】用一句不带编号、不列点的完整句子总结本节课件；【学习重点】用 1、2、3 分行列出核心重点。不要用上课日期、时段、课后作业或“教材讲次”替代课程内容。'
+          : '',
         'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
-        '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须写入该学生 remark 的核心信息。',
+        '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
+        '每个 feedback 都必须明确体现对应学生的 performance；keywords 与 remark 非空时，必须把其核心信息改写成自然语句并融入【课堂表现】同一段，不能另起一行、单列关键词或重复。',
         '一对一学生数据里若 personality 或 habit 非空，必须结合这些长期档案信息给出更贴合该学生的表达和建议。',
         '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
         '不同学生不要套用完全相同的句子。',
@@ -2787,7 +3510,7 @@ function buildPlainPrompt(payload, courseware, options = {}) {
   } else if (courseware) {
     coursewareLines.push(`老师上传了课件文件：${courseware.name}。当前接口没有提取到可用文字，请只结合课程主题、补充内容、模板和学生表现生成稳妥反馈。`)
   }
-  const exitTestPromptText = buildExitTestPromptText(payload)
+  const exitTestPromptText = formatExitTestSummary(payload)
 
   return [
     `课程类型：${payload.mode === 'oneOnOne' ? '一对一' : '班课'}`,
@@ -2804,22 +3527,31 @@ function buildPlainPrompt(payload, courseware, options = {}) {
     '',
     getTemplateRules(),
     '',
-    payload.courseNote ? `老师补充的课程内容：\n${payload.courseNote}` : '',
+    payload.generationInstruction
+      ? `老师对本次生成的临时要求（仅本次有效）：\n${payload.generationInstruction}`
+      : '',
     '',
-    exitTestPromptText ? `出门测数据：\n${exitTestPromptText}` : '',
+    payload.courseNote ? `老师补充的课程内容：\n${payload.courseNote}` : '',
+    payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
+    payload.homework ? `课后作业：${payload.homework}` : '',
+    '',
+    exitTestPromptText ? `出门测信息：\n${exitTestPromptText}` : '',
     '',
     coursewareLines.length ? `课件内容：\n${coursewareLines.join('\n')}` : '',
     '',
     '学生表现数据 JSON：',
     JSON.stringify(payload.students, null, 2),
-    payload.classRemark ? `班级/共性备注：${payload.classRemark}` : '',
-    payload.homework ? `课后作业：${payload.homework}` : '',
     '',
     '请严格返回 JSON，且只能返回 JSON，不要解释，不要使用 Markdown。',
-    'JSON 格式必须是：{"feedbacks":[{"studentId":"...","name":"...","feedback":"...","templateFields":{"courseContent":"...","courseKnowledgePoint":"...","performanceText":"...","personalizedRemark":"...","learningSuggestion":"..."}}]}',
-    'templateFields 会被程序填入老师模板，所以每个字段都必须针对该学生具体填写，不能空泛。',
+    'JSON 格式必须是：{"feedbacks":[{"studentId":"...","name":"...","feedback":"...","templateFields":{"courseContent":"...","courseKnowledgePoint":"...","performanceText":"...","personalizedRemark":"...","learningSuggestion":"...","subject":"..."}}]}',
+    'studentId 必须原样使用学生表现数据 JSON 中对应学生的 id，name 必须原样使用对应学生的 name。',
+    'templateFields 会被程序填入老师模板，所以每个字段都必须针对该学生具体填写，不能空泛；如果能从课件判断科目，请在 templateFields.subject 写入正确科目。',
+    payload.feedbackFormat === 'image'
+      ? '图片报告文案必须包含从课件深度解析得到的【课程内容】和【学习重点】：【课程内容】用一句不带编号、不列点的完整句子总结本节课件；【学习重点】用 1、2、3 分行列出核心重点。不要用上课日期、时段、课后作业或“教材讲次”替代课程内容。'
+      : '',
     'feedback 必须先套用老师模板，再结合课程内容、课件和该学生表现补全。',
-    '每个 feedback 都必须明确体现对应学生的 performance；若 remark 非空，必须写入该学生 remark 的核心信息。',
+    '生成每个学生 feedback 前先核对：正文里只能出现当前学生姓名，不能出现其他学生姓名。',
+    '每个 feedback 都必须明确体现对应学生的 performance；keywords 与 remark 非空时，必须把其核心信息改写成自然语句并融入【课堂表现】同一段，不能另起一行、单列关键词或重复。',
     '一对一学生数据里若 personality 或 habit 非空，必须结合这些长期档案信息给出更贴合该学生的表达和建议。',
     '每个 feedback 至少写入 1 个本节课/课件中的具体知识点。',
     '不同学生不要套用完全相同的句子。',
@@ -2827,18 +3559,64 @@ function buildPlainPrompt(payload, courseware, options = {}) {
   ].filter(Boolean).join('\n')
 }
 
+function formatExitTestSummary(payload = {}) {
+  const exitTest = payload.exitTest && typeof payload.exitTest === 'object' ? payload.exitTest : null
+  const lines = []
+
+  if (exitTest) {
+    lines.push(`成绩制度：${exitTest.mode === 'grade' ? '等级制 A/B/C/D' : `分数制，满分 ${exitTest.totalScore || 100}`}`)
+    if (exitTest.fileName) lines.push(`出门测文件：${exitTest.fileName}`)
+    if (exitTest.selectedLecture) lines.push(`出门测讲次：${exitTest.selectedLecture}`)
+
+    const students = Array.isArray(exitTest.students) ? exitTest.students : []
+    if (students.length) {
+      lines.push('学生成绩：')
+      students.forEach((student) => {
+        if (student.absent) {
+          lines.push(`- ${student.name}：请假（不计入成绩统计）${student.note ? `；${student.note}` : ''}`)
+        } else if (exitTest.mode === 'grade') {
+          lines.push(`- ${student.name}：${student.grade || '-'}${student.note ? `；${student.note}` : ''}`)
+        } else {
+          lines.push(`- ${student.name}：${student.score ?? '-'}/${exitTest.totalScore || 100}${student.note ? `；${student.note}` : ''}`)
+        }
+      })
+    }
+  }
+
+  const fileSummary = payload.exitTestFile && typeof payload.exitTestFile === 'object' ? payload.exitTestFile : null
+  if (fileSummary && fileSummary.extractedText) {
+    lines.push('出门测文件识别内容：')
+    lines.push(fileSummary.extractedText)
+  }
+
+  return lines.length ? lines.join('\n') : ''
+}
+
+function buildUploadedFileSummary(courseware) {
+  return {
+    name: courseware.name,
+    mime: courseware.mime,
+    extractionSource: courseware.extractionSource,
+    selectedPdfPages: courseware.selectedPdfPages,
+    extractedText: courseware.extractedText ? courseware.extractedText.slice(0, 8000) : ''
+  }
+}
+
 function getTemplateRules() {
   return [
     '模板使用规则（必须遵守）：',
     '1. 反馈模板是每条 feedback 的正文骨架，不是参考风格。',
     '2. 必须尽量保留模板原有段落、句子顺序、称呼方式和固定文字；只替换模板里的占位符、括号提示或明显需要补充的位置。',
-    '3. 常见占位符含义：{{学生姓名}}=当前学生姓名；{{课程内容}}/{{课程主题}}=课程主题、课件知识点和老师补充内容；{{课堂表现}}=该学生 performance；{{个性化备注}}/{{特殊情况}}=remark、personality 或 habit；{{学习建议}}=结合课堂表现给出的后续建议。',
+    '3. 常见占位符含义：{{学生姓名}}=当前学生姓名；{{课程内容}}/{{课程主题}}=课程主题、课件知识点和老师补充内容；{{课堂表现}}=该学生 performance、keywords 和 remark 融合后的自然段；{{个性化备注}}/{{特殊情况}}=remark、personality 或 habit；{{学习建议}}=结合课堂表现给出的后续建议。',
     '4. 如果模板没有占位符，也必须按照模板原有句式和段落改写，不要另起一套反馈格式。',
     '5. 如果模板和默认字数要求冲突，以模板为准。'
   ].join('\n')
 }
 
 function getCoursewareTextLabel(courseware) {
+  if (courseware.mime === 'application/x-multiple-courseware') {
+    return '老师上传了多个课件/讲义。每个文件内容如下，请逐个分析后综合生成反馈：'
+  }
   if (courseware.isImage) {
     return '从图片课件中识别到的文字如下，请优先结合这些内容生成反馈：'
   }
@@ -2917,1086 +3695,17 @@ function buildChatCompatibleUserContent(payload, courseware, options = {}) {
   ]
 }
 
-async function buildQuestionPageInputs(pageFiles) {
-  const pages = []
-
-  for (const [index, file] of pageFiles.entries()) {
-    const name = file.originalname || `page-${index + 1}.jpg`
-    const mime = getMimeType(name, file.mimetype || 'image/jpeg')
-    const ocrText = await extractImageText(file.buffer, name)
-
-    pages.push({
-      pageIndex: index,
-      name,
-      mime,
-      ocrText,
-      dataUrl: `data:${mime};base64,${file.buffer.toString('base64')}`
-    })
-  }
-
-  return pages
-}
-
-async function recognizeQuestionList(payload, pages, docTexts, aiConfig) {
-  const pageOcrTexts = pages
-    .filter((page) => page.ocrText)
-    .map((page) => ({
-      name: page.name,
-      text: truncateText(page.ocrText)
-    }))
-  const baseDocTexts = [...docTexts, ...pageOcrTexts]
-
-  if (!pages.length) {
-    const aiResponse = await requestQuestionRecognition(payload, [], baseDocTexts, aiConfig)
-    return parseQuestionRecognitionResponse(aiResponse, aiConfig.provider).questions
-  }
-
-  const allQuestions = []
-  const batches = chunkArray(pages, QUESTION_RECOGNITION_BATCH_SIZE)
-
-  for (const [batchIndex, batchPages] of batches.entries()) {
-    const batchPayload = {
-      ...payload,
-      pageBatchLabel: `第 ${batchIndex + 1}/${batches.length} 批`,
-      pageBatchNames: batchPages.map((page) => page.name)
-    }
-    const batchDocTexts = [
-      ...docTexts,
-      ...batchPages
-        .filter((page) => page.ocrText)
-        .map((page) => ({
-          name: page.name,
-          text: truncateText(page.ocrText)
-        }))
-    ]
-    const aiResponse = await requestQuestionRecognitionWithFallback(batchPayload, batchPages, batchDocTexts, aiConfig)
-    const parsed = parseQuestionRecognitionResponse(aiResponse, aiConfig.provider)
-
-    if (Array.isArray(parsed.questions)) {
-      allQuestions.push(...parsed.questions)
-    }
-  }
-
-  return allQuestions
-}
-
-async function requestQuestionRecognitionWithFallback(payload, pages, docTexts, aiConfig) {
-  try {
-    return await requestQuestionRecognition(payload, pages, docTexts, aiConfig)
-  } catch (error) {
-    const hasTextFallback = Array.isArray(docTexts) && docTexts.some((item) => item && item.text)
-    if (!pages.length || !hasTextFallback || !isLikelyImageRequestError(error)) throw error
-
-    return requestQuestionRecognition(payload, [], docTexts, aiConfig)
-  }
-}
-
-async function requestQuestionRecognition(payload, pages, docTexts, aiConfig) {
-  if (aiConfig.provider === 'openai') {
-    return requestOpenAIQuestionRecognition(payload, pages, docTexts, aiConfig)
-  }
-
-  return requestChatQuestionRecognition(payload, pages, docTexts, aiConfig, {
-    providerLabel: aiConfig.provider === 'deepseek' ? 'DeepSeek' : 'AI'
-  })
-}
-
-async function requestOpenAIQuestionRecognition(payload, pages, docTexts, aiConfig) {
-  const content = buildQuestionRecognitionContent(payload, pages, docTexts, 'responses')
-  const body = {
-    model: aiConfig.model,
-    instructions: buildQuestionRecognitionSystemPrompt(),
-    input: [
-      {
-        role: 'user',
-        content
-      }
-    ],
-    text: {
-      format: {
-        type: 'json_schema',
-        name: 'question_rearrange_result',
-        strict: true,
-        schema: getQuestionRecognitionJsonSchema()
-      }
-    }
-  }
-
-  const response = await fetch(`${aiConfig.baseUrl}/responses`, withProxy({
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${aiConfig.apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  }))
-  const text = await response.text()
-  const parsed = parseProviderResponseJson(text, 'AI')
-  if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`AI 请求失败：${message}`)
-  }
-  return parsed
-}
-
-async function requestChatQuestionRecognition(payload, pages, docTexts, aiConfig, options = {}) {
-  const body = {
-    model: aiConfig.model,
-    messages: [
-      {
-        role: 'system',
-        content: buildQuestionRecognitionSystemPrompt()
-      },
-      {
-        role: 'user',
-        content: buildQuestionRecognitionContent(payload, pages, docTexts, 'chat')
-      }
-    ],
-    temperature: 0.1,
-    max_tokens: 8000,
-    stream: false,
-    response_format: {
-      type: 'json_object'
-    }
-  }
-
-  const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${aiConfig.apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  }))
-  const text = await response.text()
-  const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
-  if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
-  }
-  return parsed
-}
-
-function buildQuestionRecognitionSystemPrompt() {
-  return [
-    '你是一名严谨的试卷题目结构化助手。',
-    '你要从老师上传的试卷页面或 Word 文本中识别题目，并整理成可重新排版的结构化 JSON。',
-    '数学公式优先使用稳定的数学字符文本，例如 x²、aₙ、√(3)、(x²-1)/(x-1)、≤、≥；不要输出容易破坏 JSON 的单反斜杠 LaTeX 命令。',
-    '如果确实必须使用 LaTeX，JSON 字符串里的反斜杠必须写成双反斜杠，例如 $\\\\frac{x^2-1}{x-1}$，不能写成 $\\frac{x^2-1}{x-1}$。',
-    '必须尽量保留原题文字、数学符号、编号、选项顺序和题目含义。',
-    '如果页面中有图形、表格、函数图像、几何图或统计图，请在 figureNote 中用简短中文描述，并在 figureSvg 中生成一个安全、简洁的 SVG 草图。',
-    'figureSvg 只允许使用 svg、g、path、line、polyline、polygon、rect、circle、ellipse、text 这些基础元素；不要使用 script、foreignObject、image、style、外链或事件属性。',
-    'figureSvg 的 viewBox 建议使用 0 0 320 200，线条用黑色或灰色，必要时标注坐标轴、点、角、长度、函数趋势。',
-    '必须保留原卷的分段和换行：题干里原本换行、分小问、条件列表、证明/解答步骤开头，都要在 stemMarkdown 中用换行保留。',
-    '必须判断选择题选项的原始排版，optionLayout 只能填 inline、two-column、one-column：原卷四个选项在同一行填 inline，两行两列填 two-column，每个选项独立成行填 one-column。',
-    '不要把所有文字压成一整段；不要为了整齐改写原题语序。',
-    '如果无法确定答案或解析，可以留空。',
-    '只返回 JSON，不要使用 Markdown，不要解释。'
-  ].join('\n')
-}
-
-function buildQuestionRecognitionContent(payload, pages, docTexts, target) {
-  const text = [
-    `试卷标题：${payload.title || '未命名试卷'}`,
-    `上传文件：${Array.isArray(payload.files) ? payload.files.map((file) => file.name).join('、') : '未填写'}`,
-    `当前识别批次：${payload.pageBatchLabel || '全部页面'}`,
-    `当前发送页面：${Array.isArray(payload.pageBatchNames) && payload.pageBatchNames.length ? payload.pageBatchNames.join('、') : (pages.length ? pages.map((page) => page.name).join('、') : '无')}`,
-    '',
-    '识别要求：',
-    '1. 将试卷拆分成独立题目。',
-    '2. 每道题返回 number、stemMarkdown、options、optionLayout、figureNote、figureSvg、answer、analysis。',
-    '3. 选择题选项放入 options 数组，每个选项保留 A. / B. / C. / D. 等标记。',
-    '4. optionLayout 根据原卷选项排版填写 inline、two-column 或 one-column；非选择题 options 为空数组，optionLayout 填 one-column。',
-    '5. stemMarkdown 和 options 中的数学内容优先写成可直接显示的数学字符，例如 x²、aₙ、√(3)、(x²-1)/(x-1)；如使用 LaTeX，必须双重转义反斜杠。',
-    '6. stemMarkdown 必须保留原卷换行：条件、分小问（1）（2）、表格前后、解答空行不要合并成一段。',
-    '7. 如果题目跨页，请合并成一道题。',
-    '8. 如果原题有图，figureSvg 必须画出可理解的简化图；如果没有图，figureSvg 为空字符串。',
-    '',
-    'Word 文本内容：',
-    docTexts.length
-      ? docTexts.map((item) => `文件：${item.name}\n${item.text}`).join('\n\n---\n\n')
-      : '无',
-    '',
-    '请严格返回 JSON，格式为：',
-    '{"questions":[{"id":"q1","number":"1","stemMarkdown":"题干第一行，公式写作 x²+1\\n（1）第一小问\\n（2）第二小问","options":["A. x=1","B. x=2"],"optionLayout":"inline","figureNote":"","figureSvg":"","answer":"","analysis":""}],"warnings":[]}'
-  ].join('\n')
-
-  if (target === 'responses') {
-    const content = [{ type: 'input_text', text }]
-    pages.forEach((page) => {
-      content.push({
-        type: 'input_image',
-        image_url: page.dataUrl,
-        detail: 'high'
-      })
-    })
-    return content
-  }
-
-  if (!pages.length) return text
-
-  return [
-    { type: 'text', text },
-    ...pages.map((page) => ({
-      type: 'image_url',
-      image_url: {
-        url: page.dataUrl
-      }
-    }))
-  ]
-}
-
-function getQuestionRecognitionJsonSchema() {
-  return {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      questions: {
-        type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            id: { type: 'string' },
-            number: { type: 'string' },
-            stemMarkdown: { type: 'string' },
-            options: {
-              type: 'array',
-              items: { type: 'string' }
-            },
-            optionLayout: {
-              type: 'string',
-              enum: ['inline', 'two-column', 'one-column']
-            },
-            figureNote: { type: 'string' },
-            figureSvg: { type: 'string' },
-            answer: { type: 'string' },
-            analysis: { type: 'string' }
-          },
-          required: ['id', 'number', 'stemMarkdown', 'options', 'optionLayout', 'figureNote', 'figureSvg', 'answer', 'analysis']
-        }
-      },
-      warnings: {
-        type: 'array',
-        items: { type: 'string' }
-      }
-    },
-    required: ['questions', 'warnings']
-  }
-}
-
-function parseQuestionRecognitionResponse(response, provider) {
-  if (provider === 'deepseek' || provider === 'custom') {
-    const content = response.choices && response.choices[0] && response.choices[0].message
-      ? response.choices[0].message.content
-      : ''
-    return parseJsonText(content)
-  }
-
-  if (response.output_text) {
-    return parseJsonText(response.output_text)
-  }
-
-  const output = Array.isArray(response.output) ? response.output : []
-  const text = output.flatMap((item) => Array.isArray(item.content) ? item.content : [])
-    .map((part) => part.text || '')
-    .filter(Boolean)
-    .join('\n')
-
-  return parseJsonText(text)
-}
-
-function extractQuestionSourceText(file) {
-  const name = file.originalname || 'source'
-  const mime = getMimeType(name, file.mimetype)
-
-  if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-    return {
-      name,
-      text: truncateText(extractDocxText(file.buffer))
-    }
-  }
-
-  if (mime === 'text/plain' || mime === 'text/markdown') {
-    return {
-      name,
-      text: truncateText(file.buffer.toString('utf8'))
-    }
-  }
-
-  return {
-    name,
-    text: ''
-  }
-}
-
-function chunkArray(list, size) {
-  const chunkSize = Math.max(1, Number(size) || 1)
-  const chunks = []
-
-  for (let index = 0; index < list.length; index += chunkSize) {
-    chunks.push(list.slice(index, index + chunkSize))
-  }
-
-  return chunks
-}
-
-function normalizeSvgMarkup(value) {
-  let svg = trim(value)
-  if (!svg || !/^<svg[\s>]/i.test(svg)) return ''
-
-  svg = svg
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, '')
-    .replace(/<image[\s\S]*?>/gi, '')
-    .replace(/\sstyle\s*=\s*"[^"]*"/gi, '')
-    .replace(/\sstyle\s*=\s*'[^']*'/gi, '')
-    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
-    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
-    .replace(/\s(?:href|xlink:href)\s*=\s*"[^"]*"/gi, '')
-    .replace(/\s(?:href|xlink:href)\s*=\s*'[^']*'/gi, '')
-
-  if (!/^<svg[^>]+xmlns=/i.test(svg)) {
-    svg = svg.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"')
-  }
-
-  if (!/^<svg[^>]+viewBox=/i.test(svg)) {
-    svg = svg.replace(/^<svg/i, '<svg viewBox="0 0 320 200"')
-  }
-
-  return svg
-}
-
-function normalizeQuestionLayoutText(value) {
-  let text = repairBrokenMathText(trim(value))
-  if (!text) return ''
-
-  text = text
-    .replace(/\r\n?/g, '\n')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n[ \t]+/g, '\n')
-
-  if (!text.includes('\n')) {
-    text = text
-      .replace(/\s*(?=（[一二三四五六七八九十\d]+）)/g, '\n')
-      .replace(/\s*(?=\([一二三四五六七八九十]+\))/g, '\n')
-      .replace(/\s*(?=[①②③④⑤⑥⑦⑧⑨⑩])/g, '\n')
-      .replace(/\s*(?=(?:解|证明|求证|分析)[:：])/g, '\n')
-  }
-
-  return text
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/^\n+|\n+$/g, '')
-}
-
-function repairBrokenMathText(value) {
-  let text = String(value || '')
-  if (!text) return ''
-
-  const controlRepairs = [
-    ['\f', 'rac', '\\frac'],
-    ['\f', 'rac ', '\\frac '],
-    ['\t', 'heta', '\\theta'],
-    ['\t', 'imes', '\\times'],
-    ['\t', 'an', '\\tan'],
-    ['\t', 'ext', '\\text'],
-    ['\r', 'ight', '\\right'],
-    ['\r', 'angle', '\\rangle'],
-    ['\b', 'eta', '\\beta']
-  ]
-
-  controlRepairs.forEach(([control, suffix, replacement]) => {
-    text = text.split(`${control}${suffix}`).join(replacement)
-  })
-
-  text = text
-    .replace(/\u000c/g, '\\f')
-    .replace(/\u000b/g, '')
-    .replace(/\\frac/g, '\\frac')
-    .replace(/\\sqrt/g, '\\sqrt')
-
-  return convertLatexToDisplayText(text)
-}
-
-function convertLatexToDisplayText(value) {
-  let text = String(value || '')
-
-  text = text.replace(/\$\$([\s\S]*?)\$\$/g, (match, formula) => latexToReadableMath(formula))
-  text = text.replace(/\$(.*?)\$/g, (match, formula) => latexToReadableMath(formula))
-  text = text.replace(/\\\((.*?)\\\)/g, (match, formula) => latexToReadableMath(formula))
-  text = text.replace(/\\\[(.*?)\\\]/g, (match, formula) => latexToReadableMath(formula))
-
-  if (/\\(?:frac|sqrt|times|cdot|leq|geq|neq|approx|theta|alpha|beta|gamma|Delta|pi|sum|int)|[\^_][{A-Za-z0-9]/.test(text)) {
-    text = latexToReadableMath(text)
-  }
-
-  return text
-}
-
-function normalizeOptionLayout(value, options = []) {
-  const raw = trim(value).toLowerCase()
-  const aliases = {
-    inline: 'inline',
-    row: 'inline',
-    horizontal: 'inline',
-    'one-line': 'inline',
-    'one row': 'inline',
-    一行: 'inline',
-    two: 'two-column',
-    columns: 'two-column',
-    'two-column': 'two-column',
-    'two columns': 'two-column',
-    两列: 'two-column',
-    双列: 'two-column',
-    column: 'one-column',
-    vertical: 'one-column',
-    'one-column': 'one-column',
-    'one column': 'one-column',
-    单列: 'one-column',
-    逐行: 'one-column'
-  }
-
-  return aliases[raw] || inferOptionLayout(options)
-}
-
-function inferOptionLayout(options = []) {
-  const list = Array.isArray(options) ? options.map((option) => cleanQuestionDocText(option)).filter(Boolean) : []
-  if (!list.length) return 'one-column'
-
-  const maxLength = Math.max(...list.map((option) => option.length))
-  const totalLength = list.reduce((sum, option) => sum + option.length, 0)
-
-  if (list.length <= 4 && maxLength <= 16 && totalLength <= 72) return 'inline'
-  if (maxLength <= 32) return 'two-column'
-  return 'one-column'
-}
-
-function normalizeQuestions(questions) {
-  const list = Array.isArray(questions) ? questions : []
-  return list.map((question, index) => {
-    const item = question && typeof question === 'object' ? question : {}
-    const options = Array.isArray(item.options)
-      ? item.options.map((option) => normalizeQuestionLayoutText(option)).filter(Boolean)
-      : []
-    const optionLayout = normalizeOptionLayout(item.optionLayout || item.optionsLayout || item.layout, options)
-
-    return {
-      id: trim(item.id) || `q-${index + 1}`,
-      number: trim(item.number) || String(index + 1),
-      stemMarkdown: normalizeQuestionLayoutText(item.stemMarkdown || item.stem),
-      options,
-      optionLayout,
-      figureNote: trim(item.figureNote || item.figureDescription),
-      figureSvg: normalizeSvgMarkup(item.figureSvg || item.svg || item.figure),
-      answer: trim(item.answer),
-      analysis: trim(item.analysis)
-    }
-  }).filter((question) => question.stemMarkdown || question.options.length || question.figureNote || question.figureSvg)
-}
-
-function buildDemoQuestions(payload, docTexts) {
-  const text = docTexts.map((item) => item.text).join('\n').trim()
-  if (text) {
-    return [{
-      id: 'demo-q1',
-      number: '1',
-      stemMarkdown: text.slice(0, 180),
-      options: [],
-      optionLayout: 'one-column',
-      figureNote: '',
-      figureSvg: '',
-      answer: '',
-      analysis: ''
-    }]
-  }
-
-  return [{
-    id: 'demo-q1',
-    number: '1',
-    stemMarkdown: `${payload.title || '本试卷'}示例题：请根据上传页面识别题干内容。\n（1）保留原题换行和分段。\n（2）公式用 $x^2+1$ 这样的 LaTeX。`,
-    options: ['A. $x=1$', 'B. $x=2$', 'C. $x=3$', 'D. $x=4$'],
-    optionLayout: 'inline',
-    figureNote: '演示模式未调用 AI，以下为示例坐标图。',
-    figureSvg: '<svg viewBox="0 0 320 200" xmlns="http://www.w3.org/2000/svg"><line x1="35" y1="165" x2="285" y2="165" stroke="#111" stroke-width="2"/><line x1="55" y1="180" x2="55" y2="25" stroke="#111" stroke-width="2"/><path d="M65 145 C110 95 155 72 210 48" fill="none" stroke="#111" stroke-width="3"/><text x="286" y="160" font-size="16">x</text><text x="62" y="28" font-size="16">y</text></svg>',
-    answer: '',
-    analysis: ''
-  }]
-}
-
-function buildQuestionDocx(title, questions) {
-  const zip = new AdmZip()
-
-  zip.addFile('[Content_Types].xml', Buffer.from(buildDocxContentTypes(), 'utf8'))
-  zip.addFile('_rels/.rels', Buffer.from(buildDocxRootRels(), 'utf8'))
-  zip.addFile('word/_rels/document.xml.rels', Buffer.from(buildDocxDocumentRels(), 'utf8'))
-  zip.addFile('word/styles.xml', Buffer.from(buildQuestionStylesXml(), 'utf8'))
-  zip.addFile('word/document.xml', Buffer.from(buildQuestionDocumentXml(title, questions), 'utf8'))
-
-  return zip.toBuffer()
-}
-
-function buildQuestionFigureResources(questions) {
-  return questions
-    .map((question, index) => ({
-      questionIndex: index,
-      relId: `rIdFigure${index + 1}`,
-      docPrId: index + 10,
-      fileName: `question-figure-${index + 1}.svg`,
-      svg: normalizeSvgMarkup(question.figureSvg)
-    }))
-    .filter((figure) => figure.svg)
-}
-
-function buildQuestionDocumentXml(title, questions) {
-  const paragraphs = [
-    buildDocxParagraph(title || '题卷重排', {
-      style: 'Title',
-      align: 'center',
-      bold: true,
-      size: 32,
-      after: 260
-    })
-  ]
-
-  questions.forEach((question, index) => {
-    const number = trim(question.number) || String(index + 1)
-    const stemLines = splitDocxLines(question.stemMarkdown)
-    const firstStemLine = stemLines.shift() || ''
-
-    paragraphs.push(buildDocxParagraph(`${number}. ${firstStemLine}`.trim(), {
-      style: 'Question',
-      after: stemLines.length ? 36 : 72
-    }))
-
-    stemLines.forEach((line) => {
-      paragraphs.push(buildDocxParagraph(line, {
-        indent: 420,
-        after: 36
-      }))
-    })
-
-    paragraphs.push(...buildDocxOptionParagraphs(question))
-
-    if (question.figureNote) {
-      paragraphs.push(buildDocxParagraph(`图形说明：${cleanQuestionDocText(question.figureNote)}`, {
-        indent: 420,
-        color: '666666',
-        after: 80
-      }))
-    }
-
-    if (question.figureSvg && !question.figureNote) {
-      paragraphs.push(buildDocxParagraph('图形说明：此题含图形，WPS 兼容导出已保留题干和公式；请结合原图核对。', {
-        indent: 420,
-        color: '666666',
-        after: 80
-      }))
-    }
-
-    if (question.answer) {
-      paragraphs.push(buildDocxParagraph(`答案：${cleanQuestionDocText(question.answer)}`, {
-        indent: 420,
-        after: 80
-      }))
-    }
-
-    if (question.analysis) {
-      paragraphs.push(buildDocxParagraph(`解析：${cleanQuestionDocText(question.analysis)}`, {
-        indent: 420,
-        after: 80
-      }))
-    }
-
-    if (index < questions.length - 1) {
-      paragraphs.push(buildDocxParagraph('', { after: 120 }))
-    }
-  })
-
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <w:body>
-    ${paragraphs.join('\n    ')}
-    <w:sectPr>
-      <w:pgSz w:w="11906" w:h="16838"/>
-      <w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="720" w:footer="720" w:gutter="0"/>
-      <w:cols w:space="720"/>
-      <w:docGrid w:linePitch="312"/>
-    </w:sectPr>
-  </w:body>
-</w:document>`
-}
-
-function buildDocxParagraph(text, options = {}) {
-  const cleanText = cleanQuestionDocText(text)
-  const paragraphProperties = buildDocxParagraphProperties(options)
-
-  if (!cleanText) {
-    return `<w:p>${paragraphProperties}</w:p>`
-  }
-
-  return `<w:p>${paragraphProperties}${buildDocxRunsWithMath(cleanText, options)}</w:p>`
-}
-
-function buildDocxRunsWithMath(text, options = {}) {
-  return splitMathSegments(text)
-    .map((segment) => {
-      if (segment.type === 'math') return buildDocxTextRun(latexToReadableMath(segment.value), options)
-      return buildDocxTextRun(segment.value, options)
-    })
-    .join('')
-}
-
-function buildDocxTextRun(text, options = {}) {
-  if (!text) return ''
-  return `<w:r>${buildDocxRunProperties(options)}<w:t xml:space="preserve">${escapeDocxXml(text)}</w:t></w:r>`
-}
-
-function buildDocxSvgFigure(figure, options = {}) {
-  const paragraphProperties = buildDocxParagraphProperties(options)
-  const cx = 3600000
-  const cy = 2250000
-
-  return `<w:p>${paragraphProperties}<w:r><w:drawing>
-    <wp:inline distT="0" distB="0" distL="0" distR="0">
-      <wp:extent cx="${cx}" cy="${cy}"/>
-      <wp:docPr id="${figure.docPrId}" name="${escapeDocxXml(figure.fileName)}"/>
-      <wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>
-      <a:graphic>
-        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
-          <pic:pic>
-            <pic:nvPicPr>
-              <pic:cNvPr id="${figure.docPrId}" name="${escapeDocxXml(figure.fileName)}"/>
-              <pic:cNvPicPr/>
-            </pic:nvPicPr>
-            <pic:blipFill>
-              <a:blip r:embed="${escapeDocxXml(figure.relId)}"/>
-              <a:stretch><a:fillRect/></a:stretch>
-            </pic:blipFill>
-            <pic:spPr>
-              <a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>
-              <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
-            </pic:spPr>
-          </pic:pic>
-        </a:graphicData>
-      </a:graphic>
-    </wp:inline>
-  </w:drawing></w:r></w:p>`
-}
-
-function buildDocxOptionParagraphs(question) {
-  const options = Array.isArray(question.options) ? question.options : []
-  if (!options.length) return []
-
-  const layout = normalizeOptionLayout(question.optionLayout, options)
-  const paragraphOptions = {
-    indent: 420,
-    after: 36
-  }
-
-  if (layout === 'inline') {
-    return [buildDocxParagraph(options.map(cleanQuestionDocText).join('    '), paragraphOptions)]
-  }
-
-  if (layout === 'two-column') {
-    const rows = []
-    for (let index = 0; index < options.length; index += 2) {
-      rows.push(buildDocxParagraph(
-        [options[index], options[index + 1]].filter(Boolean).map(cleanQuestionDocText).join('        '),
-        paragraphOptions
-      ))
-    }
-    return rows
-  }
-
-  return options.map((option) => buildDocxParagraph(cleanQuestionDocText(option), paragraphOptions))
-}
-
-function buildDocxParagraphProperties(options = {}) {
-  const props = []
-
-  if (options.style) props.push(`<w:pStyle w:val="${escapeDocxXml(options.style)}"/>`)
-  if (options.align) props.push(`<w:jc w:val="${escapeDocxXml(options.align)}"/>`)
-  if (options.indent) props.push(`<w:ind w:left="${Math.max(0, Number(options.indent) || 0)}"/>`)
-
-  const after = Number.isFinite(Number(options.after)) ? Number(options.after) : 120
-  const before = Number.isFinite(Number(options.before)) ? Number(options.before) : 0
-  const line = Number.isFinite(Number(options.line)) ? Number(options.line) : 276
-  props.push(`<w:spacing w:before="${Math.max(0, before)}" w:after="${Math.max(0, after)}" w:line="${Math.max(240, line)}" w:lineRule="auto"/>`)
-
-  return props.length ? `<w:pPr>${props.join('')}</w:pPr>` : ''
-}
-
-function buildDocxRunProperties(options = {}) {
-  const props = [
-    '<w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>'
-  ]
-  const size = Math.max(18, Number(options.size) || 21)
-
-  props.push(`<w:sz w:val="${size}"/>`)
-  props.push(`<w:szCs w:val="${size}"/>`)
-  if (options.bold) props.push('<w:b/><w:bCs/>')
-  if (options.color) props.push(`<w:color w:val="${escapeDocxXml(options.color)}"/>`)
-
-  return `<w:rPr>${props.join('')}</w:rPr>`
-}
-
-function splitDocxLines(text) {
-  return cleanQuestionDocText(text)
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-}
-
-function cleanQuestionDocText(text) {
-  return String(text || '')
-    .replace(/\r\n?/g, '\n')
-    .replace(/!\[[^\]]*]\([^)]+\)/g, '[图示]')
-    .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
-    .replace(/(\*\*|__|`)/g, '')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-}
-
-function escapeDocxXml(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;')
-}
-
-function splitMathSegments(text) {
-  const segments = []
-  const source = String(text || '')
-  let index = 0
-
-  while (index < source.length) {
-    const marker = findNextMathMarker(source, index)
-
-    if (!marker) {
-      segments.push({ type: 'text', value: source.slice(index) })
-      break
-    }
-
-    if (marker.start > index) {
-      segments.push({ type: 'text', value: source.slice(index, marker.start) })
-    }
-
-    segments.push({ type: 'math', value: marker.value })
-    index = marker.end
-  }
-
-  return segments
-}
-
-function findNextMathMarker(source, fromIndex) {
-  const markers = [
-    { open: '$$', close: '$$' },
-    { open: '$', close: '$' },
-    { open: '\\(', close: '\\)' },
-    { open: '\\[', close: '\\]' }
-  ]
-  let best = null
-
-  markers.forEach((marker) => {
-    const start = source.indexOf(marker.open, fromIndex)
-    if (start < 0) return
-    const valueStart = start + marker.open.length
-    const end = source.indexOf(marker.close, valueStart)
-    if (end < 0) return
-    if (!best || start < best.start) {
-      best = {
-        start,
-        end: end + marker.close.length,
-        value: source.slice(valueStart, end)
-      }
-    }
-  })
-
-  return best
-}
-
-function latexToReadableMath(latex) {
-  let text = String(latex || '').trim()
-
-  text = text
-    .replace(/\\left/g, '')
-    .replace(/\\right/g, '')
-    .replace(/\\dfrac/g, '\\frac')
-    .replace(/\\tfrac/g, '\\frac')
-
-  text = replaceLatexCommandWithTwoArgs(text, 'frac', (top, bottom) => `(${latexToReadableMath(top)})/(${latexToReadableMath(bottom)})`)
-  text = replaceLatexCommandWithOneArg(text, 'sqrt', (value) => `√(${latexToReadableMath(value)})`)
-
-  const replacements = {
-    '\\\\cdot': '·',
-    '\\\\times': '×',
-    '\\\\div': '÷',
-    '\\\\leq?': '≤',
-    '\\\\geq?': '≥',
-    '\\\\neq': '≠',
-    '\\\\approx': '≈',
-    '\\\\infty': '∞',
-    '\\\\pi': 'π',
-    '\\\\theta': 'θ',
-    '\\\\alpha': 'α',
-    '\\\\beta': 'β',
-    '\\\\gamma': 'γ',
-    '\\\\Delta': 'Δ',
-    '\\\\sum': '∑',
-    '\\\\int': '∫'
-  }
-
-  Object.entries(replacements).forEach(([pattern, value]) => {
-    text = text.replace(new RegExp(pattern, 'g'), value)
-  })
-
-  text = convertLatexScripts(text)
-
-  return text
-    .replace(/[{}]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function convertLatexScripts(text) {
-  let result = String(text || '')
-
-  result = result.replace(/\^\{([^{}]+)\}/g, (match, value) => toSuperscript(value) || `^(${value})`)
-  result = result.replace(/_\{([^{}]+)\}/g, (match, value) => toSubscript(value) || `_(${value})`)
-  result = result.replace(/\^([A-Za-z0-9+\-=()])/g, (match, value) => toSuperscript(value) || `^${value}`)
-  result = result.replace(/_([A-Za-z0-9+\-=()])/g, (match, value) => toSubscript(value) || `_${value}`)
-
-  return result
-}
-
-function toSuperscript(value) {
-  const map = {
-    0: '⁰',
-    1: '¹',
-    2: '²',
-    3: '³',
-    4: '⁴',
-    5: '⁵',
-    6: '⁶',
-    7: '⁷',
-    8: '⁸',
-    9: '⁹',
-    '+': '⁺',
-    '-': '⁻',
-    '=': '⁼',
-    '(': '⁽',
-    ')': '⁾',
-    n: 'ⁿ',
-    i: 'ⁱ'
-  }
-
-  return mapScriptCharacters(value, map)
-}
-
-function toSubscript(value) {
-  const map = {
-    0: '₀',
-    1: '₁',
-    2: '₂',
-    3: '₃',
-    4: '₄',
-    5: '₅',
-    6: '₆',
-    7: '₇',
-    8: '₈',
-    9: '₉',
-    '+': '₊',
-    '-': '₋',
-    '=': '₌',
-    '(': '₍',
-    ')': '₎',
-    a: 'ₐ',
-    e: 'ₑ',
-    h: 'ₕ',
-    i: 'ᵢ',
-    j: 'ⱼ',
-    k: 'ₖ',
-    l: 'ₗ',
-    m: 'ₘ',
-    n: 'ₙ',
-    o: 'ₒ',
-    p: 'ₚ',
-    r: 'ᵣ',
-    s: 'ₛ',
-    t: 'ₜ',
-    u: 'ᵤ',
-    v: 'ᵥ',
-    x: 'ₓ'
-  }
-
-  return mapScriptCharacters(value, map)
-}
-
-function mapScriptCharacters(value, map) {
-  const chars = String(value || '').split('')
-  if (!chars.length) return ''
-
-  const converted = chars.map((char) => map[char])
-  return converted.every(Boolean) ? converted.join('') : ''
-}
-
-function replaceLatexCommandWithOneArg(text, command, replacer) {
-  const pattern = new RegExp(`\\\\${command}\\s*\\{`, 'g')
-  let result = ''
-  let index = 0
-  let match
-
-  while ((match = pattern.exec(text))) {
-    const arg = readBalancedGroup(text, pattern.lastIndex - 1)
-    if (!arg) continue
-    result += text.slice(index, match.index) + replacer(arg.value)
-    index = arg.end
-    pattern.lastIndex = arg.end
-  }
-
-  return result + text.slice(index)
-}
-
-function replaceLatexCommandWithTwoArgs(text, command, replacer) {
-  const pattern = new RegExp(`\\\\${command}\\s*\\{`, 'g')
-  let result = ''
-  let index = 0
-  let match
-
-  while ((match = pattern.exec(text))) {
-    const first = readBalancedGroup(text, pattern.lastIndex - 1)
-    if (!first) continue
-    const secondStart = skipWhitespace(text, first.end)
-    if (text[secondStart] !== '{') continue
-    const second = readBalancedGroup(text, secondStart)
-    if (!second) continue
-
-    result += text.slice(index, match.index) + replacer(first.value, second.value)
-    index = second.end
-    pattern.lastIndex = second.end
-  }
-
-  return result + text.slice(index)
-}
-
-function readBalancedGroup(text, openIndex) {
-  if (text[openIndex] !== '{') return null
-
-  let depth = 0
-  for (let index = openIndex; index < text.length; index += 1) {
-    const char = text[index]
-    if (char === '{') depth += 1
-    if (char === '}') depth -= 1
-    if (depth === 0) {
-      return {
-        value: text.slice(openIndex + 1, index),
-        end: index + 1
-      }
-    }
-  }
-
-  return null
-}
-
-function skipWhitespace(text, index) {
-  let current = index
-  while (/\s/.test(text[current] || '')) current += 1
-  return current
-}
-
-function buildDocxContentTypes() {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
-</Types>`
-}
-
-function buildDocxRootRels() {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>`
-}
-
-function buildDocxDocumentRels() {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>`
-}
-
-function buildQuestionStylesXml() {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:docDefaults>
-    <w:rPrDefault>
-      <w:rPr>
-        <w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>
-        <w:sz w:val="21"/>
-        <w:szCs w:val="21"/>
-      </w:rPr>
-    </w:rPrDefault>
-  </w:docDefaults>
-  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
-    <w:name w:val="Normal"/>
-    <w:pPr>
-      <w:spacing w:after="36" w:line="276" w:lineRule="auto"/>
-    </w:pPr>
-  </w:style>
-  <w:style w:type="paragraph" w:styleId="Title">
-    <w:name w:val="Title"/>
-    <w:basedOn w:val="Normal"/>
-    <w:qFormat/>
-    <w:pPr>
-      <w:jc w:val="center"/>
-      <w:spacing w:after="220"/>
-    </w:pPr>
-    <w:rPr>
-      <w:rFonts w:ascii="Times New Roman" w:eastAsia="SimHei" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>
-      <w:b/>
-      <w:bCs/>
-      <w:sz w:val="30"/>
-      <w:szCs w:val="30"/>
-    </w:rPr>
-  </w:style>
-  <w:style w:type="paragraph" w:styleId="Question">
-    <w:name w:val="Question"/>
-    <w:basedOn w:val="Normal"/>
-    <w:qFormat/>
-  </w:style>
-</w:styles>`
-}
-
 function buildDebugSummary(payload, courseware) {
   const remarksCount = payload.students.filter((student) => student.remark).length
   const performanceCounts = payload.students.reduce((counts, student) => {
     counts[student.performance] = (counts[student.performance] || 0) + 1
     return counts
   }, {})
-  const exitTest = payload.exitTest || {}
-  const exitTestFile = payload.exitTestFile || {}
 
   return {
     studentCount: payload.students.length,
     remarksCount,
     performanceCounts,
-    exitTestMode: exitTest.mode || '',
-    exitTestTotalScore: exitTest.totalScore || null,
-    exitTestStudentCount: Array.isArray(exitTest.students) ? exitTest.students.length : 0,
-    exitTestRankingPreview: Array.isArray(exitTest.students)
-      ? exitTest.students.slice(0, 8).map((student) => formatExitTestScore(student, exitTest)).join('；')
-      : '',
-    exitTestFileName: exitTestFile.name || '',
-    exitTestFileSource: exitTestFile.source || '',
-    exitTestFileTextLength: exitTestFile.text ? exitTestFile.text.length : 0,
-    exitTestFileTextPreview: exitTestFile.text ? exitTestFile.text.slice(0, 180) : '',
     coursewareName: courseware ? courseware.name : '',
     coursewareMime: courseware ? courseware.mime : '',
     coursewareIsImage: Boolean(courseware && courseware.isImage),
@@ -4010,12 +3719,6 @@ function buildDebugSummary(payload, courseware) {
     coursewareTextLength: courseware && courseware.extractedText ? courseware.extractedText.length : 0,
     coursewareTextPreview: courseware && courseware.extractedText ? courseware.extractedText.slice(0, 180) : ''
   }
-}
-
-function formatExitTestScore(student, exitTest = {}) {
-  if (!student) return ''
-  if (exitTest.mode === 'grade') return `${student.name}：${student.grade || '-'}等`
-  return `${student.name}：${student.score ?? '-'}/${exitTest.totalScore || 100}`
 }
 
 function isLikelyImageRequestError(error) {
@@ -4065,14 +3768,7 @@ function parseJsonText(text) {
     if (extracted) return extracted
   }
 
-  return { feedbacks: [], questions: [] }
-}
-
-function repairJsonLatexBackslashes(text) {
-  return String(text || '').replace(
-    /(^|[^\\])\\(frac|dfrac|tfrac|sqrt|left|right|times|cdot|leq|le|geq|ge|neq|approx|infty|pi|theta|alpha|beta|gamma|Delta|sum|int|tan|sin|cos|log|ln|text|overline|angle|parallel|perp|rangle|langle|begin|end)/g,
-    '$1\\\\$2'
-  )
+  return { feedbacks: [], questions: [], scores: [] }
 }
 
 function parseProviderResponseJson(text, providerLabel) {
@@ -4099,47 +3795,104 @@ function extractFirstJsonObject(text) {
   return source.slice(start, end + 1)
 }
 
+function repairJsonLatexBackslashes(text) {
+  return String(text || '').replace(
+    /(^|[^\\])\\(frac|dfrac|tfrac|sqrt|left|right|times|cdot|leq|le|ge|geq|neq|approx|infty|pi|theta|alpha|beta|gamma|Delta|sum|int|tan|sin|cos|log|ln|text|overline|angle|parallel|perp|rangle|langle|begin|end)/g,
+    '$1\\\\$2'
+  )
+}
+
 function buildNonJsonAIResponseMessage(text, providerLabel) {
-  const rawText = String(text || '')
-  const plainText = rawText
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-  const snippet = (plainText || rawText).slice(0, 160)
-
-  if (/^\s*</.test(rawText)) {
-    return `${providerLabel} 接口没有返回 JSON，通常是 API 地址、模型渠道或图片识别能力不匹配。请检查测试版 AI 配置，或减少 PDF 页数后重试。`
-  }
-
-  return `${providerLabel} 返回无法解析：${snippet || '空响应'}`
+  const preview = String(text || '').replace(/\s+/g, ' ').slice(0, 220)
+  return `${providerLabel || 'AI'} 返回内容无法解析，请稍后重试。返回片段：${preview}`
 }
 
 function normalizeFeedbacks(feedbacks, students, payload = {}) {
   const list = Array.isArray(feedbacks) ? feedbacks : []
+  const matchedByStudentId = matchFeedbacksByStudent(students, list)
 
   return students.map((student) => {
-    const matched = list.find((item) => item.studentId === student.id || item.name === student.name)
+    const matched = matchedByStudentId.get(student.id)
     const fallback = buildFallbackFeedback(student, payload)
     const modelFeedback = trim(matched && matched.feedback) || fallback
+    const templateFields = normalizeTemplateFields(matched && matched.templateFields, student, payload, modelFeedback)
     const templatedFeedback = applyFeedbackTemplate(payload.template, student, payload, matched, modelFeedback)
+    const integratedFeedback = normalizeFeedbackPerformanceParagraph(
+      templatedFeedback || modelFeedback,
+      templateFields.performanceText,
+      student
+    )
+    const feedback = sanitizeFeedbackStudentNames(integratedFeedback, student, students)
 
     return {
       studentId: student.id,
       name: student.name,
-      feedback: templatedFeedback || modelFeedback
+      feedback,
+      templateFields
     }
   })
 }
 
+function matchFeedbacksByStudent(students, feedbacks) {
+  const matches = new Map()
+  const usedItems = new Set()
+  const studentIds = new Set(students.map((student) => student.id).filter(Boolean))
+
+  students.forEach((student) => {
+    const itemIndex = feedbacks.findIndex((feedback, index) => {
+      return !usedItems.has(index) && trim(feedback && feedback.studentId) === student.id
+    })
+
+    if (itemIndex < 0) return
+    matches.set(student.id, feedbacks[itemIndex])
+    usedItems.add(itemIndex)
+  })
+
+  students.forEach((student) => {
+    if (matches.has(student.id)) return
+
+    const itemIndex = feedbacks.findIndex((feedback, index) => {
+      if (usedItems.has(index)) return false
+
+      const feedbackStudentId = trim(feedback && feedback.studentId)
+      if (feedbackStudentId && studentIds.has(feedbackStudentId)) return false
+
+      return trim(feedback && feedback.name) === student.name
+    })
+
+    if (itemIndex < 0) return
+
+    matches.set(student.id, feedbacks[itemIndex])
+    usedItems.add(itemIndex)
+  })
+
+  return matches
+}
+
+function sanitizeFeedbackStudentNames(feedback, currentStudent, students) {
+  let text = trim(feedback)
+  if (!text) return text
+
+  const currentName = trim(currentStudent && currentStudent.name)
+  if (!currentName) return text
+
+  students
+    .map((student) => trim(student && student.name))
+    .filter((name) => name && name !== currentName && name.length >= 2)
+    .sort((left, right) => right.length - left.length)
+    .forEach((name) => {
+      text = text.replace(new RegExp(escapeRegExp(name), 'g'), currentName)
+    })
+
+  return text
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function buildDemoFeedbacks(payload) {
-  return payload.students.map((student) => ({
-    studentId: student.id,
-    name: student.name,
-    feedback: applyFeedbackTemplate(payload.template, student, payload, null, buildFallbackFeedback(student, payload))
-      || buildFallbackFeedback(student, payload)
-  }))
+  return normalizeFeedbacks([], payload.students, payload)
 }
 
 function applyFeedbackTemplate(template, student, payload, aiItem, modelFeedback) {
@@ -4162,15 +3915,150 @@ function normalizeTemplateFields(rawFields = {}, student, payload = {}, modelFee
   const courseContentFallback = buildCourseContentFallback(payload)
   const performanceFallback = buildPerformanceFallback(student)
   const personalizedFallback = buildPersonalizedFallback(student)
+  const personalizedRemark = trim(fields.personalizedRemark) || personalizedFallback
+  let performanceText = trim(fields.performanceText) || performanceFallback
+  performanceText = mergeStudentRemarkIntoPerformance(performanceText, student.keywords)
+  performanceText = mergeStudentRemarkIntoPerformance(performanceText, student.remark)
 
   return {
     courseContent: trim(fields.courseContent) || courseContentFallback,
     courseKnowledgePoint: trim(fields.courseKnowledgePoint) || courseContentFallback,
-    performanceText: trim(fields.performanceText) || performanceFallback,
-    personalizedRemark: trim(fields.personalizedRemark) || personalizedFallback,
+    performanceText,
+    personalizedRemark,
     learningSuggestion: trim(fields.learningSuggestion) || buildAdviceFallback(student),
+    subject: trim(fields.subject),
     modelFeedback: trim(modelFeedback)
   }
+}
+
+function normalizeFeedbackPerformanceParagraph(feedback, performanceText, student = {}) {
+  const source = trim(feedback)
+  if (!source) return source
+
+  const extractedDetails = []
+  let normalizedSource = source.replace(
+    /【(?:表现关键词|课堂关键词|关键词|班级亮点关键词|班级需改进关键词|特殊情况|个性化备注|学生情况|备注)】([\s\S]*?)(?=【[^】]+】|$)/g,
+    (section, content) => {
+      if (trim(content)) extractedDetails.push(content)
+      return ''
+    }
+  )
+
+  normalizedSource = normalizedSource.replace(
+    /(?:^|\n)\s*(?:表现关键词|课堂关键词|关键词|班级亮点关键词|班级需改进关键词|特殊情况|个性化备注|学生情况|备注)\s*[：:]\s*([^\n]*)/g,
+    (section, content) => {
+      if (trim(content)) extractedDetails.push(content)
+      return ''
+    }
+  )
+
+  const headingMatch = /【(?:课堂表现|学生表现)】/.exec(normalizedSource)
+  const hasStructuredSections = /【[^】]+】/.test(normalizedSource)
+  const mergeDetails = (base) => {
+    let result = base
+    ;[...extractedDetails, student.keywords, student.remark].forEach((detail) => {
+      result = mergeStudentRemarkIntoPerformance(result, detail)
+    })
+    return result
+  }
+
+  if (!headingMatch) {
+    const detailText = [...extractedDetails, student.keywords, student.remark]
+      .map((detail) => trim(detail))
+      .filter(Boolean)
+
+    if (!detailText.length) return normalizedSource.trim()
+
+    if (hasStructuredSections) {
+      const performanceBody = mergeDetails(trim(performanceText) || '本节课课堂表现稳定')
+      return [normalizedSource.trim(), '【课堂表现】', performanceBody]
+        .filter(Boolean)
+        .join('\n')
+        .trim()
+    }
+
+    return mergeDetails(normalizedSource.trim() || performanceText)
+  }
+
+  const bodyStart = headingMatch.index + headingMatch[0].length
+  const remaining = normalizedSource.slice(bodyStart)
+  const nextHeadingOffset = remaining.search(/【[^】]+】/)
+  const body = nextHeadingOffset >= 0 ? remaining.slice(0, nextHeadingOffset) : remaining
+  const suffix = nextHeadingOffset >= 0 ? remaining.slice(nextHeadingOffset) : ''
+  const mergedBody = mergeDetails(dedupeFeedbackParagraph(body) || performanceText)
+
+  return [
+    normalizedSource.slice(0, bodyStart).trimEnd(),
+    mergedBody,
+    suffix.trimStart()
+  ].filter(Boolean).join('\n').trim()
+}
+
+function dedupeFeedbackParagraph(value) {
+  const tokens = normalizeInlineFeedbackText(value).split(/([，,；;。！？!?]+)/)
+  const seenParts = new Set()
+  const output = []
+
+  for (let index = 0; index < tokens.length; index += 2) {
+    const part = trim(tokens[index])
+    const punctuation = tokens[index + 1] || ''
+    const comparable = normalizeFeedbackComparisonText(part)
+    if (!part || (comparable && seenParts.has(comparable))) continue
+    if (comparable) seenParts.add(comparable)
+    output.push(`${part}${punctuation}`)
+  }
+
+  return normalizeInlineFeedbackText(output.join(' '))
+    .replace(/\s+([，,；;。！？!?])/g, '$1')
+    .replace(/([，,；;。！？!?])\s+/g, '$1')
+    .replace(/[，,；;]$/, '。')
+}
+
+function mergeStudentRemarkIntoPerformance(performanceText, studentRemark) {
+  const base = normalizeInlineFeedbackText(performanceText)
+  const remark = normalizeInlineFeedbackText(studentRemark)
+  if (!remark) return base
+
+  const missingRemarkParts = remark
+    .split(/[，,；;。！？!?]+/)
+    .map((part) => trim(part))
+    .filter(Boolean)
+    .filter((part) => !isFeedbackDetailCovered(base, part))
+  if (!missingRemarkParts.length) return base
+
+  const missingRemark = missingRemarkParts.join('，')
+  const integratedRemark = /^(课堂|本节课|该生|学生)/.test(missingRemark)
+    ? missingRemark
+    : `课堂中，${missingRemark}`
+  return `${ensureChineseSentence(base)}${ensureChineseSentence(integratedRemark)}`
+}
+
+function normalizeInlineFeedbackText(value) {
+  return trim(value)
+    .replace(/\s*\r?\n+\s*/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+}
+
+function isFeedbackDetailCovered(text, detail) {
+  const source = normalizeFeedbackComparisonText(text)
+  const target = normalizeFeedbackComparisonText(detail)
+  if (!target) return false
+  if (source.includes(target)) return true
+
+  const prefixLength = Math.min(target.length, Math.max(6, Math.floor(target.length * 0.55)))
+  return target.length >= 6 && source.includes(target.slice(0, prefixLength))
+}
+
+function normalizeFeedbackComparisonText(value) {
+  return normalizeInlineFeedbackText(value)
+    .replace(/[，,。；;：:！？!?、（）()“”\"'\s]/g, '')
+    .replace(/(?:本次|本节课|课堂中|课堂上|再)/g, '')
+}
+
+function ensureChineseSentence(value) {
+  const text = normalizeInlineFeedbackText(value)
+  if (!text) return ''
+  return /[。！？!?]$/.test(text) ? text : `${text}。`
 }
 
 function getTemplateValue(key, fields, student, payload, modelFeedback) {
@@ -4178,6 +4066,7 @@ function getTemplateValue(key, fields, student, payload, modelFeedback) {
 
   if (['学生姓名', '姓名', '学生'].includes(normalizedKey)) return student.name
   if (['年级'].includes(normalizedKey)) return payload.grade || ''
+  if (['科目', '学科'].includes(normalizedKey)) return fields.subject || ''
   if (['班级', '班级名称', '课程'].includes(normalizedKey)) return payload.className || ''
   if (['课程主题', '主题'].includes(normalizedKey)) return payload.lessonTitle || fields.courseContent
   if (['课程内容', '本节课内容'].includes(normalizedKey)) return fields.courseContent
@@ -4189,6 +4078,7 @@ function getTemplateValue(key, fields, student, payload, modelFeedback) {
 
   if (normalizedKey.includes('姓名')) return student.name
   if (normalizedKey.includes('年级')) return payload.grade || ''
+  if (normalizedKey.includes('科目') || normalizedKey.includes('学科')) return fields.subject || ''
   if (normalizedKey.includes('班级')) return payload.className || ''
   if (normalizedKey.includes('主题')) return payload.lessonTitle || fields.courseContent
   if (normalizedKey.includes('内容')) return fields.courseContent
@@ -4201,15 +4091,26 @@ function getTemplateValue(key, fields, student, payload, modelFeedback) {
 }
 
 function buildCourseContentFallback(payload = {}) {
+  const courseNote = sanitizeCourseNoteForCourseContent(payload.courseNote)
   return [
     payload.lessonTitle ? `“${payload.lessonTitle}”` : '',
-    payload.courseNote ? payload.courseNote : ''
+    courseNote
   ].filter(Boolean).join('，') || '本节课重点内容'
 }
 
+function sanitizeCourseNoteForCourseContent(courseNote = '') {
+  return String(courseNote || '')
+    .split(/\r?\n/)
+    .map((line) => trim(line))
+    .filter(Boolean)
+    .filter((line) => !/^(上课日期|上课时段|课后作业|班级\/共性备注|教材讲次)[：:]/.test(line))
+    .join('\n')
+}
+
 function buildPerformanceFallback(student) {
-  const remark = student.remark ? `，${student.remark}` : ''
-  return `${student.performance || '表现良好'}${remark}`
+  let performanceText = student.performance || '表现良好'
+  performanceText = mergeStudentRemarkIntoPerformance(performanceText, student.keywords)
+  return mergeStudentRemarkIntoPerformance(performanceText, student.remark)
 }
 
 function buildPersonalizedFallback(student) {
@@ -4235,13 +4136,13 @@ function buildAdviceFallback(student) {
 function buildFallbackFeedback(student, payload = {}) {
   const lesson = payload.lessonTitle ? `本节课围绕“${payload.lessonTitle}”展开，` : '本节课整体学习状态较为清晰，'
   const schedule = buildFallbackScheduleText(payload)
-  const remark = student.remark ? `课堂中特别需要关注的是：${student.remark}。` : ''
+  const performanceText = ensureChineseSentence(buildPerformanceFallback(student))
   const exitTestText = getFallbackExitTestText(student, payload)
   const advice = student.performance === '表现较差'
     ? '后续建议先把基础概念和典型题步骤补扎实，课后用少量高频题巩固。'
     : '后续建议继续整理本节课重点和错题，保持稳定练习节奏。'
 
-  return `${student.name}同学${schedule}${lesson}${student.performance}。${remark}${exitTestText}${advice}`
+  return `${student.name}同学${schedule}${lesson}${performanceText}${exitTestText}${advice}`
 }
 
 function buildFallbackScheduleText(payload = {}) {
@@ -4254,19 +4155,19 @@ function buildFallbackScheduleText(payload = {}) {
 }
 
 function getFallbackExitTestText(student, payload = {}) {
-  const exitTest = payload.exitTest || {}
-  const rows = Array.isArray(exitTest.students) ? exitTest.students : []
+  if (student.exitTestScore === '请假') return '本次出门测请假，成绩不计入班级统计。'
+  if (student.exitTestScore) return `出门测成绩为${student.exitTestScore}。`
 
-  if (!rows.length) return ''
-
-  if (payload.feedbackScope === 'class') {
-    return `本次出门测成绩从高到低为：${rows.map((row) => formatExitTestScore(row, exitTest)).join('，')}。`
-  }
-
-  const matched = rows.find((row) => row.id === student.id || row.name === student.name)
-  if (!matched && !student.exitTestScore) return ''
-
-  return `本次出门测成绩为${student.exitTestScore || formatExitTestScore(matched, exitTest).replace(/^.*?：/, '')}。`
+  const rows = payload.exitTest && Array.isArray(payload.exitTest.students)
+    ? payload.exitTest.students
+    : []
+  const row = rows.find((item) => item.name === student.name)
+  if (!row) return ''
+  if (row.absent) return '本次出门测请假，成绩不计入班级统计。'
+  if (payload.exitTest.mode === 'grade') return row.grade ? `出门测等级为${row.grade}。` : ''
+  return row.score !== null && row.score !== undefined && row.score !== ''
+    ? `出门测成绩为${row.score}/${payload.exitTest.totalScore || 100}。`
+    : ''
 }
 
 async function extractCoursewareText(buffer, fileName) {
@@ -4401,70 +4302,6 @@ async function extractPdfImageText(buffer) {
   }
 }
 
-async function extractPdfSelectedPagesText(buffer, selectedPages) {
-  const pdftoppmPath = getPdftoppmPath()
-  const ocrCommand = getOcrCommand()
-  const pages = normalizePageNumbers(selectedPages)
-
-  if (!pages.length || !pdftoppmPath || !ocrCommand) {
-    return {
-      text: '',
-      source: 'pdf-selected-pages',
-      pageCount: pages.length
-    }
-  }
-
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-feedback-selected-pdf-'))
-  const pdfPath = path.join(tempDir, 'courseware.pdf')
-  const pageTexts = []
-
-  try {
-    fs.writeFileSync(pdfPath, buffer)
-
-    for (const pageNumber of pages) {
-      const outputPrefix = path.join(tempDir, `page-${pageNumber}`)
-      await execFileAsync(pdftoppmPath, [
-        '-png',
-        '-singlefile',
-        '-r',
-        '180',
-        '-f',
-        String(pageNumber),
-        '-l',
-        String(pageNumber),
-        pdfPath,
-        outputPrefix
-      ], {
-        timeout: 25000,
-        maxBuffer: 1024 * 1024
-      })
-
-      const pagePath = `${outputPrefix}.png`
-      if (!fs.existsSync(pagePath)) continue
-
-      const text = await runOcrOnImageFile(pagePath)
-      if (text) pageTexts.push(`第${pageNumber}页：${text}`)
-    }
-
-    return {
-      text: truncateText(pageTexts.join('\n\n')),
-      source: 'pdf-selected-pages',
-      pageCount: pages.length
-    }
-  } catch (error) {
-    return {
-      text: '',
-      source: 'pdf-selected-pages',
-      pageCount: pages.length
-    }
-  } finally {
-    fs.rmSync(tempDir, {
-      recursive: true,
-      force: true
-    })
-  }
-}
-
 async function runOcrOnImageFile(imagePath) {
   const ocrCommand = getOcrCommand()
 
@@ -4483,7 +4320,7 @@ async function runOcrOnImageFile(imagePath) {
 }
 
 function getOcrCommand() {
-  if (process.platform === 'darwin' && fs.existsSync(OCR_BINARY_PATH)) {
+  if (fs.existsSync(OCR_BINARY_PATH)) {
     return {
       command: OCR_BINARY_PATH,
       args: []
@@ -4572,6 +4409,9 @@ function extractPptxText(buffer) {
 
 function xmlToText(xml) {
   return String(xml || '')
+    .replace(/<w:br\s*\/>/g, '\n')
+    .replace(/<\/w:p>/g, '\n')
+    .replace(/<w:tab\s*\/>/g, ' ')
     .replace(/<a:br\s*\/>/g, '\n')
     .replace(/<\/a:p>/g, '\n')
     .replace(/<[^>]+>/g, ' ')
@@ -4585,11 +4425,24 @@ function xmlToText(xml) {
     .trim()
 }
 
-function truncateText(text, maxLength = 22000) {
+function truncateText(text) {
   const cleanText = String(text || '').trim()
+  const maxLength = 22000
 
   if (cleanText.length <= maxLength) return cleanText
   return `${cleanText.slice(0, maxLength)}\n\n[课件内容较长，后文已截断]`
+}
+
+function normalizeUploadFileName(value, fallback = 'file') {
+  const rawName = trim(value) || fallback
+  const decodedName = Buffer.from(rawName, 'latin1').toString('utf8')
+
+  if (!decodedName || decodedName.includes('�')) return rawName
+  return getMojibakeScore(decodedName) < getMojibakeScore(rawName) ? decodedName : rawName
+}
+
+function getMojibakeScore(value) {
+  return (String(value || '').match(/[ÃÂÄÅÆÇÈÉÒÓÔÕÖØÙÚÛÜÝÞßà-ÿ�]/g) || []).length
 }
 
 function getMimeType(name, fallback) {

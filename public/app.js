@@ -76,10 +76,12 @@ const state = {
   editingClassId: '',
   editingOneProfileId: '',
   feedbacks: [],
+  lastGeneratedPayload: null,
   debug: null,
   oneLesson: {
     performance: '表现良好',
-    remark: ''
+    remark: '',
+    keywords: ''
   },
   classSchedule: {
     selectedDate: getLocalDateKey(new Date()),
@@ -105,7 +107,14 @@ const state = {
     user: null
   },
   adminUsers: [],
+  coursewareFiles: [],
+  classTextbook: {
+    fileKey: '',
+    lectures: []
+  },
   pdfSelection: {
+    items: [],
+    activeFileKey: '',
     fileKey: '',
     fileName: '',
     pageCount: 0,
@@ -124,8 +133,9 @@ const state = {
   },
   teaching: {
     loading: false,
+    loaded: false,
     saving: false,
-    tab: 'roster',
+    tab: 'classData',
     data: createEmptyTeachingData(),
     selectedClassId: '',
     selectedModuleId: '',
@@ -136,7 +146,8 @@ const state = {
     paper: createEmptyPaperState(),
     aiResult: '',
     aiBusy: false
-  }
+  },
+  pendingTeachingApplication: null
 }
 
 const els = {}
@@ -186,12 +197,14 @@ function createEmptyTeachingData() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   bindElements()
-  loadClasses()
-  loadOneProfiles()
-  loadTeachingCache()
   bindEvents()
   await checkAccessStatus()
-  if (state.access.authenticated) loadTeachingData()
+  if (state.access.authenticated) {
+    loadClasses()
+    loadOneProfiles()
+    loadTeachingCache()
+    await loadFeedbackDataFromServer()
+  }
   if (state.access.user && state.access.user.isAdmin) loadAdminUsers()
   checkServer()
   if (!state.access.publicMode) loadAIConfig()
@@ -217,6 +230,7 @@ function bindElements() {
     teachingTabs: document.querySelectorAll('.teaching-tab'),
     teachingContent: document.querySelector('#teachingContent'),
     teachingRefreshBtn: document.querySelector('#teachingRefreshBtn'),
+    teachingSyncBtn: document.querySelector('#teachingSyncBtn'),
     teachingPrintBtn: document.querySelector('#teachingPrintBtn'),
     teachingScreenshotBtn: document.querySelector('#teachingScreenshotBtn'),
     teachingRestoreInput: document.querySelector('#teachingRestoreInput'),
@@ -284,6 +298,8 @@ function bindElements() {
     classLectureSelect: document.querySelector('#classLectureSelect'),
     feedbackFormatSelect: document.querySelector('#feedbackFormatSelect'),
     feedbackScopeSelect: document.querySelector('#feedbackScopeSelect'),
+    scoreDisplayField: document.querySelector('#scoreDisplayField'),
+    showAllScoresSelect: document.querySelector('#showAllScoresSelect'),
     classFeedbackTemplateField: document.querySelector('#classFeedbackTemplateField'),
     classFeedbackOptions: document.querySelector('#classFeedbackOptions'),
     classPositiveKeywordList: document.querySelector('#classPositiveKeywordList'),
@@ -315,13 +331,16 @@ function bindElements() {
     exitTestTotalInput: document.querySelector('#exitTestTotalInput'),
     exitTestCount: document.querySelector('#exitTestCount'),
     exitTestTable: document.querySelector('#exitTestTable'),
-    studentToolbar: document.querySelector('.student-toolbar'),
+    studentToolbar: document.querySelector('#studentToolbar'),
     studentCount: document.querySelector('#studentCount'),
     studentTable: document.querySelector('#studentTable'),
+    generationInstructionInput: document.querySelector('#generationInstructionInput'),
     generateBtn: document.querySelector('#generateBtn'),
     copyAllBtn: document.querySelector('#copyAllBtn'),
     resultNote: document.querySelector('#resultNote'),
     debugSummary: document.querySelector('#debugSummary'),
+    teachingApplyBar: document.querySelector('#teachingApplyBar'),
+    applyTeachingDataBtn: document.querySelector('#applyTeachingDataBtn'),
     resultList: document.querySelector('#resultList'),
     imageReportPanel: document.querySelector('#imageReportPanel'),
     imageReportPreview: document.querySelector('#imageReportPreview'),
@@ -358,6 +377,7 @@ function bindEvents() {
   els.createUserBtn.addEventListener('click', createAdminUser)
   els.adminUserList.addEventListener('click', handleAdminUserAction)
   if (els.teachingRefreshBtn) els.teachingRefreshBtn.addEventListener('click', loadTeachingData)
+  if (els.teachingSyncBtn) els.teachingSyncBtn.addEventListener('click', syncTeachingProfiles)
   if (els.teachingPrintBtn) els.teachingPrintBtn.addEventListener('click', () => window.print())
   if (els.teachingScreenshotBtn) els.teachingScreenshotBtn.addEventListener('click', captureTeachingPanel)
   if (els.teachingRestoreInput) els.teachingRestoreInput.addEventListener('change', restoreTeachingBackup)
@@ -377,7 +397,10 @@ function bindEvents() {
     button.addEventListener('click', () => {
       state.mode = button.dataset.mode
       state.feedbacks = []
+      state.lastGeneratedPayload = null
       state.debug = null
+      state.pendingTeachingApplication = null
+      clearGenerationInstruction()
       render()
     })
   })
@@ -404,7 +427,12 @@ function bindEvents() {
   els.deleteOneProfileBtn.addEventListener('click', deleteSelectedOneProfile)
   els.generateBtn.addEventListener('click', generateFeedback)
   els.copyAllBtn.addEventListener('click', copyAllFeedbacks)
+  if (els.applyTeachingDataBtn) els.applyTeachingDataBtn.addEventListener('click', applyFeedbackToTeachingData)
   els.coursewareInput.addEventListener('change', handleCoursewareChange)
+  if (els.pdfPageSelectionBar) {
+    els.pdfPageSelectionBar.addEventListener('change', handleCoursewareSelectionChange)
+    els.pdfPageSelectionBar.addEventListener('click', handleCoursewareSelectionClick)
+  }
   if (els.classMaterialModeSelect) els.classMaterialModeSelect.addEventListener('change', renderClassMaterialControls)
   if (els.classTextbookInput) els.classTextbookInput.addEventListener('change', handleClassTextbookChange)
   if (els.exitTestInput) els.exitTestInput.addEventListener('change', handleExitTestFileChange)
@@ -419,12 +447,20 @@ function bindEvents() {
     state.classSchedule.timeSlot = els.classTimeSlotSelect.value
   })
   if (els.feedbackScopeSelect) els.feedbackScopeSelect.addEventListener('change', () => {
+    state.feedbacks = []
+    state.lastGeneratedPayload = null
+    state.debug = null
+    state.pendingTeachingApplication = null
+    renderStudentTable()
     renderFeedbackModeControls()
     renderResults()
   })
   if (els.feedbackFormatSelect) els.feedbackFormatSelect.addEventListener('change', () => {
     renderFeedbackModeControls()
     renderResults()
+  })
+  if (els.showAllScoresSelect) els.showAllScoresSelect.addEventListener('change', () => {
+    if (isImageFeedbackMode() && state.feedbacks.length) renderImageReport()
   })
   if (els.classPositiveKeywordList) els.classPositiveKeywordList.addEventListener('click', handleClassKeywordClick)
   if (els.classKeywordList) els.classKeywordList.addEventListener('click', handleClassKeywordClick)
@@ -437,6 +473,7 @@ function bindEvents() {
     if (list) list.addEventListener('click', handleOneProfileKeywordClick)
   })
   if (els.downloadImageReportBtn) els.downloadImageReportBtn.addEventListener('click', downloadImageReport)
+  if (els.imageReportPreview) els.imageReportPreview.addEventListener('click', handleImageReportPreviewClick)
   if (els.exitTestModeSelect) els.exitTestModeSelect.addEventListener('change', handleExitTestModeChange)
   if (els.exitTestTotalInput) els.exitTestTotalInput.addEventListener('input', () => {
     state.exitTest.totalScore = Number(els.exitTestTotalInput.value || 100)
@@ -444,18 +481,20 @@ function bindEvents() {
   if (els.exitTestTable) {
     els.exitTestTable.addEventListener('input', handleExitTestInput)
     els.exitTestTable.addEventListener('change', handleExitTestInput)
+    els.exitTestTable.addEventListener('click', handleExitTestAction)
   }
-  els.pdfPageSelectBtn.addEventListener('click', openPdfPageSelection)
-  els.pdfPageSelectAllBtn.addEventListener('click', selectAllPdfPages)
-  els.pdfPageSelectNoneBtn.addEventListener('click', clearPdfPages)
-  els.pdfPageCancelBtn.addEventListener('click', cancelPdfPageSelection)
-  els.pdfPageConfirmBtn.addEventListener('click', confirmPdfPageSelection)
-  els.pdfPageModalCloseBtn.addEventListener('click', closePdfPageModal)
-  els.pdfPageModal.addEventListener('click', (event) => {
+  if (els.pdfPageSelectBtn) els.pdfPageSelectBtn.addEventListener('click', openPdfPageSelection)
+  if (els.pdfPageSelectAllBtn) els.pdfPageSelectAllBtn.addEventListener('click', selectAllPdfPages)
+  if (els.pdfPageSelectNoneBtn) els.pdfPageSelectNoneBtn.addEventListener('click', clearPdfPages)
+  if (els.pdfPageCancelBtn) els.pdfPageCancelBtn.addEventListener('click', cancelPdfPageSelection)
+  if (els.pdfPageConfirmBtn) els.pdfPageConfirmBtn.addEventListener('click', confirmPdfPageSelection)
+  if (els.pdfPageModalCloseBtn) els.pdfPageModalCloseBtn.addEventListener('click', closePdfPageModal)
+  if (els.pdfPageModal) els.pdfPageModal.addEventListener('click', (event) => {
     if (event.target === els.pdfPageModal) closePdfPageModal()
   })
-  els.pdfPageGrid.addEventListener('change', updatePdfPageSelectionFromGrid)
-  els.pdfLectureSelect.addEventListener('change', applySelectedPdfLecture)
+  if (els.pdfPageGrid) els.pdfPageGrid.addEventListener('change', updatePdfPageSelectionFromGrid)
+  if (els.pdfPageGrid) els.pdfPageGrid.addEventListener('click', handlePdfPageGridClick)
+  if (els.pdfLectureSelect) els.pdfLectureSelect.addEventListener('change', applySelectedPdfLecture)
   els.rearrangeUploadBtn.addEventListener('click', () => els.rearrangeFileInput.click())
   els.rearrangeTitleInput.addEventListener('input', renderQuestionPreview)
   els.rearrangeFileInput.addEventListener('change', (event) => {
@@ -477,7 +516,10 @@ function bindEvents() {
 
     state.selectedClassId = selectButton.dataset.id
     state.feedbacks = []
+    state.lastGeneratedPayload = null
     state.debug = null
+    state.pendingTeachingApplication = null
+    clearGenerationInstruction()
     fillClassForm(getSelectedClass())
     render()
   })
@@ -494,7 +536,10 @@ function bindEvents() {
 
     state.selectedOneProfileId = selectButton.dataset.id
     state.feedbacks = []
+    state.lastGeneratedPayload = null
     state.debug = null
+    state.pendingTeachingApplication = null
+    clearGenerationInstruction()
     fillOneProfileForm(getSelectedOneProfile())
     resetOneLesson()
     render()
@@ -657,11 +702,18 @@ async function loginWithAccessCode() {
       usage: data.usage,
       user: data.user
     })
+    resetAccountWorkspaceState()
+    loadClasses()
+    loadOneProfiles()
+    loadTeachingCache()
     els.loginPasswordInput.value = ''
     showAccessMessage('')
     renderAccessState()
+    await loadFeedbackDataFromServer()
+    fillClassForm(getSelectedClass())
+    fillOneProfileForm(getSelectedOneProfile())
+    render()
     if (state.access.user && state.access.user.isAdmin) loadAdminUsers()
-    loadTeachingData()
     checkServer()
     showToast('已进入系统')
   } catch (error) {
@@ -680,10 +732,13 @@ async function logout() {
     // Ignore network errors; the next status check will correct the UI.
   }
 
+  resetAccountWorkspaceState()
   state.access.authenticated = false
   state.access.user = null
   state.access.usage = null
   state.mode = 'class'
+  resetClassForm()
+  resetOneProfileForm()
   render()
 }
 
@@ -892,9 +947,11 @@ function renderAdminUsers() {
 
 function loadTeachingCache() {
   try {
-    const cached = JSON.parse(localStorage.getItem(TEACHING_CACHE_KEY) || 'null')
+    const cached = JSON.parse(localStorage.getItem(getAccountStorageKey(TEACHING_CACHE_KEY)) || 'null')
     if (cached && typeof cached === 'object') {
       state.teaching.data = normalizeTeachingDataClient(cached)
+    } else {
+      state.teaching.data = createEmptyTeachingData()
     }
   } catch (error) {
     state.teaching.data = createEmptyTeachingData()
@@ -921,13 +978,20 @@ async function loadTeachingData() {
     renderTeachingPanel()
     showToast(error.message || '读取教学数据失败，已使用本机缓存')
   } finally {
+    state.teaching.loaded = true
     state.teaching.loading = false
     renderTeachingPanel()
   }
 }
 
 function persistTeachingCache() {
-  localStorage.setItem(TEACHING_CACHE_KEY, JSON.stringify(state.teaching.data))
+  localStorage.setItem(getAccountStorageKey(TEACHING_CACHE_KEY), JSON.stringify(state.teaching.data))
+}
+
+async function syncTeachingProfiles() {
+  mergePrimaryIntoTeachingData()
+  await saveTeachingData()
+  renderTeachingPanel()
 }
 
 async function saveTeachingData(options = {}) {
@@ -1035,8 +1099,9 @@ function renderTeachingPanel() {
   const tabsBar = els.teachingPanel.querySelector('.teaching-tabs')
 
   if (headingEyebrow) headingEyebrow.textContent = isPaperTool ? 'Paper Analysis' : 'Teaching Data'
-  if (headingTitle) headingTitle.textContent = isPaperTool ? '试卷分析' : '教学数据工作台'
+  if (headingTitle) headingTitle.textContent = isPaperTool ? '试卷分析' : '教学数据'
   if (tabsBar) tabsBar.classList.toggle('hidden', isPaperTool)
+  if (els.teachingSyncBtn) els.teachingSyncBtn.classList.toggle('hidden', isPaperTool)
   if (els.teachingPrintBtn) els.teachingPrintBtn.classList.toggle('hidden', isPaperTool)
   if (els.teachingScreenshotBtn) els.teachingScreenshotBtn.classList.toggle('hidden', isPaperTool)
 
@@ -1054,12 +1119,349 @@ function renderTeachingPanel() {
     return
   }
 
+  if (!['classData', 'oneData'].includes(state.teaching.tab)) state.teaching.tab = 'classData'
+  if (state.teaching.tab === 'classData') renderTeachingClassData()
+  if (state.teaching.tab === 'oneData') renderTeachingOneData()
+  if (state.teaching.tab === 'classData' || state.teaching.tab === 'oneData') return
+
   if (state.teaching.tab === 'roster') renderTeachingRoster()
   if (state.teaching.tab === 'courses') renderTeachingCourses()
   if (state.teaching.tab === 'scores') renderTeachingScores()
   if (state.teaching.tab === 'history') renderTeachingHistory()
   if (state.teaching.tab === 'one') renderTeachingOneProfiles()
   if (state.teaching.tab === 'backup') renderTeachingBackup()
+}
+
+function renderTeachingClassData() {
+  mergePrimaryIntoTeachingData()
+  const classes = state.teaching.data.classes || []
+  const selected = classes.find((item) => item.id === state.teaching.selectedClassId) || classes[0]
+  if (selected && !state.teaching.selectedClassId) state.teaching.selectedClassId = selected.id
+
+  if (!classes.length) {
+    els.teachingContent.innerHTML = `
+      <section class="teaching-card">
+        <div class="teaching-title">班课教学数据</div>
+        <div class="student-empty">暂无班级档案。请先在反馈栏建立班级，或点击顶部“同步档案”。</div>
+      </section>
+    `
+    return
+  }
+
+  const sessionDates = selected ? getClassSessionDates(selected.id) : []
+  els.teachingContent.innerHTML = `
+    <div class="teaching-grid sidebar-layout">
+      <section class="teaching-card">
+        <div class="result-head">
+          <div>
+            <div class="teaching-title">班课</div>
+            <div class="teaching-meta">${classes.length} 个班级 · 已同步反馈档案</div>
+          </div>
+        </div>
+        <div class="teaching-pill-list">
+          ${classes.map((classInfo) => `
+            <button class="teaching-pill ${selected && classInfo.id === selected.id ? 'active' : ''}" data-teaching-action="select-data-class" data-id="${escapeHtml(classInfo.id)}" type="button">${escapeHtml(classInfo.name)}</button>
+          `).join('')}
+        </div>
+      </section>
+      <section class="teaching-card">
+        ${selected ? renderClassTeachingDataDetail(selected, sessionDates) : '<div class="student-empty">请选择班级</div>'}
+      </section>
+    </div>
+  `
+}
+
+function renderClassTeachingDataDetail(classInfo, sessionDates) {
+  const students = classInfo.students || []
+  return `
+    <div class="result-head">
+      <div>
+        <div class="teaching-title">${escapeHtml(classInfo.name)} · ${escapeHtml(classInfo.grade || '')}</div>
+        <div class="teaching-meta">上课 ${sessionDates.length} 次 · ${students.length} 名学生</div>
+      </div>
+    </div>
+    <section class="teaching-subsection">
+      <div class="teaching-title">上课次数记录</div>
+      ${renderDateList(sessionDates)}
+    </section>
+    <section class="teaching-subsection">
+      <div class="teaching-title">学生单独档案</div>
+      <div class="teaching-list">
+        ${students.map((student) => renderClassStudentTeachingCard(classInfo, student)).join('') || '<div class="student-empty">暂无学生名单</div>'}
+      </div>
+    </section>
+  `
+}
+
+function renderClassStudentTeachingCard(classInfo, student) {
+  const exitScores = getStudentScoreRows(classInfo.id, student, 'class', 'exitTest')
+  const paperScores = getStudentScoreRows(classInfo.id, student, 'class', 'paperAnalysis')
+  const feedbacks = getStudentFeedbackRows(classInfo.id, student)
+  const attendanceDates = getStudentAttendanceDates(classInfo.id, student)
+
+  return `
+    <article class="teaching-card compact-card">
+      <div class="result-head">
+        <div>
+          <div class="teaching-title">${escapeHtml(student.name)}</div>
+          <div class="teaching-meta">到课 ${attendanceDates.length} 次 · 出门测 ${exitScores.length} 条 · 试卷分析 ${paperScores.length} 条 · 反馈 ${feedbacks.length} 条</div>
+        </div>
+      </div>
+      <div class="teaching-data-columns">
+        <div>
+          <strong>出门测成绩</strong>
+          ${renderTeachingScoreRows(exitScores)}
+        </div>
+        <div>
+          <strong>试卷分析结果</strong>
+          ${renderTeachingScoreRows(paperScores)}
+        </div>
+        <div>
+          <strong>反馈记录</strong>
+          ${renderFeedbackRows(feedbacks)}
+        </div>
+        <div>
+          <strong>到课次数</strong>
+          ${renderDateList(attendanceDates)}
+        </div>
+      </div>
+      ${renderStudentRecordDeleteMenu({ scope: 'class', classId: classInfo.id, studentId: student.id, studentName: student.name })}
+    </article>
+  `
+}
+
+function renderTeachingOneData() {
+  mergePrimaryIntoTeachingData()
+  const profiles = state.teaching.data.oneProfiles || []
+  const selected = profiles.find((item) => item.id === state.teaching.selectedOneProfileId) || profiles[0]
+  if (selected && !state.teaching.selectedOneProfileId) state.teaching.selectedOneProfileId = selected.id
+
+  if (!profiles.length) {
+    els.teachingContent.innerHTML = `
+      <section class="teaching-card">
+        <div class="teaching-title">一对一教学数据</div>
+        <div class="student-empty">暂无一对一档案。请先在反馈栏建立学生档案，或点击顶部“同步档案”。</div>
+      </section>
+    `
+    return
+  }
+
+  els.teachingContent.innerHTML = `
+    <div class="teaching-grid sidebar-layout">
+      <section class="teaching-card">
+        <div class="result-head">
+          <div>
+            <div class="teaching-title">一对一</div>
+            <div class="teaching-meta">${profiles.length} 个学生档案</div>
+          </div>
+        </div>
+        <div class="teaching-pill-list">
+          ${profiles.map((profile) => `
+            <button class="teaching-pill ${selected && profile.id === selected.id ? 'active' : ''}" data-teaching-action="select-data-one" data-id="${escapeHtml(profile.id)}" type="button">${escapeHtml(profile.name)}</button>
+          `).join('')}
+        </div>
+      </section>
+      <section class="teaching-card">
+        ${selected ? renderOneTeachingDataDetail(selected) : '<div class="student-empty">请选择学生</div>'}
+      </section>
+    </div>
+  `
+}
+
+function renderOneTeachingDataDetail(profile) {
+  const feedbacks = getOneFeedbackRows(profile)
+  const exitScores = getStudentScoreRows('', { id: profile.id, name: profile.name }, 'oneOnOne', 'exitTest')
+  const paperScores = getStudentScoreRows('', { id: profile.id, name: profile.name }, 'oneOnOne', 'paperAnalysis')
+  const attendanceDates = getOneAttendanceDates(profile)
+
+  return `
+    <div class="result-head">
+      <div>
+        <div class="teaching-title">${escapeHtml(profile.name)} · ${escapeHtml(profile.grade || '')}</div>
+        <div class="teaching-meta">到课 ${attendanceDates.length} 次 · 出门测 ${exitScores.length} 条 · 试卷分析 ${paperScores.length} 条 · 反馈 ${feedbacks.length} 条</div>
+      </div>
+    </div>
+    <div class="teaching-data-columns">
+      <div>
+        <strong>出门测成绩</strong>
+        ${renderTeachingScoreRows(exitScores)}
+      </div>
+      <div>
+        <strong>试卷分析结果</strong>
+        ${renderTeachingScoreRows(paperScores)}
+      </div>
+      <div>
+        <strong>反馈记录</strong>
+        ${renderFeedbackRows(feedbacks)}
+      </div>
+      <div>
+        <strong>到课次数</strong>
+        ${renderDateList(attendanceDates)}
+      </div>
+    </div>
+    ${renderStudentRecordDeleteMenu({ scope: 'oneOnOne', profileId: profile.id, studentId: profile.id, studentName: profile.name })}
+  `
+}
+
+function getClassSessionDates(classId) {
+  return uniqueSortedDates((state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'class' && item.classId === classId)
+    .map(getTeachingRecordDate))
+}
+
+function getStudentFeedbackRows(classId, student) {
+  return (state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'class' && item.classId === classId)
+    .filter((item) => !isStudentExcluded(item.feedbackExclusions, student))
+    .filter((item) => {
+      if (item.feedbackScope === 'class') return true
+      return (item.feedbacks || []).some((feedback) => (
+        (student.id && feedback.studentId === student.id) || feedback.name === student.name
+      ))
+    })
+    .map((item) => ({
+      date: getTeachingRecordDate(item),
+      text: `${formatTeachingDate(getTeachingRecordDate(item))}    进行${getFeedbackFormatLabel(item)}`
+    }))
+    .sort(compareTeachingRows)
+}
+
+function getOneFeedbackRows(profile) {
+  return (state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'oneOnOne')
+    .filter((item) => !isStudentExcluded(item.feedbackExclusions, { id: profile.id, name: profile.name }))
+    .filter((item) => item.profileId === profile.id || item.studentName === profile.name || (item.feedbacks || []).some((feedback) => feedback.name === profile.name))
+    .map((item) => ({
+      date: getTeachingRecordDate(item),
+      text: `${formatTeachingDate(getTeachingRecordDate(item))}    进行${getFeedbackFormatLabel(item)}`
+    }))
+    .sort(compareTeachingRows)
+}
+
+function getStudentAttendanceDates(classId, student) {
+  return uniqueSortedDates((state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'class' && item.classId === classId)
+    .filter((item) => !isStudentExcluded(item.attendanceExclusions, student))
+    .filter((item) => {
+      if (item.feedbackScope === 'class') return true
+      return (item.feedbacks || []).some((feedback) => (
+        (student.id && feedback.studentId === student.id) || feedback.name === student.name
+      ))
+    })
+    .map(getTeachingRecordDate))
+}
+
+function getOneAttendanceDates(profile) {
+  const student = { id: profile.id, name: profile.name }
+  return uniqueSortedDates((state.teaching.data.feedbackHistory || [])
+    .filter((item) => item.mode === 'oneOnOne')
+    .filter((item) => !isStudentExcluded(item.attendanceExclusions, student))
+    .filter((item) => item.profileId === profile.id || item.studentName === profile.name || (item.feedbacks || []).some((feedback) => feedback.name === profile.name))
+    .map(getTeachingRecordDate))
+}
+
+function isStudentExcluded(exclusions, student) {
+  return Array.isArray(exclusions) && exclusions.some((item) => (
+    (student.id && item.studentId === student.id) || item.name === student.name
+  ))
+}
+
+function getStudentScoreRows(classId, student, scope, recordType = '') {
+  return (state.teaching.data.scoreRecords || [])
+    .filter((record) => record.scope === scope)
+    .filter((record) => !recordType || getTeachingScoreRecordType(record) === recordType)
+    .filter((record) => scope === 'class' ? record.classId === classId : (record.profileId === student.id || record.studentName === student.name))
+    .flatMap((record) => {
+      const matched = (record.students || []).filter((score) => (
+        (student.id && (score.studentId === student.id || score.id === student.id)) || score.name === student.name
+      ))
+      return matched.map((score) => ({
+        date: record.date || getLocalDateKey(new Date(record.createdAt || Date.now())),
+        text: `${formatTeachingDate(record.date)}    ${record.title || '出门测'}：${formatTeachingScore(score, record)}`
+      }))
+    })
+    .sort(compareTeachingRows)
+}
+
+function getTeachingScoreRecordType(record) {
+  if (record.recordType === 'paperAnalysis') return 'paperAnalysis'
+  if (record.recordType === 'exitTest') return 'exitTest'
+  if (String(record.sourceFeedbackId || '').startsWith('paper-report')) return 'paperAnalysis'
+  return 'exitTest'
+}
+
+function renderTeachingScoreRows(rows) {
+  if (!rows.length) return '<div class="teaching-empty-line">暂无成绩</div>'
+  return `<ul class="teaching-data-list">${rows.map((row) => `<li>${escapeHtml(row.text)}</li>`).join('')}</ul>`
+}
+
+function renderStudentRecordDeleteMenu(options) {
+  const attrs = [
+    `data-scope="${escapeHtml(options.scope)}"`,
+    `data-class-id="${escapeHtml(options.classId || '')}"`,
+    `data-profile-id="${escapeHtml(options.profileId || '')}"`,
+    `data-student-id="${escapeHtml(options.studentId || '')}"`,
+    `data-student-name="${escapeHtml(options.studentName || '')}"`
+  ].join(' ')
+
+  return `
+    <details class="teaching-delete-menu">
+      <summary>删除记录</summary>
+      <div class="teaching-delete-actions">
+        <button class="list-delete-button" data-teaching-action="delete-student-scores" ${attrs} type="button">删除出门测成绩</button>
+        <button class="list-delete-button" data-teaching-action="delete-student-paper-results" ${attrs} type="button">删除试卷分析结果</button>
+        <button class="list-delete-button" data-teaching-action="delete-student-feedbacks" ${attrs} type="button">删除反馈记录</button>
+        <button class="list-delete-button" data-teaching-action="delete-student-attendance" ${attrs} type="button">删除到课次数</button>
+      </div>
+    </details>
+  `
+}
+
+function renderFeedbackRows(rows) {
+  if (!rows.length) return '<div class="teaching-empty-line">暂无反馈记录</div>'
+  return `<ul class="teaching-data-list">${rows.map((row) => `<li>${escapeHtml(row.text)}</li>`).join('')}</ul>`
+}
+
+function renderDateList(dates) {
+  const normalized = uniqueSortedDates(dates)
+  if (!normalized.length) return '<div class="teaching-empty-line">暂无记录</div>'
+  return `<ul class="teaching-data-list">${normalized.map((date) => `<li>${escapeHtml(formatTeachingDate(date))}</li>`).join('')}</ul>`
+}
+
+function uniqueSortedDates(dates) {
+  return Array.from(new Set((dates || []).filter(Boolean))).sort((left, right) => String(left).localeCompare(String(right)))
+}
+
+function compareTeachingRows(left, right) {
+  return String(left.date).localeCompare(String(right.date))
+}
+
+function getTeachingRecordDate(item) {
+  return item.lessonDate || getLocalDateKey(new Date(item.createdAt || Date.now()))
+}
+
+function getFeedbackFormatLabel(item) {
+  const format = item.feedbackFormat === 'image' ? '图片式' : '文字式'
+  const scope = item.feedbackScope === 'class' ? '班级反馈' : '个性化反馈'
+  return `${format}${scope}`
+}
+
+function formatTeachingScore(score, record) {
+  if (score.absent) return '请假'
+  if (record.mode === 'grade') return score.grade || '-'
+  const hasScore = score.score !== null && score.score !== '' && typeof score.score !== 'undefined'
+  const value = hasScore && Number.isFinite(Number(score.score)) ? Number(score.score) : '-'
+  return `${value}/${record.totalScore || 100}`
+}
+
+function formatTeachingDate(dateValue) {
+  const raw = String(dateValue || '').trim()
+  const match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (match) return `${match[1]}-${Number(match[2])}-${Number(match[3])}`
+
+  const date = raw ? new Date(raw) : new Date()
+  if (Number.isNaN(date.getTime())) return raw
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
 }
 
 function renderTeachingRoster() {
@@ -1076,7 +1478,7 @@ function renderTeachingRoster() {
         </div>
         <div class="form-grid two">
           <label class="field"><span>班级名称</span><input data-teaching-field="newClassName" type="text" placeholder="例如：清北4班" /></label>
-          <label class="field"><span>年级</span><select data-teaching-field="newClassGrade"><option>初三</option><option selected>高一</option><option>高二</option><option>高三</option></select></label>
+          <label class="field"><span>年级</span><select data-teaching-field="newClassGrade"><option>初一</option><option>初二</option><option>初三</option><option selected>高一</option><option>高二</option><option>高三</option></select></label>
         </div>
         <label class="field"><span>学生名单</span><textarea data-teaching-field="newClassStudents" rows="5" placeholder="每行一个学生，也可以用逗号分隔"></textarea></label>
         <div class="panel-actions"><button class="primary-button" data-teaching-action="add-class" type="button">新增花名册</button></div>
@@ -1213,7 +1615,10 @@ function renderClassStats(classInfo, records) {
 
   const latest = records[records.length - 1]
   const scores = latest.mode === 'percent'
-    ? latest.students.map((student) => Number(student.score)).filter(Number.isFinite)
+    ? latest.students
+        .filter((student) => !student.absent && student.score !== null && student.score !== '')
+        .map((student) => Number(student.score))
+        .filter(Number.isFinite)
     : []
   const avg = scores.length ? (scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1) : '-'
   const max = scores.length ? Math.max(...scores) : '-'
@@ -1425,6 +1830,7 @@ function renderPaperReportArea() {
   const paper = getTeachingPaperState()
   const reports = Array.isArray(paper.report && paper.report.students) ? paper.report.students : []
   const isClass = paper.report && paper.report.scope === 'class'
+  const applied = Boolean(paper.report && paper.report.applied)
 
   if (isClass) {
     return `
@@ -1434,6 +1840,7 @@ function renderPaperReportArea() {
             <div class="teaching-title">学生 PDF 文档已准备</div>
             <div class="teaching-meta">班课会为每个学生生成一份单独的试卷分析 PDF，不合并成全班预览。</div>
           </div>
+          <button class="primary-button compact-button" data-teaching-action="apply-paper-report" type="button" ${applied ? 'disabled' : ''}>${applied ? '已应用' : '确认应用到教学数据'}</button>
         </div>
         <div class="paper-pdf-ready">
           <strong>${escapeHtml(paper.report.title || '试卷分析')}</strong>
@@ -1456,7 +1863,10 @@ function renderPaperReportArea() {
           <div class="teaching-title">PDF 文档已准备</div>
           <div class="teaching-meta">${reports.length} 名学生 · ${isClass ? '班课 PDF 已包含每题平均分' : '一对一/单独分析不显示班级平均分'}。</div>
         </div>
-        <button class="primary-button compact-button" data-teaching-action="export-paper-pdf" type="button">下载 PDF</button>
+        <div class="panel-actions inline-actions">
+          <button class="primary-button compact-button" data-teaching-action="apply-paper-report" type="button" ${applied ? 'disabled' : ''}>${applied ? '已应用' : '确认应用到教学数据'}</button>
+          <button class="secondary-button compact-button" data-teaching-action="export-paper-pdf" type="button">下载 PDF</button>
+        </div>
       </div>
       <div class="paper-pdf-ready">
         <strong>${escapeHtml(paper.report.title || '试卷分析')}</strong>
@@ -1789,10 +2199,13 @@ function generatePaperReport() {
   const report = {
     id: createId('paper-report'),
     scope: paper.scope,
+    classId: paper.scope === 'class' ? paper.selectedClassId : '',
+    profileId: paper.scope === 'one' ? paper.selectedProfileId : '',
     examType: paper.examType || '出门测',
     title: `${paper.examType || '出门测'} · ${paper.analysis.title || paper.fileName || '试卷分析'}`,
     fileName: paper.fileName,
     targetName: getPaperTargetName(),
+    date: getLocalDateKey(new Date()),
     totalScore,
     classAverageTotal,
     sections,
@@ -1803,7 +2216,6 @@ function generatePaperReport() {
   }
 
   paper.report = report
-  savePaperReportHistory(report)
   renderTeachingPanel()
   if (report.scope === 'class') {
     showToast('每个学生的单独 PDF 文档已生成')
@@ -1864,20 +2276,73 @@ function savePaperReportHistory(report) {
     examType: report.examType,
     fileName: report.fileName,
     scope: report.scope,
+    classId: report.classId || '',
+    profileId: report.profileId || '',
     targetName: report.targetName,
+    date: report.date || getLocalDateKey(new Date(report.createdAt || Date.now())),
     totalScore: report.totalScore,
     classAverageTotal: report.classAverageTotal,
     sections: report.sections,
     questionAverages: report.questionAverages,
     students: report.students,
     summary: report.summary,
+    applied: Boolean(report.applied),
     createdAt: report.createdAt
   }
   state.teaching.data.paperAnalyses = [
     historyItem,
     ...(state.teaching.data.paperAnalyses || []).filter((item) => item.id !== historyItem.id)
   ].slice(0, 80)
-  saveTeachingData({ silent: true })
+}
+
+async function applyPaperReportToTeachingData() {
+  const paper = getTeachingPaperState()
+  const report = paper.report
+  if (!report || report.applied) return
+
+  mergePrimaryIntoTeachingData()
+  report.applied = true
+  savePaperReportHistory(report)
+
+  const scoreRecord = buildScoreRecordFromPaperReport(report)
+  if (scoreRecord) {
+    state.teaching.data.scoreRecords = [
+      scoreRecord,
+      ...(state.teaching.data.scoreRecords || []).filter((item) => item.sourceFeedbackId !== report.id)
+    ]
+  }
+
+  await saveTeachingData({ silent: true })
+  renderTeachingPanel()
+  showToast('试卷分析已应用到教学数据')
+}
+
+function buildScoreRecordFromPaperReport(report) {
+  if (!report || !['class', 'one'].includes(report.scope)) return null
+
+  return {
+    id: createId('score'),
+    sourceFeedbackId: report.id,
+    recordType: 'paperAnalysis',
+    scope: report.scope === 'one' ? 'oneOnOne' : 'class',
+    classId: report.scope === 'class' ? report.classId || '' : '',
+    className: report.scope === 'class' ? report.targetName || '' : '',
+    profileId: report.scope === 'one' ? report.profileId || '' : '',
+    studentName: report.scope === 'one' && report.students && report.students[0] ? report.students[0].name : '',
+    title: report.examType || '试卷分析',
+    subject: report.title || '',
+    date: report.date || getLocalDateKey(new Date(report.createdAt || Date.now())),
+    mode: 'percent',
+    totalScore: Number(report.totalScore || 100),
+    students: (report.students || []).map((student) => ({
+      studentId: student.id || '',
+      name: student.name,
+      score: Number(student.total),
+      grade: '',
+      note: ''
+    })).filter((student) => student.name),
+    createdAt: Date.now()
+  }
 }
 
 function restorePaperReport(id) {
@@ -2048,8 +2513,15 @@ async function handleTeachingClick(event) {
   const id = button.dataset.id || ''
 
   if (action === 'sync-primary') {
-    mergePrimaryIntoTeachingData()
-    await saveTeachingData()
+    await syncTeachingProfiles()
+  }
+  if (action === 'select-data-class') {
+    state.teaching.selectedClassId = id
+    renderTeachingPanel()
+  }
+  if (action === 'select-data-one') {
+    state.teaching.selectedOneProfileId = id
+    renderTeachingPanel()
   }
   if (action === 'add-class') addTeachingClass()
   if (action === 'delete-class') deleteTeachingClass(id)
@@ -2067,6 +2539,7 @@ async function handleTeachingClick(event) {
   if (action === 'analyze-class') analyzeTeachingClass(id)
   if (action === 'analyze-paper') analyzePaperFile()
   if (action === 'generate-paper-report') generatePaperReport()
+  if (action === 'apply-paper-report') applyPaperReportToTeachingData()
   if (action === 'export-paper-pdf') exportPaperReportPdf(null, button.dataset.studentId || '')
   if (action === 'toggle-paper-student') togglePaperStudent(button.dataset.studentId || '')
   if (action === 'restore-paper-report') restorePaperReport(id)
@@ -2077,6 +2550,10 @@ async function handleTeachingClick(event) {
   if (action === 'clear-history') clearTeachingHistory()
   if (action === 'copy-history') copyTeachingHistory(id)
   if (action === 'delete-history') deleteTeachingHistory(id)
+  if (action === 'delete-student-scores') deleteStudentTeachingRecords(button, 'scores')
+  if (action === 'delete-student-paper-results') deleteStudentTeachingRecords(button, 'paper')
+  if (action === 'delete-student-feedbacks') deleteStudentTeachingRecords(button, 'feedbacks')
+  if (action === 'delete-student-attendance') deleteStudentTeachingRecords(button, 'attendance')
   if (action === 'add-one-profile') addTeachingOneProfile()
   if (action === 'select-one-profile') {
     state.teaching.selectedOneProfileId = id
@@ -2805,6 +3282,89 @@ function deleteTeachingHistory(id) {
   saveTeachingData()
 }
 
+function deleteStudentTeachingRecords(button, type) {
+  const student = {
+    id: button.dataset.studentId || '',
+    name: button.dataset.studentName || ''
+  }
+  const scope = button.dataset.scope || 'class'
+  const classId = button.dataset.classId || ''
+  const profileId = button.dataset.profileId || ''
+  const label = type === 'scores' ? '出门测成绩' : (type === 'paper' ? '试卷分析结果' : (type === 'feedbacks' ? '反馈记录' : '到课次数'))
+  const confirmed = window.confirm(`确认删除 ${student.name} 的${label}吗？`)
+  if (!confirmed) return
+
+  if (type === 'scores' || type === 'paper') {
+    const recordType = type === 'paper' ? 'paperAnalysis' : 'exitTest'
+    state.teaching.data.scoreRecords = (state.teaching.data.scoreRecords || [])
+      .map((record) => {
+        if (!isTeachingRecordForTarget(record, scope, classId, profileId)) return record
+        if (getTeachingScoreRecordType(record) !== recordType) return record
+        return {
+          ...record,
+          students: (record.students || []).filter((score) => !isSameTeachingStudent(score, student))
+        }
+      })
+      .filter((record) => (record.students || []).length)
+  }
+
+  if (type === 'feedbacks') {
+    state.teaching.data.feedbackHistory = (state.teaching.data.feedbackHistory || [])
+      .map((record) => {
+        if (!isTeachingRecordForTarget(record, scope, classId, profileId)) return record
+        if (record.feedbackScope === 'class') {
+          return {
+            ...record,
+            feedbackExclusions: addStudentExclusion(record.feedbackExclusions, student)
+          }
+        }
+        return {
+          ...record,
+          feedbacks: (record.feedbacks || []).filter((feedback) => !isSameTeachingStudent(feedback, student))
+        }
+      })
+      .filter((record) => record.feedbackScope === 'class' || (record.feedbacks || []).length)
+  }
+
+  if (type === 'attendance') {
+    state.teaching.data.feedbackHistory = (state.teaching.data.feedbackHistory || [])
+      .map((record) => {
+        if (!isTeachingRecordForTarget(record, scope, classId, profileId)) return record
+        return {
+          ...record,
+          attendanceExclusions: addStudentExclusion(record.attendanceExclusions, student)
+        }
+      })
+  }
+
+  saveTeachingData()
+  renderTeachingPanel()
+  showToast(`已删除${label}`)
+}
+
+function isTeachingRecordForTarget(record, scope, classId, profileId) {
+  if (scope === 'oneOnOne') {
+    if (record.scope !== 'oneOnOne' && record.mode !== 'oneOnOne') return false
+    return !profileId || record.profileId === profileId
+  }
+
+  if (record.scope !== 'class' && record.mode !== 'class') return false
+  return !classId || record.classId === classId
+}
+
+function isSameTeachingStudent(recordStudent, student) {
+  return (student.id && (recordStudent.studentId === student.id || recordStudent.id === student.id))
+    || recordStudent.name === student.name
+}
+
+function addStudentExclusion(exclusions, student) {
+  const list = Array.isArray(exclusions) ? exclusions.slice() : []
+  if (!isStudentExcluded(list, student)) {
+    list.push({ studentId: student.id || '', name: student.name || '' })
+  }
+  return list
+}
+
 function addTeachingOneProfile() {
   const name = window.prompt('请输入一对一学生姓名')
   if (!name || !name.trim()) return
@@ -2874,22 +3434,92 @@ async function captureTeachingPanel() {
   }, 'image/png')
 }
 
-function saveFeedbackHistory(payload, feedbacks) {
-  if (!Array.isArray(feedbacks) || !feedbacks.length) return
+async function applyFeedbackToTeachingData() {
+  const pending = state.pendingTeachingApplication
+  if (!pending || pending.applied || pending.applying) return
 
-  state.teaching.data.feedbackHistory.unshift({
+  pending.applying = true
+  renderTeachingApplyBar()
+
+  try {
+    if (!state.teaching.loaded) await loadTeachingData()
+    mergePrimaryIntoTeachingData()
+
+    const entry = buildFeedbackHistoryEntry(pending.payload, pending.feedbacks, pending.createdAt)
+    state.teaching.data.feedbackHistory = [
+      entry,
+      ...(state.teaching.data.feedbackHistory || []).filter((item) => item.id !== entry.id)
+    ].slice(0, 500)
+
+    const scoreRecord = buildScoreRecordFromFeedbackEntry(entry)
+    if (scoreRecord) {
+      state.teaching.data.scoreRecords = [
+        scoreRecord,
+        ...(state.teaching.data.scoreRecords || []).filter((item) => item.sourceFeedbackId !== entry.id)
+      ]
+    }
+
+    await saveTeachingData({ silent: true })
+    pending.applied = true
+    showToast('已应用到教学数据')
+    if (state.mode === 'teaching') renderTeachingPanel()
+  } catch (error) {
+    showToast(error.message || '应用教学数据失败')
+  } finally {
+    pending.applying = false
+    renderTeachingApplyBar()
+  }
+}
+
+function buildFeedbackHistoryEntry(payload, feedbacks, createdAt = Date.now()) {
+  return {
     id: createId('history'),
     mode: payload.mode,
+    classId: payload.classId || '',
     feedbackScope: payload.feedbackScope || 'individual',
     feedbackFormat: payload.feedbackFormat || 'text',
     className: payload.className,
+    profileId: payload.profileId || '',
+    studentName: payload.mode === 'oneOnOne' && payload.students && payload.students[0] ? payload.students[0].name : '',
     lessonTitle: payload.lessonTitle,
+    lessonDate: payload.lessonDate || getLocalDateKey(new Date(createdAt)),
+    lessonDateText: payload.lessonDateText || '',
     courseNote: payload.courseNote,
+    exitTest: payload.exitTest || null,
     feedbacks,
+    createdAt
+  }
+}
+
+function buildScoreRecordFromFeedbackEntry(entry) {
+  const exitTest = entry.exitTest
+  if (!exitTest || !Array.isArray(exitTest.students) || !exitTest.students.length) return null
+
+  const mode = exitTest.mode === 'grade' ? 'grade' : 'percent'
+  return {
+    id: createId('score'),
+    sourceFeedbackId: entry.id,
+    recordType: 'exitTest',
+    scope: entry.mode,
+    classId: entry.classId || '',
+    className: entry.className || '',
+    profileId: entry.profileId || '',
+    studentName: entry.studentName || '',
+    title: exitTest.selectedLecture ? `出门测 · ${exitTest.selectedLecture}` : '出门测',
+    subject: entry.lessonTitle || '',
+    date: entry.lessonDate || getLocalDateKey(new Date(entry.createdAt)),
+    mode,
+    totalScore: mode === 'grade' ? null : Number(exitTest.totalScore || 100),
+    students: exitTest.students.map((student) => ({
+      studentId: student.id || student.studentId || '',
+      name: student.name,
+      absent: Boolean(student.absent),
+      score: mode === 'grade' || student.absent ? null : Number(student.score),
+      grade: mode === 'grade' && !student.absent ? student.grade : '',
+      note: student.note || ''
+    })).filter((student) => student.name),
     createdAt: Date.now()
-  })
-  state.teaching.data.feedbackHistory = state.teaching.data.feedbackHistory.slice(0, 200)
-  saveTeachingData({ silent: true })
+  }
 }
 
 function getScoreRecordsForClass(classId) {
@@ -2979,7 +3609,10 @@ function drawScoreChart(canvas, points, title) {
 function getRecordAverageRate(record) {
   if (!record || record.mode === 'grade') return NaN
   const total = Number(record.totalScore || 100)
-  const scores = (record.students || []).map((student) => Number(student.score)).filter(Number.isFinite)
+  const scores = (record.students || [])
+    .filter((student) => !student.absent && student.score !== null && student.score !== '')
+    .map((student) => Number(student.score))
+    .filter(Number.isFinite)
   if (!scores.length || !total) return NaN
   const avg = scores.reduce((sum, score) => sum + score, 0) / scores.length
   return Math.max(0, Math.min(100, (avg / total) * 100))
@@ -3113,9 +3746,37 @@ function getProviderName(provider) {
   return 'OpenAI'
 }
 
+function getAccountStorageKey(baseKey) {
+  const accountId = state.access.user && state.access.user.id
+  return accountId ? `${baseKey}.${accountId}` : `${baseKey}.anonymous`
+}
+
+function resetAccountWorkspaceState() {
+  clearTimeout(scheduleFeedbackDataSync.timer)
+  clearTimeout(scheduleTeachingSave.timer)
+  state.classes = []
+  state.oneProfiles = []
+  state.selectedClassId = ''
+  state.selectedOneProfileId = ''
+  state.editingClassId = ''
+  state.editingOneProfileId = ''
+  state.feedbacks = []
+  state.lastGeneratedPayload = null
+  state.debug = null
+  state.adminUsers = []
+  state.pendingTeachingApplication = null
+  state.teaching.data = createEmptyTeachingData()
+  state.teaching.loaded = false
+  state.teaching.loading = false
+  state.teaching.selectedClassId = ''
+  state.teaching.selectedScoreClassId = ''
+  state.teaching.selectedOneProfileId = ''
+  state.exitTest.scores = {}
+}
+
 function loadClasses() {
   try {
-    const classes = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
+    const classes = JSON.parse(localStorage.getItem(getAccountStorageKey(STORAGE_KEY)) || '[]')
     state.classes = Array.isArray(classes) ? classes : []
   } catch (error) {
     state.classes = []
@@ -3128,7 +3789,7 @@ function loadClasses() {
 
 function loadOneProfiles() {
   try {
-    const profiles = JSON.parse(localStorage.getItem(ONE_PROFILE_STORAGE_KEY) || '[]')
+    const profiles = JSON.parse(localStorage.getItem(getAccountStorageKey(ONE_PROFILE_STORAGE_KEY)) || '[]')
     state.oneProfiles = Array.isArray(profiles) ? profiles : []
   } catch (error) {
     state.oneProfiles = []
@@ -3139,12 +3800,69 @@ function loadOneProfiles() {
   }
 }
 
-function persistClasses() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.classes))
+function persistClasses(options = {}) {
+  localStorage.setItem(getAccountStorageKey(STORAGE_KEY), JSON.stringify(state.classes))
+  if (!options.localOnly) scheduleFeedbackDataSync()
 }
 
-function persistOneProfiles() {
-  localStorage.setItem(ONE_PROFILE_STORAGE_KEY, JSON.stringify(state.oneProfiles))
+function persistOneProfiles(options = {}) {
+  localStorage.setItem(getAccountStorageKey(ONE_PROFILE_STORAGE_KEY), JSON.stringify(state.oneProfiles))
+  if (!options.localOnly) scheduleFeedbackDataSync()
+}
+
+async function loadFeedbackDataFromServer() {
+  if (!state.access.authenticated) return
+
+  try {
+    const response = await fetch('/api/feedback-data')
+    if (response.status === 404) return
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '读取档案数据失败')
+
+    const remote = data.data || {}
+    state.classes = Array.isArray(remote.classes) ? remote.classes : []
+    state.oneProfiles = Array.isArray(remote.oneProfiles) ? remote.oneProfiles : []
+    state.selectedClassId = state.classes[0] ? state.classes[0].id : ''
+    state.selectedOneProfileId = state.oneProfiles[0] ? state.oneProfiles[0].id : ''
+    state.editingClassId = state.selectedClassId
+    state.editingOneProfileId = state.selectedOneProfileId
+
+    persistClasses({ localOnly: true })
+    persistOneProfiles({ localOnly: true })
+  } catch (error) {
+    showToast(error.message || '档案数据暂时使用本机缓存')
+  }
+}
+
+function scheduleFeedbackDataSync() {
+  if (!state.access.authenticated) return
+  clearTimeout(scheduleFeedbackDataSync.timer)
+  scheduleFeedbackDataSync.timer = setTimeout(() => {
+    saveFeedbackDataToServer({ silent: true })
+  }, 500)
+}
+
+async function saveFeedbackDataToServer(options = {}) {
+  if (!state.access.authenticated) return false
+
+  try {
+    const response = await fetch('/api/feedback-data', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        classes: state.classes,
+        oneProfiles: state.oneProfiles
+      })
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '保存档案数据失败')
+
+    if (!options.silent) showToast('档案已同步到正式数据库')
+    return true
+  } catch (error) {
+    if (!options.silent) showToast(error.message || '档案同步失败')
+    return false
+  }
 }
 
 function render() {
@@ -3194,7 +3912,7 @@ function renderMode() {
 
   if (state.mode === 'teaching' || state.mode === 'paperAnalysis') {
     renderTeachingPanel()
-    if (!state.teaching.loading && !state.teaching.data.updatedAt) loadTeachingData()
+    if (!state.teaching.loading && !state.teaching.loaded) loadTeachingData()
   }
 }
 
@@ -3452,16 +4170,20 @@ function renderExitTestTable() {
 
   els.exitTestTable.innerHTML = students.map((student) => {
     const score = state.exitTest.scores[student.id] || {}
+    const isAbsent = Boolean(score.absent)
     return `
-      <div class="exit-test-row ${state.exitTest.mode === 'grade' ? 'grade-mode' : 'score-mode'}" data-student-id="${escapeHtml(student.id)}">
+      <div class="exit-test-row ${state.exitTest.mode === 'grade' ? 'grade-mode' : 'score-mode'} ${isAbsent ? 'is-absent' : ''}" data-student-id="${escapeHtml(student.id)}">
         <div class="student-name">${escapeHtml(student.name)}</div>
-        ${state.exitTest.mode === 'grade'
+        ${isAbsent
+          ? '<div class="exit-test-absence-value" aria-label="出门测状态">请假</div>'
+          : (state.exitTest.mode === 'grade'
           ? `<select data-exit-field="grade" aria-label="${escapeHtml(student.name)}出门测等级">
               <option value="">选择等级</option>
               ${['A', 'B', 'C', 'D'].map((grade) => `<option value="${grade}" ${score.grade === grade ? 'selected' : ''}>${grade}</option>`).join('')}
             </select>`
-          : `<input data-exit-field="score" type="number" min="0" max="${state.exitTest.totalScore || 100}" value="${escapeHtml(score.score ?? '')}" placeholder="填写分数" aria-label="${escapeHtml(student.name)}出门测分数" />`}
+          : `<input data-exit-field="score" type="number" min="0" max="${state.exitTest.totalScore || 100}" value="${escapeHtml(score.score ?? '')}" placeholder="填写分数" aria-label="${escapeHtml(student.name)}出门测分数" />`)}
         <input data-exit-field="note" type="text" value="${escapeHtml(score.note || '')}" placeholder="可选：错因或特殊情况" />
+        <button class="exit-test-leave-button ${isAbsent ? 'active' : ''}" data-exit-action="toggle-absence" type="button" aria-pressed="${isAbsent}" aria-label="${escapeHtml(student.name)}${isAbsent ? '取消请假' : '标记请假'}">${isAbsent ? '取消请假' : '请假'}</button>
       </div>
     `
   }).join('')
@@ -3550,13 +4272,30 @@ function handleExitTestInput(event) {
   state.exitTest.scores[studentId][field] = event.target.value
 }
 
+function handleExitTestAction(event) {
+  const button = event.target.closest('[data-exit-action="toggle-absence"]')
+  if (!button) return
+
+  const row = button.closest('[data-student-id]')
+  if (!row) return
+
+  const studentId = row.dataset.studentId
+  if (!state.exitTest.scores[studentId]) state.exitTest.scores[studentId] = {}
+  state.exitTest.scores[studentId].absent = !state.exitTest.scores[studentId].absent
+  renderExitTestTable()
+}
+
 function renderResults() {
   const imageMode = isImageFeedbackMode()
   els.copyAllBtn.disabled = !state.feedbacks.length
   els.resultNote.textContent = state.feedbacks.length
-    ? (imageMode ? '图片反馈报告已生成' : `${state.feedbacks.length} 条反馈 · 全部已展开`)
+    ? (imageMode ? `${state.feedbacks.length} 张图片反馈报告已生成 · 下方可逐张查看和导出` : `${state.feedbacks.length} 条反馈 · 全部已展开`)
     : '生成后会显示在这里'
-  renderDebugSummary()
+  renderTeachingApplyBar()
+  if (els.debugSummary) {
+    els.debugSummary.classList.add('hidden')
+    els.debugSummary.innerHTML = ''
+  }
 
   if (!state.feedbacks.length) {
     els.resultList.classList.remove('hidden')
@@ -3587,6 +4326,103 @@ function renderResults() {
   `).join('')
 }
 
+function normalizeGeneratedFeedbacksForPayload(feedbacks, payload = {}) {
+  const source = Array.isArray(feedbacks) ? feedbacks : []
+  const students = Array.isArray(payload.students) ? payload.students : []
+  if (payload.feedbackScope === 'class' || !students.length) return source
+
+  const usedIndexes = new Set()
+  const sharedFeedback = source.find((item) => item && item.templateFields)
+  const sharedFields = sharedFeedback ? sharedFeedback.templateFields : {}
+
+  return students.map((student, studentIndex) => {
+    let matchIndex = source.findIndex((item, index) => (
+      !usedIndexes.has(index)
+      && item
+      && item.studentId
+      && item.studentId === student.id
+    ))
+
+    if (matchIndex < 0) {
+      matchIndex = source.findIndex((item, index) => (
+        !usedIndexes.has(index)
+        && item
+        && item.name
+        && item.name === student.name
+      ))
+    }
+
+    if (matchIndex < 0 && source[studentIndex] && !usedIndexes.has(studentIndex)) {
+      matchIndex = studentIndex
+    }
+
+    if (matchIndex >= 0) {
+      usedIndexes.add(matchIndex)
+      const matched = source[matchIndex]
+      return {
+        ...matched,
+        studentId: student.id,
+        name: student.name
+      }
+    }
+
+    return buildMissingGeneratedFeedback(student, payload, sharedFields)
+  })
+}
+
+function buildMissingGeneratedFeedback(student, payload = {}, sharedFields = {}) {
+  const courseContent = String(sharedFields.courseContent || payload.lessonTitle || '本节课围绕课件核心内容进行学习。').trim()
+  const courseKnowledgePoint = String(sharedFields.courseKnowledgePoint || '1、理解本节课的核心知识点。\n2、掌握重点方法并完成对应练习。').trim()
+  const performanceText = [
+    `${student.name}同学本节课${student.performance || '表现良好'}`,
+    student.remark || student.keywords || '',
+    student.exitTestScore === '请假'
+      ? '本次出门测请假，成绩不计入统计'
+      : (student.exitTestScore ? `出门测成绩为${student.exitTestScore}` : '')
+  ].filter(Boolean).join('，')
+  const learningSuggestion = student.performance === '表现较差'
+    ? '建议课后回顾基础概念和典型例题，完成订正后再进行同类题巩固。'
+    : (student.performance === '表现优秀'
+        ? '建议继续保持课堂参与度，并尝试更有挑战的变式题。'
+        : '建议课后及时整理课堂重点和错题，保持稳定练习节奏。')
+  const performanceSentence = /[。！？!?]$/.test(performanceText)
+    ? performanceText
+    : `${performanceText}。`
+
+  return {
+    studentId: student.id,
+    name: student.name,
+    feedback: [
+      '【课程内容】',
+      courseContent,
+      '【核心重点】',
+      courseKnowledgePoint,
+      '【课堂表现】',
+      `${performanceSentence}${learningSuggestion}`
+    ].join('\n'),
+    templateFields: {
+      courseContent,
+      courseKnowledgePoint,
+      performanceText,
+      personalizedRemark: student.remark || '本节课整体状态稳定',
+      learningSuggestion,
+      subject: String(sharedFields.subject || '').trim()
+    }
+  }
+}
+
+function renderTeachingApplyBar() {
+  if (!els.teachingApplyBar || !els.applyTeachingDataBtn) return
+
+  const pending = state.pendingTeachingApplication
+  const shouldShow = Boolean(pending && state.feedbacks.length)
+  els.teachingApplyBar.classList.toggle('hidden', !shouldShow)
+  els.applyTeachingDataBtn.disabled = !shouldShow || pending.applying || pending.applied
+  els.applyTeachingDataBtn.textContent = pending && pending.applied
+    ? '已应用到教学数据'
+    : (pending && pending.applying ? '正在应用...' : '确认应用到教学数据')
+}
+
 function isImageFeedbackMode() {
   return (state.mode === 'class' || state.mode === 'oneOnOne')
     && els.feedbackFormatSelect
@@ -3607,34 +4443,139 @@ function renderImageReport(payload = null) {
 
   const selectedClass = getSelectedClass()
   const selectedProfile = getSelectedOneProfile()
-  const reportPayload = payload || buildGeneratePayload() || {}
+  const reportPayload = payload
+    || state.lastGeneratedPayload
+    || (state.pendingTeachingApplication && state.pendingTeachingApplication.payload)
+    || buildGeneratePayload()
+    || {}
   const reportDate = reportPayload.lessonDate ? getDateFromKey(reportPayload.lessonDate) : new Date()
-  const feedbackText = state.feedbacks.map((item) => item.feedback).join('\n\n')
-  const lessonTitle = reportPayload.lessonTitle || els.lessonTitleInput.value.trim() || '本节课程'
-  const reportSections = parseFeedbackReportSections(feedbackText)
-  const contentSource = reportSections.courseContent || reportPayload.courseNote || els.courseNoteInput.value || feedbackText
-  const courseLines = extractReportLines(contentSource)
-  const focusText = reportSections.studyFocus || ''
-  const performanceText = reportSections.performance || feedbackText || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
+  const lessonTitle = (reportPayload.lessonTitle || els.lessonTitleInput.value.trim() || '').trim()
   const homeworkText = reportPayload.homework || (els.homeworkInput ? els.homeworkInput.value.trim() : '')
-  const students = state.mode === 'oneOnOne'
-    ? getWorkingStudents()
-    : (selectedClass ? selectedClass.students : [])
+  const students = Array.isArray(reportPayload.students) && reportPayload.students.length
+    ? reportPayload.students
+    : (state.mode === 'oneOnOne'
+        ? getWorkingStudents()
+        : (selectedClass ? selectedClass.students : []))
   const reportScores = buildReportScoreRows(students, reportPayload.exitTest)
-  const hasScoreRows = reportScores.length > 0
-  const numericScores = reportScores.map((item) => Number(item.score)).filter(Number.isFinite)
+  const isClassOverall = reportPayload.feedbackScope === 'class'
+  const individualFeedbacks = normalizeGeneratedFeedbacksForPayload(state.feedbacks, reportPayload)
+  const reportItems = isClassOverall
+    ? [{
+        name: reportPayload.className || (selectedClass && selectedClass.name) || '班级整体',
+        feedback: state.feedbacks.map((item) => item.feedback).join('\n\n'),
+        templateFields: state.feedbacks[0] && state.feedbacks[0].templateFields,
+        scope: 'class'
+      }]
+    : individualFeedbacks.map((item) => ({
+        studentId: item.studentId,
+        name: item.name,
+        feedback: item.feedback,
+        templateFields: item.templateFields,
+        scope: 'individual'
+      }))
+
+  els.imageReportPreview.innerHTML = reportItems.map((item, index) => `
+    <div class="image-report-preview-item">
+      <div class="image-report-preview-head">
+        <div class="image-report-preview-title">
+          <span>${reportItems.length > 1 ? `第 ${index + 1} 张` : '图片反馈'}</span>
+          <strong>${escapeHtml(item.name || `报告${index + 1}`)}</strong>
+        </div>
+        <button class="secondary-button compact-button" data-action="copy-image-report" data-report-index="${index}" type="button">复制图片</button>
+      </div>
+      ${renderImageReportSheet({
+        item,
+        index,
+        reportDate,
+        reportPayload,
+        lessonTitle,
+        homeworkText,
+        reportScores,
+        selectedClass,
+        selectedProfile
+      })}
+    </div>
+  `).join('')
+}
+
+function renderImageReportSheet(options) {
+  const {
+    item,
+    index,
+    reportDate,
+    reportPayload,
+    lessonTitle,
+    homeworkText,
+    reportScores,
+    selectedClass,
+    selectedProfile
+  } = options
+  const reportSections = parseFeedbackReportSections(item.feedback)
+  const templateFields = item.templateFields && typeof item.templateFields === 'object' ? item.templateFields : {}
+  const subjectText = normalizeSubjectText(reportSections.subject || templateFields.subject || '')
+  const courseContentText = normalizeImageReportCourseText(
+    reportSections.courseContent
+      || templateFields.courseContent
+      || getManualCourseNoteForImageReport()
+      || '本节课围绕课件核心内容进行学习。'
+  )
+  const focusText = normalizeReportText(
+    reportSections.studyFocus
+      || templateFields.courseKnowledgePoint
+      || '1、理解本节课课件中的核心知识点。\n2、掌握课件中的重点方法与应用要求。'
+  )
+  const primaryPerformanceText = String(
+    reportSections.performance
+      || templateFields.performanceText
+      || item.feedback
+      || '本节课整体课堂秩序较好，学生能跟随老师完成主要学习任务。'
+  )
+  const performanceDetails = [
+    primaryPerformanceText,
+    !reportSections.performance
+      && templateFields.learningSuggestion
+      && !primaryPerformanceText.includes(templateFields.learningSuggestion)
+      ? `后续建议：${templateFields.learningSuggestion}`
+      : ''
+  ].filter(Boolean)
+  const performanceText = normalizeReportParagraphText(performanceDetails.join(' '))
+  const isIndividual = item.scope !== 'class'
+  const showAllScores = isIndividual
+    && state.mode === 'class'
+    && (reportPayload.showAllScoresInIndividualReports || (els.showAllScoresSelect && els.showAllScoresSelect.value === 'all'))
+  const scoreRows = isIndividual
+    ? (showAllScores
+        ? sortReportScoreRows(reportScores)
+        : reportScores.filter((score) => {
+            if (item.studentId && score.studentId) return score.studentId === item.studentId
+            return score.name === item.name
+          }))
+    : sortReportScoreRows(reportScores)
+  const hasScoreRows = scoreRows.length > 0
+  const scoredRows = scoreRows.filter((score) => (
+    !score.absent
+    && score.score !== null
+    && score.score !== ''
+    && Number.isFinite(Number(score.score))
+  ))
+  const numericScores = scoredRows.map((score) => Number(score.score))
   const avg = numericScores.length
     ? (numericScores.reduce((sum, score) => sum + score, 0) / numericScores.length).toFixed(1)
     : '-'
   const max = numericScores.length ? Math.max(...numericScores) : '-'
   const min = numericScores.length ? Math.min(...numericScores) : '-'
-  const rate = numericScores.length ? `${(reportScores.reduce((sum, item) => sum + Number(item.rate || 0), 0) / reportScores.length).toFixed(1)}%` : '-'
+  const rates = scoredRows.map((score) => Number(score.rate)).filter(Number.isFinite)
+  const rate = rates.length ? `${(rates.reduce((sum, value) => sum + value, 0) / rates.length).toFixed(1)}%` : '-'
+  const className = reportPayload.className || (selectedClass && selectedClass.name) || ''
+  const studentName = state.mode === 'oneOnOne'
+    ? ((selectedProfile && selectedProfile.name) || item.name || reportPayload.className || '')
+    : item.name
 
-  els.imageReportPreview.innerHTML = `
-    <article class="report-sheet" id="imageReportSheet">
+  return `
+    <article class="report-sheet image-report-sheet" id="${index === 0 ? 'imageReportSheet' : `imageReportSheet-${index}`}" data-image-report-sheet data-report-name="${escapeHtml(studentName || item.name || `报告${index + 1}`)}">
       <header class="report-header">
         <div></div>
-        <h2>数学课程反馈报告</h2>
+        <h2>${subjectText ? `${escapeHtml(subjectText)}课程反馈报告` : '课程反馈报告'}</h2>
         <div class="report-brand">
           <strong>升学帮</strong>
           <span>教学有章法 提分有路径</span>
@@ -3643,15 +4584,17 @@ function renderImageReport(payload = null) {
       <div class="report-meta">
         <div>日期：${reportDate.getFullYear()}年${reportDate.getMonth() + 1}月${reportDate.getDate()}日（${getChineseWeekday(reportDate)}）</div>
         ${reportPayload.timeSlot ? `<div>时段：${escapeHtml(reportPayload.timeSlot)}</div>` : ''}
-        <div>${state.mode === 'oneOnOne' ? '学生' : '班级'}：${escapeHtml(state.mode === 'oneOnOne' ? ((selectedProfile && selectedProfile.name) || reportPayload.className || '') : (reportPayload.className || (selectedClass && selectedClass.name) || ''))}</div>
-        <div>课程主题：${escapeHtml(lessonTitle)}</div>
+        ${isIndividual ? `<div>学生：${escapeHtml(studentName)}</div>` : `<div>班级：${escapeHtml(className || item.name)}</div>`}
+        ${isIndividual && className && state.mode === 'class' ? `<div>班级：${escapeHtml(className)}</div>` : ''}
+        ${lessonTitle ? `<div>课程主题：${escapeHtml(lessonTitle)}</div>` : ''}
       </div>
       <section>
         <h3>【课程内容】</h3>
-        <ol>
-          ${courseLines.slice(0, 4).map((line) => `<li>${escapeHtml(line)}</li>`).join('') || `<li>${escapeHtml(lessonTitle)}</li>`}
-        </ol>
-        <p class="report-paragraph">核心重点：${escapeHtml(focusText || courseLines[0] || lessonTitle)}。</p>
+        <div class="report-paragraph">${formatReportText(courseContentText)}</div>
+      </section>
+      <section>
+        <h3>【核心重点】</h3>
+        <div class="report-paragraph">${formatReportText(normalizeReportListLines(focusText))}</div>
       </section>
       <section>
         <h3>【课堂表现】</h3>
@@ -3662,14 +4605,14 @@ function renderImageReport(payload = null) {
         <div class="report-paragraph">${formatReportText(homeworkText)}</div>
       </section>` : ''}
       ${hasScoreRows ? `<section>
-        <h3>【学生成绩记录】</h3>
+        <h3>【出门测成绩${showAllScores ? '（全班）' : ''}】</h3>
         <table class="report-table">
           <thead><tr><th>姓名</th><th>成绩</th><th>正确率</th></tr></thead>
           <tbody>
-            ${reportScores.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.displayScore || item.score || '—')}</td><td>${item.rate !== null ? `${Number(item.rate).toFixed(1)}%` : '—'}</td></tr>`).join('')}
+            ${scoreRows.map((score) => `<tr><td>${escapeHtml(score.name)}</td><td>${escapeHtml(score.displayScore || score.score || '—')}</td><td>${score.rate !== null ? `${Number(score.rate).toFixed(1)}%` : '—'}</td></tr>`).join('')}
           </tbody>
         </table>
-        <p>平均分：${avg} 最高分：${max} 最低分：${min} 得分率：${rate}</p>
+        ${isIndividual ? '' : `<p>平均分：${avg} 最高分：${max} 最低分：${min} 得分率：${rate}</p>`}
       </section>` : ''}
       <footer>以上为本次课程反馈，如有疑问欢迎沟通。</footer>
     </article>
@@ -3680,7 +4623,8 @@ function parseFeedbackReportSections(text) {
   const sections = {
     courseContent: '',
     studyFocus: '',
-    performance: ''
+    performance: '',
+    subject: ''
   }
   const source = String(text || '')
     .replace(/\r\n/g, '\n')
@@ -3704,6 +4648,7 @@ function parseFeedbackReportSections(text) {
     if (/课堂内容|课程内容/.test(title)) sections.courseContent = content
     if (/学习重点|课程重点|核心重点/.test(title)) sections.studyFocus = content
     if (/课堂表现|学生表现/.test(title)) sections.performance = content
+    if (/科目|学科/.test(title)) sections.subject = content
   })
 
   if (!sections.performance) {
@@ -3721,6 +4666,13 @@ function normalizeReportText(text) {
     .trim()
 }
 
+function normalizeReportParagraphText(text) {
+  return normalizeReportText(text)
+    .replace(/\s*\n+\s*/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim()
+}
+
 function formatReportText(text) {
   const normalized = normalizeReportText(text)
   if (!normalized) return ''
@@ -3728,6 +4680,36 @@ function formatReportText(text) {
   return escapeHtml(normalized)
     .replace(/\n{2,}/g, '<br><br>')
     .replace(/\n/g, '<br>')
+}
+
+function normalizeReportListLines(text) {
+  return normalizeReportText(text)
+    .replace(/\s+([1-9][0-9]*[、.．])/g, '\n$1')
+    .replace(/([。；;])\s*([1-9][0-9]*[、.．])/g, '$1\n$2')
+}
+
+function normalizeImageReportCourseText(text) {
+  const normalized = normalizeReportText(text)
+    .split(/\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^(上课日期|上课时段|课后作业|班级\/共性备注|教材讲次)[：:]/.test(line))
+    .map((line) => line.replace(/^[1-9][0-9]*[、.．]\s*/, '').trim())
+    .join(' ')
+
+  return normalized || '本节课围绕课件核心内容进行学习。'
+}
+
+function normalizeSubjectText(text) {
+  return normalizeReportText(text)
+    .replace(/[【】]/g, '')
+    .replace(/^(科目|学科)[：:]/, '')
+    .trim()
+    .slice(0, 12)
+}
+
+function getManualCourseNoteForImageReport() {
+  return els.courseNoteInput ? els.courseNoteInput.value.trim() : ''
 }
 
 function extractReportLines(text) {
@@ -3742,9 +4724,22 @@ function extractReportLines(text) {
 function buildReportScoreRows(students, exitTest = null) {
   if (exitTest && Array.isArray(exitTest.students) && exitTest.students.length) {
     return exitTest.students.map((student) => {
+      if (student.absent) {
+        return {
+          name: student.name,
+          studentId: student.id,
+          absent: true,
+          score: null,
+          displayScore: '请假',
+          rate: null
+        }
+      }
+
       if (exitTest.mode === 'grade') {
         return {
           name: student.name,
+          studentId: student.id,
+          absent: false,
           score: null,
           displayScore: student.grade || '—',
           rate: null
@@ -3753,6 +4748,8 @@ function buildReportScoreRows(students, exitTest = null) {
 
       return {
         name: student.name,
+        studentId: student.id,
+        absent: false,
         score: Number(student.score),
         displayScore: `${student.score}/${exitTest.totalScore || 100}`,
         rate: exitTest.totalScore ? (Number(student.score) / Number(exitTest.totalScore)) * 100 : null
@@ -3763,9 +4760,39 @@ function buildReportScoreRows(students, exitTest = null) {
   return []
 }
 
+function sortReportScoreRows(rows) {
+  const gradeRank = {
+    A: 4,
+    B: 3,
+    C: 2,
+    D: 1
+  }
+
+  return [...rows].sort((left, right) => {
+    if (left.absent !== right.absent) return left.absent ? 1 : -1
+
+    const leftScore = Number(left.score)
+    const rightScore = Number(right.score)
+    const leftHasScore = left.score !== null && left.score !== '' && Number.isFinite(leftScore)
+    const rightHasScore = right.score !== null && right.score !== '' && Number.isFinite(rightScore)
+
+    if (leftHasScore || rightHasScore) {
+      if (!leftHasScore) return 1
+      if (!rightHasScore) return -1
+      return rightScore - leftScore
+    }
+
+    const leftGrade = gradeRank[String(left.displayScore || '').trim().toUpperCase()] || 0
+    const rightGrade = gradeRank[String(right.displayScore || '').trim().toUpperCase()] || 0
+    if (leftGrade !== rightGrade) return rightGrade - leftGrade
+
+    return String(left.name || '').localeCompare(String(right.name || ''), 'zh-Hans-CN')
+  })
+}
+
 async function downloadImageReport() {
-  const sheet = document.querySelector('#imageReportSheet')
-  if (!sheet) {
+  const sheets = Array.from(document.querySelectorAll('[data-image-report-sheet]'))
+  if (!sheets.length) {
     showToast('还没有图片反馈报告')
     return
   }
@@ -3774,10 +4801,81 @@ async function downloadImageReport() {
     return
   }
 
+  for (const [index, sheet] of sheets.entries()) {
+    const blob = await renderImageReportBlob(sheet)
+    if (blob) {
+      const name = sheet.dataset.reportName || `报告${index + 1}`
+      downloadBlob(blob, `${sanitizeFileName(name)}课程反馈报告.png`)
+    }
+  }
+}
+
+async function handleImageReportPreviewClick(event) {
+  const button = event.target.closest('[data-action="copy-image-report"]')
+  if (!button) return
+
+  const item = button.closest('.image-report-preview-item')
+  const sheet = item ? item.querySelector('[data-image-report-sheet]') : null
+  await copyImageReport(sheet, button)
+}
+
+async function copyImageReport(sheet, button = null) {
+  if (!sheet) {
+    showToast('还没有可复制的图片反馈')
+    return
+  }
+
+  if (!window.html2canvas) {
+    showToast('截图组件未加载，请刷新后重试')
+    return
+  }
+
+  if (!navigator.clipboard || !navigator.clipboard.write || !window.ClipboardItem) {
+    showToast('当前浏览器不支持直接复制图片，请先导出图片')
+    return
+  }
+
+  const reportName = sheet.dataset.reportName || '图片反馈'
+  const blobPromise = renderImageReportBlob(sheet)
+  const originalText = button ? button.textContent : ''
+  if (button) {
+    button.disabled = true
+    button.textContent = '复制中'
+  }
+
+  try {
+    await navigator.clipboard.write([
+      new window.ClipboardItem({ 'image/png': blobPromise })
+    ])
+    showToast('图片已复制')
+  } catch (error) {
+    const blob = await blobPromise.catch(() => null)
+    if (blob) {
+      try {
+        await navigator.clipboard.write([
+          new window.ClipboardItem({ 'image/png': blob })
+        ])
+        showToast('图片已复制')
+      } catch (fallbackError) {
+        downloadBlob(blob, `${sanitizeFileName(reportName)}课程反馈报告.png`)
+        showToast('当前浏览器不允许直接复制图片，已自动下载')
+      }
+    } else {
+      showToast('当前浏览器不允许直接复制图片，请使用导出图片')
+    }
+  } finally {
+    if (button) {
+      button.disabled = false
+      button.textContent = originalText || '复制图片'
+    }
+  }
+}
+
+async function renderImageReportBlob(sheet) {
   const canvas = await window.html2canvas(sheet, { scale: 2, backgroundColor: '#ffffff' })
-  canvas.toBlob((blob) => {
-    if (blob) downloadBlob(blob, `课程反馈报告-${Date.now()}.png`)
-  }, 'image/png')
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), 'image/png')
+  })
 }
 
 function getChineseWeekday(date) {
@@ -4335,9 +5433,14 @@ async function handleClassTextbookChange() {
     ? els.classTextbookInput.files[0]
     : null
   updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
-  if (!file || !els.classTextbookStatus) return
+  if (!file) {
+    state.classTextbook = { fileKey: '', lectures: [] }
+    return
+  }
+  if (!els.classTextbookStatus) return
 
   if (!isPdfFile(file)) {
+    state.classTextbook = { fileKey: getFileKey(file), lectures: [] }
     els.classTextbookStatus.textContent = `已选择：${file.name}。保存班级时会上传为整本教材。`
     return
   }
@@ -4346,28 +5449,80 @@ async function handleClassTextbookChange() {
 
   try {
     const lectures = await detectPdfLecturesFromFile(file)
+    state.classTextbook = { fileKey: getFileKey(file), lectures }
     els.classTextbookStatus.textContent = lectures.length
       ? `已选择：${file.name}，检测到 ${lectures.length} 个讲次，保存班级后可直接选择。`
       : `已选择：${file.name}，未检测到明显讲次，保存后默认读取整本教材。`
   } catch (error) {
+    state.classTextbook = { fileKey: getFileKey(file), lectures: [] }
     els.classTextbookStatus.textContent = `已选择：${file.name}，讲次检测失败，保存后仍可作为整本教材使用。`
   }
 }
 
 async function uploadClassTextbook(file) {
-  const formData = new FormData()
-  const lectures = isPdfFile(file) ? await detectPdfLecturesFromFile(file).catch(() => []) : []
-  formData.append('material', file, file.name)
-  formData.append('lectures', JSON.stringify(lectures))
+  const cachedLectures = state.classTextbook.fileKey === getFileKey(file)
+    ? state.classTextbook.lectures
+    : null
+  const lectures = Array.isArray(cachedLectures)
+    ? cachedLectures
+    : (isPdfFile(file) ? await detectPdfLecturesFromFile(file).catch(() => []) : [])
+  const materialId = createMaterialUploadId()
 
-  const response = await fetch('/api/materials', {
-    method: 'POST',
-    body: formData
-  })
-  const data = await response.json().catch(() => ({}))
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const formData = new FormData()
+    formData.append('material', file, file.name)
+    formData.append('lectures', JSON.stringify(lectures))
+    formData.append('materialId', materialId)
 
-  if (!response.ok || data.error) throw new Error(data.error || '教材上传失败')
-  return data.material
+    let response
+    try {
+      response = await fetch('/api/materials', {
+        method: 'POST',
+        body: formData
+      })
+    } catch (error) {
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 900))
+        continue
+      }
+      throw new Error('无法连接教材服务器，请刷新页面后重试')
+    }
+
+    const responseText = await response.text()
+    let data = {}
+    try {
+      data = responseText ? JSON.parse(responseText) : {}
+    } catch (error) {
+      data = {}
+    }
+
+    if (response.ok && !data.error && data.material) return data.material
+
+    const retryable = [500, 502, 503, 504].includes(response.status)
+    if (retryable && attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 900))
+      continue
+    }
+
+    throw new Error(data.error || getMaterialUploadStatusMessage(response.status))
+  }
+
+  throw new Error('教材上传失败，请刷新页面后重试')
+}
+
+function createMaterialUploadId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return `mat-${window.crypto.randomUUID()}`
+  }
+  return `mat-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function getMaterialUploadStatusMessage(status) {
+  if (status === 401) return '登录状态已失效，请重新登录后上传教材'
+  if (status === 413) return '教材文件超过服务器允许的大小'
+  if ([502, 503, 504].includes(status)) return '教材服务器正在重启，请稍后重试'
+  if (status >= 500) return '教材保存到数据库失败，请稍后重试'
+  return `教材上传失败（错误码 ${status || '未知'}）`
 }
 
 async function detectPdfLecturesFromFile(file) {
@@ -4392,10 +5547,12 @@ function renderFeedbackModeControls() {
 
   const isClassScope = state.mode === 'class' && els.feedbackScopeSelect.value === 'class'
   const isImageFormat = isImageFeedbackMode()
+  const isClassIndividualImage = state.mode === 'class' && !isClassScope && isImageFormat
 
   const studentTable = els.studentTable
   if (els.studentToolbar) els.studentToolbar.classList.toggle('hidden', isClassScope)
   if (studentTable) studentTable.classList.toggle('hidden', isClassScope)
+  if (els.scoreDisplayField) els.scoreDisplayField.classList.toggle('hidden', !isClassIndividualImage)
   if (els.classFeedbackTemplateField) els.classFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'class' || isImageFormat)
   if (els.oneFeedbackTemplateField) els.oneFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'oneOnOne' || isImageFormat)
   if (els.classFeedbackOptions) els.classFeedbackOptions.classList.toggle('hidden', !isClassScope)
@@ -4495,6 +5652,7 @@ function appendKeywordToTextarea(textarea, keyword) {
 
 function resetClassForm() {
   state.editingClassId = ''
+  state.classTextbook = { fileKey: '', lectures: [] }
   els.classNameInput.value = ''
   els.gradeSelect.value = '高一'
   els.studentListInput.value = ''
@@ -4520,7 +5678,8 @@ function resetOneProfileForm() {
 function resetOneLesson() {
   state.oneLesson = {
     performance: '表现良好',
-    remark: ''
+    remark: '',
+    keywords: ''
   }
 }
 
@@ -4531,6 +5690,7 @@ function fillClassForm(classInfo) {
   }
 
   state.editingClassId = classInfo.id
+  state.classTextbook = { fileKey: '', lectures: [] }
   els.classNameInput.value = classInfo.name
   els.gradeSelect.value = classInfo.grade
   els.studentListInput.value = classInfo.students.map((student) => student.name).join('\n')
@@ -4640,9 +5800,11 @@ async function saveClass() {
   state.editingClassId = classInfo.id
   state.feedbacks = []
   persistClasses()
-  saveTeachingFromPrimaryData()
+  els.saveClassBtn.disabled = true
+  els.saveClassBtn.textContent = '正在同步档案...'
+  const synced = await saveFeedbackDataToServer({ silent: true })
   render()
-  showToast('班级已保存')
+  showToast(synced ? '班级已保存并同步' : '班级已保存在本机，数据库同步失败，请稍后再试')
   els.saveClassBtn.disabled = false
   els.saveClassBtn.textContent = '保存班级'
 }
@@ -4683,7 +5845,6 @@ function saveOneProfile() {
   state.editingOneProfileId = profile.id
   state.feedbacks = []
   persistOneProfiles()
-  saveTeachingFromPrimaryData()
   render()
   showToast('学生档案已保存')
 }
@@ -4708,7 +5869,6 @@ function deleteClassById(classId) {
   state.feedbacks = []
   state.debug = null
   persistClasses()
-  saveTeachingFromPrimaryData()
   fillClassForm(getSelectedClass())
   render()
   showToast('班级已删除')
@@ -4735,7 +5895,6 @@ function deleteOneProfileById(profileId) {
   state.debug = null
   resetOneLesson()
   persistOneProfiles()
-  saveTeachingFromPrimaryData()
   fillOneProfileForm(getSelectedOneProfile())
   render()
   showToast('学生档案已删除')
@@ -4748,7 +5907,7 @@ async function generateFeedback() {
 
   const formData = new FormData()
 
-  const file = payload.materialId ? null : (els.coursewareInput.files && els.coursewareInput.files[0])
+  const files = payload.materialId ? [] : getSelectedCoursewareFiles()
   const exitTestFile = els.exitTestInput && els.exitTestInput.files
     ? els.exitTestInput.files[0]
     : null
@@ -4756,14 +5915,26 @@ async function generateFeedback() {
   setGenerating(true)
 
   try {
-    if (file && isPdfFile(file)) {
-      els.generateBtn.textContent = '正在读取 PDF...'
-      await appendPdfPreviewData(formData, file, payload)
-      els.generateBtn.textContent = 'AI 生成中...'
+    payload.coursewareMeta = []
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index]
+      if (isPdfFile(file)) {
+        els.generateBtn.textContent = `正在读取 PDF ${index + 1}/${files.length}`
+        await appendPdfPreviewData(formData, file, payload, index)
+      } else {
+        const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === getFileKey(file))
+        payload.coursewareMeta[index] = {
+          fileIndex: index,
+          fileName: file.name,
+          selectedPdfPages: item ? buildCoursewareSelectedPagesFromRange(item) : [],
+          clientPdfText: ''
+        }
+      }
+      formData.append('courseware', file)
     }
+    els.generateBtn.textContent = 'AI 生成中...'
 
     formData.append('payload', JSON.stringify(payload))
-    if (file) formData.append('courseware', file)
     if (exitTestFile && payload.exitTest) formData.append('exitTest', exitTestFile)
 
     const response = await fetch('/api/generate-feedback', {
@@ -4794,9 +5965,18 @@ async function generateFeedback() {
       renderAccessState()
     }
 
-    state.feedbacks = Array.isArray(data.feedbacks) ? data.feedbacks : []
+    state.feedbacks = normalizeGeneratedFeedbacksForPayload(data.feedbacks, payload)
+    state.lastGeneratedPayload = payload
     state.debug = data.debug || null
-    saveFeedbackHistory(payload, state.feedbacks)
+    state.pendingTeachingApplication = {
+      id: createId('pending-teaching'),
+      payload,
+      feedbacks: state.feedbacks,
+      createdAt: Date.now(),
+      applying: false,
+      applied: false
+    }
+    clearGenerationInstruction()
     renderResults()
     renderImageReport(payload)
     showToast(data.demo ? (data.message || '已生成演示反馈，配置 API Key 后会调用 AI') : '反馈已生成')
@@ -4811,6 +5991,9 @@ async function generateFeedback() {
 function buildGeneratePayload() {
   const lessonTitle = els.lessonTitleInput.value.trim()
   const courseNote = els.courseNoteInput.value.trim()
+  const generationInstruction = els.generationInstructionInput
+    ? els.generationInstructionInput.value.trim()
+    : ''
 
   if (state.mode === 'class') {
     const selectedClass = getSelectedClass()
@@ -4822,7 +6005,7 @@ function buildGeneratePayload() {
 
     const selectedLecture = getSelectedTextbookLecture(selectedClass)
     const hasStoredMaterial = Boolean(selectedClass && selectedClass.materialMode === 'book' && selectedClass.textbook)
-    if (!lessonTitle && !courseNote && !els.coursewareInput.files.length && !hasStoredMaterial) {
+    if (!lessonTitle && !courseNote && !hasSelectedCoursewareFiles() && !hasStoredMaterial) {
       showToast('请填写课程主题、补充内容或导入课件')
       return null
     }
@@ -4835,6 +6018,7 @@ function buildGeneratePayload() {
     const currentTemplate = els.templateInput.value.trim() || selectedClass.template
     const feedbackScope = els.feedbackScopeSelect ? els.feedbackScopeSelect.value : 'individual'
     const feedbackFormat = els.feedbackFormatSelect ? els.feedbackFormatSelect.value : 'text'
+    const showAllScoresInIndividualReports = els.showAllScoresSelect && els.showAllScoresSelect.value === 'all'
     const classRemark = els.classRemarkInput ? els.classRemarkInput.value.trim() : ''
     const homework = els.homeworkInput ? els.homeworkInput.value.trim() : ''
     const schedule = buildClassSchedulePayload()
@@ -4848,7 +6032,8 @@ function buildGeneratePayload() {
           id: `${selectedClass.id}-class-summary`,
           name: selectedClass.name,
           performance: '班级整体反馈',
-          remark: classRemark || '请根据班级关键词和课程内容生成整班反馈'
+          remark: '',
+          keywords: classRemark
         }]
       : selectedClass.students.map((student) => ({
           ...student,
@@ -4859,9 +6044,12 @@ function buildGeneratePayload() {
       mode: 'class',
       feedbackScope,
       feedbackFormat,
+      showAllScoresInIndividualReports,
+      classId: selectedClass.id,
       className: selectedClass.name,
       grade: selectedClass.grade,
       template: currentTemplate,
+      generationInstruction,
       lessonTitle,
       lessonDate: schedule.date,
       lessonDateText: schedule.dateText,
@@ -4892,7 +6080,7 @@ function buildGeneratePayload() {
     return null
   }
 
-  if (!lessonTitle && !courseNote && !els.coursewareInput.files.length) {
+  if (!lessonTitle && !courseNote && !hasSelectedCoursewareFiles()) {
     showToast('请填写课程主题、补充内容或导入课件')
     return null
   }
@@ -4907,9 +6095,11 @@ function buildGeneratePayload() {
     mode: 'oneOnOne',
     feedbackScope: 'individual',
     feedbackFormat,
+    profileId: selectedProfile.id,
     className: `${selectedProfile.name} 一对一`,
     grade: selectedProfile.grade,
     template: currentTemplate,
+    generationInstruction,
     lessonTitle,
     lessonDate: schedule.date,
     lessonDateText: schedule.dateText,
@@ -4924,6 +6114,7 @@ function buildGeneratePayload() {
       name: selectedProfile.name,
       performance: state.oneLesson.performance,
       remark: state.oneLesson.remark,
+      keywords: state.oneLesson.keywords,
       personality: els.onePersonalityInput.value.trim() || selectedProfile.personality,
       habit: els.oneHabitInput.value.trim() || selectedProfile.habit
     }]
@@ -4935,6 +6126,10 @@ function setGenerating(isGenerating) {
   els.generateBtn.textContent = isGenerating ? 'AI 生成中...' : 'AI 生成反馈'
 }
 
+function clearGenerationInstruction() {
+  if (els.generationInstructionInput) els.generationInstructionInput.value = ''
+}
+
 function isPdfFile(file) {
   return file && (
     file.type === 'application/pdf'
@@ -4942,21 +6137,73 @@ function isPdfFile(file) {
   )
 }
 
-async function handleCoursewareChange() {
-  const file = getCoursewareFile()
-  updateFilePicker(els.coursewareInput, els.coursewareFileName)
-  resetPdfPageSelection()
+function isWordFile(fileOrName) {
+  const name = typeof fileOrName === 'string' ? fileOrName : String(fileOrName && fileOrName.name || '')
+  return /\.(doc|docx)$/i.test(name)
+}
 
-  if (file && isPdfFile(file)) {
-    await loadPdfPageSelection(file, true)
-    return
+function isTextCoursewareFile(fileOrName) {
+  const name = typeof fileOrName === 'string' ? fileOrName : String(fileOrName && fileOrName.name || '')
+  return /\.(doc|docx|pptx|txt|md)$/i.test(name)
+}
+
+function isImageCoursewareFile(fileOrName) {
+  const file = typeof fileOrName === 'string' ? null : fileOrName
+  const name = typeof fileOrName === 'string' ? fileOrName : String(fileOrName && fileOrName.name || '')
+  const type = String(file && file.type || '')
+  return type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(name)
+}
+
+function supportsCoursewarePageRange(item) {
+  return Boolean(item && (item.isPdf || item.isTextDocument))
+}
+
+async function handleCoursewareChange() {
+  const addedFiles = els.coursewareInput && els.coursewareInput.files
+    ? Array.from(els.coursewareInput.files)
+    : []
+  addCoursewareFiles(addedFiles)
+  if (els.coursewareInput) els.coursewareInput.value = ''
+  const files = getCoursewareFiles()
+  const pdfFiles = files.filter(isPdfFile)
+  updateFilePicker(els.coursewareInput, els.coursewareFileName)
+  syncCoursewareSelectionItems(files)
+  renderPdfPageSelection()
+
+  if (pdfFiles.length) {
+    await loadPdfPageSelections(pdfFiles, false)
+    syncCoursewareSelectionItems(files)
+    renderPdfPageSelection()
   }
 
+  const textFiles = files.filter((file) => isTextCoursewareFile(file))
+  await detectCoursewareTextLectures(textFiles)
+  syncCoursewareSelectionItems(files)
   renderPdfPageSelection()
 }
 
 function getCoursewareFile() {
   return els.coursewareInput.files && els.coursewareInput.files[0]
+}
+
+function getCoursewareFiles() {
+  return Array.isArray(state.coursewareFiles) ? state.coursewareFiles : []
+}
+
+function addCoursewareFiles(files) {
+  const existed = new Map(getCoursewareFiles().map((file) => [getFileKey(file), file]))
+  files.forEach((file) => existed.set(getFileKey(file), file))
+  state.coursewareFiles = Array.from(existed.values())
+}
+
+function getSelectedCoursewareFiles() {
+  const items = Array.isArray(state.pdfSelection.items) ? state.pdfSelection.items : []
+  const includedByKey = new Map(items.map((item) => [item.fileKey, item.included !== false]))
+  return getCoursewareFiles().filter((file) => includedByKey.get(getFileKey(file)) !== false)
+}
+
+function hasSelectedCoursewareFiles() {
+  return getSelectedCoursewareFiles().length > 0
 }
 
 function getFileKey(file) {
@@ -4966,6 +6213,8 @@ function getFileKey(file) {
 
 function resetPdfPageSelection() {
   state.pdfSelection = {
+    items: [],
+    activeFileKey: '',
     fileKey: '',
     fileName: '',
     pageCount: 0,
@@ -4979,49 +6228,89 @@ function resetPdfPageSelection() {
 }
 
 async function loadPdfPageSelection(file, openWhenReady = false) {
+  try {
+    const item = await loadPdfSelectionItem(file)
+    state.pdfSelection = {
+      ...item,
+      items: [item],
+      activeFileKey: item.fileKey,
+      isOpen: openWhenReady && (item.lectures.length > 1 || item.pageCount > 40)
+    }
+    renderPdfPageSelection()
+
+    if (openWhenReady && item.lectures.length > 1) {
+      showToast(`检测到 ${item.lectures.length} 个讲次，请选择要读取的讲次`)
+    } else if (openWhenReady && item.pageCount > 40) {
+      showToast('未检测到多讲，已默认读取全文；页数较多时可手动改页码')
+    } else if (openWhenReady) {
+      showToast('未检测到多讲，默认读取整个 PDF')
+    }
+  } catch (error) {
+    state.pdfSelection.error = error.message || 'PDF 页面读取失败'
+    renderPdfPageSelection()
+    showToast(state.pdfSelection.error)
+  }
+}
+
+async function loadPdfPageSelections(files, openWhenReady = false) {
   if (!window.pdfjsLib) {
     showToast('PDF 解析组件加载失败，请刷新页面重试')
     renderPdfPageSelection()
     return
   }
 
+  const previousItems = new Map((state.pdfSelection.items || []).map((item) => [item.fileKey, item]))
   state.pdfSelection = {
-    fileKey: getFileKey(file),
-    fileName: file.name,
+    items: files.map((file) => ({
+      fileKey: getFileKey(file),
+      fileName: file.name,
+      pageCount: 0,
+      selectedPages: [],
+      lectures: [],
+      selectedLectureIndex: '',
+      loading: true,
+      error: ''
+    })),
+    activeFileKey: files[0] ? getFileKey(files[0]) : '',
+    fileKey: files[0] ? getFileKey(files[0]) : '',
+    fileName: files[0] ? files[0].name : '',
     pageCount: 0,
     selectedPages: [],
     lectures: [],
     selectedLectureIndex: '',
     loading: true,
-    isOpen: true,
+    isOpen: false,
     error: ''
   }
   renderPdfPageSelection()
 
   try {
-    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-    const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-    const pageCount = pdf.numPages
-    const lectures = await detectPdfLectures(pdf)
-    const firstLecture = lectures[0]
-
-    state.pdfSelection.pageCount = pageCount
-    state.pdfSelection.lectures = lectures
-    state.pdfSelection.selectedLectureIndex = firstLecture ? '0' : ''
-    state.pdfSelection.selectedPages = firstLecture
-      ? buildPageRange(firstLecture.startPage, firstLecture.endPage)
-      : Array.from({ length: pageCount }, (item, index) => index + 1)
-    state.pdfSelection.loading = false
-    state.pdfSelection.isOpen = openWhenReady && (lectures.length > 1 || pageCount > 40)
+    const items = []
+    for (const file of files) {
+      items.push(await loadPdfSelectionItem(file))
+    }
+    const loaded = new Map(items.map((item) => [item.fileKey, item]))
+    const mergedItems = getCoursewareFiles().map((file) => {
+      const fileKey = getFileKey(file)
+      return createCoursewareSelectionItem(file, {
+        ...(previousItems.get(fileKey) || {}),
+        ...(loaded.get(fileKey) || {})
+      })
+    })
+    const active = mergedItems.find((item) => item.fileKey === state.pdfSelection.activeFileKey && item.isPdf)
+      || mergedItems.find((item) => item.isPdf)
+      || {}
+    state.pdfSelection = {
+      ...state.pdfSelection,
+      ...active,
+      items: mergedItems,
+      activeFileKey: active.fileKey || '',
+      loading: false,
+      isOpen: Boolean(openWhenReady)
+    }
     renderPdfPageSelection()
 
-    if (openWhenReady && lectures.length > 1) {
-      showToast(`检测到 ${lectures.length} 个讲次，请选择要读取的讲次`)
-    } else if (openWhenReady && pageCount > 40) {
-      showToast('未检测到多讲，已默认读取全文；页数较多时可手动改页码')
-    } else if (openWhenReady) {
-      showToast('未检测到多讲，默认读取整个 PDF')
-    }
+    if (openWhenReady) showToast(`已读取 ${items.length} 个 PDF，请逐个确认页码范围`)
   } catch (error) {
     state.pdfSelection.loading = false
     state.pdfSelection.error = error.message || 'PDF 页面读取失败'
@@ -5030,12 +6319,96 @@ async function loadPdfPageSelection(file, openWhenReady = false) {
   }
 }
 
-async function openPdfPageSelection() {
-  const file = getCoursewareFile()
-  if (!file || !isPdfFile(file)) return
+async function loadPdfSelectionItem(file) {
+  if (!window.pdfjsLib) throw new Error('PDF 解析组件加载失败，请刷新页面重试')
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+  const pageCount = pdf.numPages
+  const lectures = await detectPdfLectures(pdf)
+  const firstLecture = lectures[0]
+  const selectedPages = firstLecture
+    ? buildPageRange(firstLecture.startPage, firstLecture.endPage)
+    : Array.from({ length: pageCount }, (item, index) => index + 1)
+  return {
+    fileKey: getFileKey(file),
+    fileName: file.name,
+    isPdf: true,
+    isWord: false,
+    included: true,
+    pageCount,
+    selectedPages,
+    lectures,
+    selectedLectureIndex: firstLecture ? '0' : '',
+    rangeStartPage: selectedPages[0] || 1,
+    rangeEndPage: selectedPages[selectedPages.length - 1] || pageCount || '',
+    loading: false,
+    isOpen: false,
+    error: ''
+  }
+}
 
-  if (state.pdfSelection.fileKey !== getFileKey(file) || !state.pdfSelection.pageCount) {
-    await loadPdfPageSelection(file, true)
+async function detectCoursewareTextLectures(files) {
+  const candidates = files
+    .map((file) => ({
+      file,
+      item: (state.pdfSelection.items || []).find((entry) => entry.fileKey === getFileKey(file))
+    }))
+    .filter(({ item }) => item && !item.lectureDetectionDone && !item.loading)
+
+  if (!candidates.length) return
+
+  candidates.forEach(({ item }) => {
+    item.loading = true
+    item.error = ''
+  })
+  renderPdfPageSelection()
+
+  for (const { file } of candidates) {
+    const fileKey = getFileKey(file)
+    const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+    if (!item) continue
+
+    try {
+      const formData = new FormData()
+      formData.append('courseware', file)
+      const response = await fetch('/api/courseware-lectures', {
+        method: 'POST',
+        body: formData
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || '讲次识别失败')
+
+      const nextItem = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+      if (!nextItem) continue
+
+      nextItem.lectures = Array.isArray(data.lectures) ? data.lectures : []
+      nextItem.pageCount = Number(data.pageCount || 0)
+      nextItem.loading = false
+      nextItem.lectureDetectionDone = true
+      nextItem.error = ''
+
+      if (nextItem.lectures.length > 1 && !nextItem.selectedLectureIndex && !nextItem.selectedPages.length) {
+        applyCoursewareLectureSelection(nextItem, '0')
+      }
+    } catch (error) {
+      const nextItem = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+      if (nextItem) {
+        nextItem.loading = false
+        nextItem.lectureDetectionDone = true
+        nextItem.error = '未能自动识别讲次，可手动输入页码'
+      }
+    }
+    renderPdfPageSelection()
+  }
+}
+
+async function openPdfPageSelection() {
+  const pdfFiles = getCoursewareFiles().filter(isPdfFile)
+  const file = pdfFiles[0]
+  if (!file) return
+
+  if (!state.pdfSelection.items.length) {
+    await loadPdfPageSelections(pdfFiles, true)
     return
   }
 
@@ -5049,11 +6422,12 @@ function closePdfPageModal() {
 }
 
 function cancelPdfPageSelection() {
+  state.coursewareFiles = []
   els.coursewareInput.value = ''
   updateFilePicker(els.coursewareInput, els.coursewareFileName)
   resetPdfPageSelection()
   renderPdfPageSelection()
-  showToast('已取消上传 PDF')
+  showToast('已取消上传文件')
 }
 
 function confirmPdfPageSelection() {
@@ -5071,12 +6445,14 @@ function selectAllPdfPages() {
   const pageCount = state.pdfSelection.pageCount
   state.pdfSelection.selectedPages = Array.from({ length: pageCount }, (item, index) => index + 1)
   state.pdfSelection.selectedLectureIndex = ''
+  syncActivePdfSelectionItem()
   renderPdfPageSelection()
 }
 
 function clearPdfPages() {
   state.pdfSelection.selectedPages = state.pdfSelection.pageCount ? [1] : []
   state.pdfSelection.selectedLectureIndex = ''
+  syncActivePdfSelectionItem()
   renderPdfPageSelection()
 }
 
@@ -5085,6 +6461,216 @@ function updatePdfPageSelectionFromGrid(event) {
 
   syncPdfPageRangeInputs()
   renderPdfPageSelection()
+}
+
+function handlePdfPageGridClick(event) {
+  const button = event.target.closest('[data-pdf-file-key]')
+  if (!button) return
+  setActivePdfSelection(button.dataset.pdfFileKey)
+  renderPdfPageSelection()
+}
+
+function syncCoursewareSelectionItems(files = getCoursewareFiles()) {
+  const existed = new Map((state.pdfSelection.items || []).map((item) => [item.fileKey, item]))
+  const nextItems = files.map((file) => createCoursewareSelectionItem(file, existed.get(getFileKey(file))))
+  const active = nextItems.find((item) => item.fileKey === state.pdfSelection.activeFileKey && item.isPdf)
+    || nextItems.find((item) => item.isPdf)
+  state.pdfSelection.items = nextItems
+  if (active) {
+    state.pdfSelection = {
+      ...state.pdfSelection,
+      ...active,
+      activeFileKey: active.fileKey
+    }
+  }
+}
+
+function createCoursewareSelectionItem(file, previous = null) {
+  const fileKey = getFileKey(file)
+  const isPdf = isPdfFile(file)
+  const isTextDocument = isTextCoursewareFile(file)
+  const rangeStartPage = previous && previous.rangeStartPage !== undefined
+    ? previous.rangeStartPage
+    : (previous && previous.wordStartPage !== undefined ? previous.wordStartPage : '')
+  const rangeEndPage = previous && previous.rangeEndPage !== undefined
+    ? previous.rangeEndPage
+    : (previous && previous.wordEndPage !== undefined ? previous.wordEndPage : '')
+
+  return {
+    ...(previous || {}),
+    fileKey,
+    fileName: file.name,
+    isPdf,
+    isWord: isWordFile(file),
+    isTextDocument,
+    isImage: isImageCoursewareFile(file),
+    included: previous ? previous.included !== false : true,
+    rangeStartPage,
+    rangeEndPage,
+    wordStartPage: rangeStartPage || 1,
+    wordEndPage: rangeEndPage || '',
+    pageCount: Number(previous && previous.pageCount || 0),
+    selectedPages: Array.isArray(previous && previous.selectedPages) ? previous.selectedPages.slice() : [],
+    lectures: Array.isArray(previous && previous.lectures) ? previous.lectures.slice() : [],
+    selectedLectureIndex: previous && previous.selectedLectureIndex !== undefined ? previous.selectedLectureIndex : '',
+    loading: Boolean(previous && previous.loading),
+    lectureDetectionDone: Boolean(previous && previous.lectureDetectionDone),
+    error: previous && previous.error ? previous.error : ''
+  }
+}
+
+function handleCoursewareSelectionChange(event) {
+  const isRelevantControl = event.target.matches('[data-courseware-include]')
+    || event.target.matches('[data-courseware-range]')
+    || event.target.matches('[data-courseware-lecture]')
+  if (!isRelevantControl) return
+
+  if (event.target.matches('[data-courseware-include]')) {
+    const fileKey = event.target.dataset.coursewareInclude
+    const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+    if (item) item.included = event.target.checked
+  }
+  if (event.target.matches('[data-courseware-range]')) {
+    const fileKey = event.target.dataset.coursewareRange
+    const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+    if (item) {
+      if (event.target.dataset.rangeField === 'start') item.rangeStartPage = normalizeRangeInputValue(event.target.value)
+      if (event.target.dataset.rangeField === 'end') item.rangeEndPage = normalizeRangeInputValue(event.target.value)
+      item.wordStartPage = item.rangeStartPage || 1
+      item.wordEndPage = item.rangeEndPage || ''
+      item.selectedLectureIndex = ''
+      item.selectedPages = buildCoursewareSelectedPagesFromRange(item)
+    }
+  }
+  if (event.target.matches('[data-courseware-lecture]')) {
+    const fileKey = event.target.dataset.coursewareLecture
+    const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+    if (item) {
+      applyCoursewareLectureSelection(item, event.target.value)
+    }
+  }
+  renderPdfPageSelection()
+}
+
+function handleCoursewareSelectionClick(event) {
+  const removeButton = event.target.closest('[data-courseware-remove]')
+  if (removeButton) {
+    removeCoursewareFile(removeButton.dataset.coursewareRemove)
+    renderPdfPageSelection()
+    return
+  }
+}
+
+function removeCoursewareFile(fileKey) {
+  state.coursewareFiles = getCoursewareFiles().filter((file) => getFileKey(file) !== fileKey)
+  state.pdfSelection.items = (state.pdfSelection.items || []).filter((item) => item.fileKey !== fileKey)
+  const active = state.pdfSelection.items.find((item) => item.isPdf)
+  if (active) {
+    state.pdfSelection = {
+      ...state.pdfSelection,
+      ...active,
+      activeFileKey: active.fileKey,
+      isOpen: false
+    }
+  }
+  else {
+    state.pdfSelection = {
+      ...state.pdfSelection,
+      activeFileKey: '',
+      fileKey: '',
+      fileName: '',
+      pageCount: 0,
+      selectedPages: [],
+      lectures: [],
+      selectedLectureIndex: '',
+      loading: false,
+      isOpen: false,
+      error: ''
+    }
+  }
+  updateFilePicker(els.coursewareInput, els.coursewareFileName)
+}
+
+function normalizeRangeInputValue(value) {
+  if (value === '' || value === null || value === undefined) return ''
+  const number = Math.max(1, Math.floor(Number(value) || 1))
+  return Number.isFinite(number) ? number : ''
+}
+
+function buildWordSelectedPages(item) {
+  return buildCoursewareSelectedPagesFromRange(item)
+}
+
+function buildCoursewareSelectedPagesFromRange(item) {
+  if (!supportsCoursewarePageRange(item)) return []
+
+  const start = normalizeRangeInputValue(item.rangeStartPage)
+  const end = normalizeRangeInputValue(item.rangeEndPage)
+  const pageCount = Math.max(0, Number(item.pageCount || 0))
+
+  if (!start && !end) return []
+
+  const left = start || 1
+  const right = end || pageCount || left
+  return buildPageRange(Math.min(left, right), Math.max(left, right))
+}
+
+function applyCoursewareLectureSelection(item, selectedValue) {
+  if (selectedValue === '' || selectedValue === null || selectedValue === undefined) {
+    item.selectedLectureIndex = ''
+    item.selectedPages = buildCoursewareSelectedPagesFromRange(item)
+    return
+  }
+
+  const index = Number(selectedValue)
+  const lecture = Array.isArray(item.lectures) && Number.isInteger(index)
+    ? item.lectures[index]
+    : null
+
+  if (!lecture) {
+    item.selectedLectureIndex = ''
+    item.selectedPages = buildCoursewareSelectedPagesFromRange(item)
+    return
+  }
+
+  item.selectedLectureIndex = String(index)
+  item.rangeStartPage = lecture.startPage
+  item.rangeEndPage = lecture.endPage
+  item.wordStartPage = lecture.startPage
+  item.wordEndPage = lecture.endPage
+  item.selectedPages = buildPageRange(lecture.startPage, lecture.endPage)
+}
+
+function setActivePdfSelection(fileKey) {
+  syncActivePdfSelectionItem()
+  const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+  if (!item) return
+
+  state.pdfSelection = {
+    ...state.pdfSelection,
+    ...item,
+    activeFileKey: item.fileKey,
+    isOpen: true
+  }
+}
+
+function syncActivePdfSelectionItem() {
+  const items = Array.isArray(state.pdfSelection.items) ? state.pdfSelection.items : []
+  const index = items.findIndex((item) => item.fileKey === state.pdfSelection.activeFileKey)
+  if (index < 0) return
+  state.pdfSelection.items[index] = {
+    ...items[index],
+    fileKey: state.pdfSelection.fileKey,
+    fileName: state.pdfSelection.fileName,
+    pageCount: state.pdfSelection.pageCount,
+    selectedPages: state.pdfSelection.selectedPages.slice(),
+    lectures: state.pdfSelection.lectures.slice(),
+    selectedLectureIndex: state.pdfSelection.selectedLectureIndex,
+    rangeStartPage: state.pdfSelection.rangeStartPage || '',
+    rangeEndPage: state.pdfSelection.rangeEndPage || '',
+    loading: state.pdfSelection.loading,
+    error: state.pdfSelection.error
+  }
 }
 
 function syncPdfPageRangeInputs() {
@@ -5100,26 +6686,129 @@ function syncPdfPageRangeInputs() {
 
   state.pdfSelection.selectedPages = buildPageRange(left, right)
   state.pdfSelection.selectedLectureIndex = ''
+  state.pdfSelection.rangeStartPage = left
+  state.pdfSelection.rangeEndPage = right
+  syncActivePdfSelectionItem()
 }
 
 function renderPdfPageSelection() {
   if (!els.pdfPageSelectionBar || !els.pdfPageModal) return
 
-  const file = getCoursewareFile()
-  const hasPdf = Boolean(file && isPdfFile(file))
+  syncCoursewareSelectionItems()
+  const hasFiles = Boolean(getCoursewareFiles().length)
 
-  els.pdfPageSelectionBar.classList.toggle('hidden', !hasPdf)
+  els.pdfPageSelectionBar.classList.toggle('hidden', !hasFiles)
 
-  if (hasPdf) {
-    const summary = state.pdfSelection.loading
-      ? `${file.name}：正在读取页面并检测讲次...`
-      : `${file.name}：${getPdfReadSummary(state.pdfSelection)}`
-
-    els.pdfPageSelectionText.textContent = summary
-    els.pdfPageSelectBtn.disabled = state.pdfSelection.loading
+  if (hasFiles) {
+    els.pdfPageSelectionText.innerHTML = renderCoursewareSelectionList()
   }
+  if (els.pdfPageSelectBtn) els.pdfPageSelectBtn.classList.add('hidden')
 
   renderPdfPageModal()
+}
+
+function renderCoursewareSelectionList() {
+  const items = state.pdfSelection.items || []
+  return `
+    <div class="courseware-selection-list">
+      ${items.map((item) => {
+        const selectionMeta = getCoursewareSelectionMeta(item)
+        return `
+        <div class="courseware-selection-item" data-included="${item.included === false ? 'false' : 'true'}">
+          <label class="courseware-selection-check" title="是否让 AI 读取此文件">
+            <input data-courseware-include="${escapeHtml(item.fileKey)}" type="checkbox" aria-label="读取 ${escapeHtml(item.fileName)}" ${item.included === false ? '' : 'checked'} />
+            <span>读取</span>
+          </label>
+          <div class="courseware-selection-main">
+            <span class="courseware-selection-name" title="${escapeHtml(item.fileName)}">${escapeHtml(item.fileName)}</span>
+            <span class="courseware-selection-meta" title="${escapeHtml(selectionMeta)}">${escapeHtml(selectionMeta)}</span>
+          </div>
+          <div class="courseware-selection-lecture">${renderCoursewareLectureControl(item)}</div>
+          <div class="courseware-selection-range">${renderCoursewareRangeControl(item)}</div>
+          <button class="list-delete-button" data-courseware-remove="${escapeHtml(item.fileKey)}" type="button">移除</button>
+        </div>
+      `}).join('')}
+    </div>
+  `
+}
+
+function renderCoursewareLectureControl(item) {
+  const lectures = Array.isArray(item.lectures) ? item.lectures : []
+  if (!supportsCoursewarePageRange(item)) return '<div class="courseware-selection-placeholder"></div>'
+  if (item.loading) return '<div class="courseware-selection-loading">正在识别讲次...</div>'
+  if (item.error && supportsCoursewarePageRange(item)) {
+    return `<div class="courseware-selection-loading">${escapeHtml(item.error)}</div>`
+  }
+  if (lectures.length <= 1) return '<div class="courseware-selection-placeholder">未检测到多讲</div>'
+
+  return `
+    <label class="courseware-lecture-select">
+      <span>按讲次</span>
+      <select data-courseware-lecture="${escapeHtml(item.fileKey)}">
+        <option value="">手动输入页码</option>
+        ${lectures.map((lecture, index) => {
+          const selected = String(index) === String(item.selectedLectureIndex) ? ' selected' : ''
+          return `<option value="${index}"${selected}>${escapeHtml(getPdfLectureOptionLabel(lecture))}</option>`
+        }).join('')}
+      </select>
+    </label>
+  `
+}
+
+function renderCoursewareRangeControl(item) {
+  if (!supportsCoursewarePageRange(item)) {
+    return '<div class="courseware-selection-placeholder">将读取全文</div>'
+  }
+
+  const startValue = getCoursewareRangeInputValue(item, 'start')
+  const endValue = getCoursewareRangeInputValue(item, 'end')
+  const maxAttribute = item.pageCount ? ` max="${escapeHtml(item.pageCount)}"` : ''
+
+  return `
+    <div class="courseware-word-range">
+      <span>手动页码</span>
+      <input data-courseware-range="${escapeHtml(item.fileKey)}" data-range-field="start" type="number" min="1"${maxAttribute} value="${escapeHtml(startValue)}" placeholder="开始" />
+      <span>-</span>
+      <input data-courseware-range="${escapeHtml(item.fileKey)}" data-range-field="end" type="number" min="1"${maxAttribute} value="${escapeHtml(endValue)}" placeholder="结束" />
+      <span>页</span>
+    </div>
+  `
+}
+
+function getCoursewareRangeInputValue(item, field) {
+  const value = field === 'start' ? item.rangeStartPage : item.rangeEndPage
+  if (value !== '' && value !== null && value !== undefined) return value
+
+  if (item.isPdf && Array.isArray(item.selectedPages) && item.selectedPages.length) {
+    return field === 'start'
+      ? item.selectedPages[0]
+      : item.selectedPages[item.selectedPages.length - 1]
+  }
+
+  return ''
+}
+
+function getCoursewareSelectionMeta(item) {
+  if (item.loading) return '正在识别讲次'
+  if (item.error) return item.error
+  if (item.isPdf) return getPdfReadSummary(item)
+  if (supportsCoursewarePageRange(item)) {
+    const lecture = getSelectedCoursewareLecture(item)
+    if (lecture) return `读取 ${lecture.title}（约第 ${lecture.startPage}-${lecture.endPage} 页）`
+    const selectedPages = Array.isArray(item.selectedPages) ? item.selectedPages : []
+    if (selectedPages.length) return `将读取约第 ${formatPageRanges(selectedPages)} 页`
+    return item.pageCount ? `将读取全文（约 ${item.pageCount} 页）` : '将读取全文'
+  }
+  return '将读取全文'
+}
+
+function getSelectedCoursewareLecture(item) {
+  if (!item || item.selectedLectureIndex === '' || item.selectedLectureIndex === null || item.selectedLectureIndex === undefined) {
+    return null
+  }
+  const index = Number(item && item.selectedLectureIndex)
+  if (!Number.isInteger(index)) return null
+  return Array.isArray(item.lectures) ? item.lectures[index] : null
 }
 
 function renderPdfPageModal() {
@@ -5149,6 +6838,7 @@ function renderPdfPageModal() {
   const startPage = selection.selectedPages[0] || 1
   const endPage = selection.selectedPages[selection.selectedPages.length - 1] || selection.pageCount || 1
   els.pdfPageGrid.innerHTML = `
+    ${renderPdfFileTabs(selection)}
     <div class="pdf-page-range">
       <label class="field pdf-page-range-field">
         <span>开始页</span>
@@ -5158,6 +6848,19 @@ function renderPdfPageModal() {
         <span>结束页</span>
         <input data-pdf-range-field="end" type="number" min="1" max="${selection.pageCount}" value="${endPage}" />
       </label>
+    </div>
+  `
+}
+
+function renderPdfFileTabs(selection) {
+  const items = Array.isArray(selection.items) ? selection.items : []
+  if (items.length <= 1) return ''
+
+  return `
+    <div class="pdf-file-tabs">
+      ${items.map((item, index) => `
+        <button class="teaching-pill ${item.fileKey === selection.activeFileKey ? 'active' : ''}" data-pdf-file-key="${escapeHtml(item.fileKey)}" type="button">${index + 1}. ${escapeHtml(item.fileName)}</button>
+      `).join('')}
     </div>
   `
 }
@@ -5183,21 +6886,35 @@ function renderPdfLecturePicker(selection) {
 }
 
 function applySelectedPdfLecture() {
+  if (els.pdfLectureSelect.value === '') {
+    state.pdfSelection.selectedLectureIndex = ''
+    syncActivePdfSelectionItem()
+    renderPdfPageSelection()
+    return
+  }
+
   const index = Number(els.pdfLectureSelect.value)
   const lecture = state.pdfSelection.lectures[index]
 
   if (!lecture) {
     state.pdfSelection.selectedLectureIndex = ''
+    syncActivePdfSelectionItem()
     renderPdfPageSelection()
     return
   }
 
   state.pdfSelection.selectedLectureIndex = String(index)
   state.pdfSelection.selectedPages = buildPageRange(lecture.startPage, lecture.endPage)
+  state.pdfSelection.rangeStartPage = lecture.startPage
+  state.pdfSelection.rangeEndPage = lecture.endPage
+  syncActivePdfSelectionItem()
   renderPdfPageSelection()
 }
 
 function getSelectedPdfLecture(selection = state.pdfSelection) {
+  if (!selection || selection.selectedLectureIndex === '' || selection.selectedLectureIndex === null || selection.selectedLectureIndex === undefined) {
+    return null
+  }
   const index = Number(selection.selectedLectureIndex)
   return Number.isInteger(index) ? selection.lectures[index] : null
 }
@@ -5450,8 +7167,11 @@ function getPdfLectureOptionLabel(lecture) {
 }
 
 function getSelectedPdfPages(file, pageCount) {
-  if (state.pdfSelection.fileKey === getFileKey(file)) {
-    return state.pdfSelection.selectedPages
+  const fileKey = getFileKey(file)
+  const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === fileKey)
+  const selectedPages = item ? item.selectedPages : (state.pdfSelection.fileKey === fileKey ? state.pdfSelection.selectedPages : [])
+  if (selectedPages && selectedPages.length) {
+    return selectedPages
       .filter((pageNumber) => pageNumber >= 1 && pageNumber <= pageCount)
       .sort((left, right) => left - right)
   }
@@ -5497,7 +7217,7 @@ function formatPageRanges(pages) {
   return ranges.join('、')
 }
 
-async function appendPdfPreviewData(formData, file, payload) {
+async function appendPdfPreviewData(formData, file, payload, fileIndex = 0) {
   if (!window.pdfjsLib) {
     showToast('PDF 解析组件加载失败，将按普通 PDF 上传')
     return
@@ -5514,7 +7234,13 @@ async function appendPdfPreviewData(formData, file, payload) {
     throw new Error('请至少选择 1 页 PDF')
   }
 
-  payload.selectedPdfPages = selectedPages
+  if (!Array.isArray(payload.coursewareMeta)) payload.coursewareMeta = []
+  payload.coursewareMeta[fileIndex] = {
+    fileIndex,
+    fileName: file.name,
+    selectedPdfPages: selectedPages,
+    clientPdfText: ''
+  }
 
   for (let index = 0; index < selectedPages.length; index += 1) {
     const pageNumber = selectedPages[index]
@@ -5527,7 +7253,7 @@ async function appendPdfPreviewData(formData, file, payload) {
 
     const imageBlob = await renderPdfPageToImageBlob(page)
     if (imageBlob) {
-      formData.append('pdfPageImage', imageBlob, `${file.name}-page-${pageNumber}.jpg`)
+      formData.append('pdfPageImage', imageBlob, `courseware-${fileIndex}-page-${pageNumber}.jpg`)
     }
   }
 
@@ -5537,7 +7263,8 @@ async function appendPdfPreviewData(formData, file, payload) {
     .trim()
 
   if (extractedText) {
-    payload.clientPdfText = extractedText.slice(0, 30000)
+    payload.coursewareMeta[fileIndex].clientPdfText = extractedText.slice(0, 30000)
+    if (fileIndex === 0) payload.clientPdfText = extractedText.slice(0, 30000)
   }
 }
 
@@ -5623,9 +7350,9 @@ function buildExitTestPayload(classInfo) {
   const selectedLecture = getSelectedExitTestLecture()
   const hasAnyScoreInput = students.some((student) => {
     const saved = state.exitTest.scores[student.id] || {}
-    return mode === 'grade'
+    return Boolean(saved.absent) || (mode === 'grade'
       ? Boolean(String(saved.grade || '').trim() || String(saved.note || '').trim())
-      : Boolean(String(saved.score ?? '').trim() || String(saved.note || '').trim())
+      : Boolean(String(saved.score ?? '').trim() || String(saved.note || '').trim()))
   })
   const hasExitTestData = Boolean(file || hasAnyScoreInput)
 
@@ -5649,16 +7376,18 @@ function buildExitTestPayload(classInfo) {
 
   const rows = students.map((student) => {
     const saved = state.exitTest.scores[student.id] || {}
+    const absent = Boolean(saved.absent)
     return {
       id: student.id,
       name: student.name,
-      score: mode === 'percent' ? normalizeScoreValue(saved.score) : null,
-      grade: mode === 'grade' ? String(saved.grade || '').trim() : '',
+      absent,
+      score: mode === 'percent' && !absent ? normalizeScoreValue(saved.score) : null,
+      grade: mode === 'grade' && !absent ? String(saved.grade || '').trim() : '',
       note: String(saved.note || '').trim()
     }
   })
 
-  const missing = rows.find((row) => mode === 'grade' ? !row.grade : row.score === null)
+  const missing = rows.find((row) => !row.absent && (mode === 'grade' ? !row.grade : row.score === null))
   if (missing) {
     showToast(`请填写 ${missing.name} 的出门测${mode === 'grade' ? '等级' : '成绩'}`)
     return false
@@ -5690,6 +7419,8 @@ function normalizeScoreValue(value) {
 }
 
 function compareExitTestRows(left, right, mode) {
+  if (left.absent !== right.absent) return left.absent ? 1 : -1
+
   if (mode === 'grade') {
     const order = { A: 4, B: 3, C: 2, D: 1 }
     return (order[right.grade] || 0) - (order[left.grade] || 0)
@@ -5703,6 +7434,7 @@ function getExitTestScoreText(exitTest, studentName) {
     ? exitTest.students.find((item) => item.name === studentName)
     : null
   if (!row) return ''
+  if (row.absent) return '请假'
   if (exitTest.mode === 'grade') return `${row.grade} 等`
   return `${row.score}/${exitTest.totalScore}`
 }
@@ -5716,9 +7448,10 @@ function updateAllFilePickers() {
 function updateFilePicker(input, nameElement) {
   if (!input || !nameElement) return
 
-  const file = input.files && input.files[0]
+  const files = input === els.coursewareInput ? getCoursewareFiles() : (input.files ? Array.from(input.files) : [])
+  const file = files[0]
   const picker = input.closest('.file-picker')
-  nameElement.textContent = file ? file.name : '未选择任何文件'
+  nameElement.textContent = files.length > 1 ? `${files.length} 个文件` : (file ? file.name : '未选择任何文件')
   if (picker) picker.classList.toggle('has-file', Boolean(file))
 }
 
@@ -5735,7 +7468,8 @@ function getWorkingStudents() {
       id: profile.id,
       name: profile.name,
       performance: state.oneLesson.performance,
-      remark: state.oneLesson.remark
+      remark: state.oneLesson.remark,
+      keywords: state.oneLesson.keywords
     }]
   }
 
@@ -5777,6 +7511,7 @@ function appendStudentKeyword(index, keyword) {
     : [remark, keyword].filter(Boolean).join('；')
 
   if (state.mode === 'oneOnOne') {
+    state.oneLesson.keywords = student.keywords
     state.oneLesson.remark = student.remark
     return
   }

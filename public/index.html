@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI 课程反馈</title>
+    <title>教学系统</title>
     <link rel="stylesheet" href="/styles.css" />
     <script>
       window.MathJax = {
@@ -23,7 +23,7 @@
   <body>
     <section id="accessGate" class="access-gate hidden" aria-live="polite">
       <div class="access-panel">
-        <div class="brand-mark">课</div>
+        <div class="brand-mark">升</div>
         <p class="eyebrow">Account</p>
         <h1>账号登录</h1>
         <p class="access-copy">请输入管理员提供的账号和密码后进入课程反馈系统。</p>
@@ -43,9 +43,9 @@
     <div id="app" class="app-shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark">课</div>
+          <div class="brand-mark">升</div>
           <div>
-            <div class="brand-name">AI 课程反馈</div>
+            <div class="brand-name">教学系统</div>
             <div class="brand-subtitle">Course Feedback</div>
           </div>
         </div>
@@ -75,6 +75,7 @@
           <section class="nav-group">
             <div class="nav-group-title">教学工具</div>
             <div class="nav-group-list" role="tablist" aria-label="教学工具">
+              <button class="mode-button" data-mode="teaching" type="button">教学数据</button>
               <button class="mode-button" data-mode="paperAnalysis" type="button">试卷分析</button>
               <button class="mode-button" data-mode="rearrange" type="button">题卷重排</button>
             </div>
@@ -134,18 +135,15 @@
             </div>
             <div class="panel-actions compact-actions">
               <button class="secondary-button compact-button" id="teachingRefreshBtn" type="button">刷新</button>
+              <button class="secondary-button compact-button" id="teachingSyncBtn" type="button">同步档案</button>
               <button class="secondary-button compact-button" id="teachingPrintBtn" type="button">打印 / 另存 PDF</button>
               <button class="secondary-button compact-button" id="teachingScreenshotBtn" type="button">截图导出</button>
             </div>
           </div>
 
           <div class="teaching-tabs" role="tablist" aria-label="教学数据功能">
-            <button class="teaching-tab active" data-teaching-tab="roster" type="button">花名册</button>
-            <button class="teaching-tab" data-teaching-tab="courses" type="button">课程库</button>
-            <button class="teaching-tab" data-teaching-tab="scores" type="button">成绩</button>
-            <button class="teaching-tab" data-teaching-tab="history" type="button">历史反馈</button>
-            <button class="teaching-tab" data-teaching-tab="one" type="button">一对一档案</button>
-            <button class="teaching-tab" data-teaching-tab="backup" type="button">备份恢复</button>
+            <button class="teaching-tab active" data-teaching-tab="classData" type="button">班课</button>
+            <button class="teaching-tab" data-teaching-tab="oneData" type="button">一对一</button>
           </div>
 
           <div class="teaching-content" id="teachingContent"></div>
@@ -215,6 +213,8 @@
             <label class="field">
               <span>年级</span>
               <select id="gradeSelect">
+                <option>初一</option>
+                <option>初二</option>
                 <option>初三</option>
                 <option selected>高一</option>
                 <option>高二</option>
@@ -269,6 +269,8 @@
             <label class="field">
               <span>年级</span>
               <select id="oneProfileGradeSelect">
+                <option>初一</option>
+                <option>初二</option>
                 <option>初三</option>
                 <option selected>高一</option>
                 <option>高二</option>
@@ -333,7 +335,7 @@
             <label class="field file-field" id="coursewareField">
               <span>导入当节课课件</span>
               <div class="file-picker">
-                <input id="coursewareInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" />
+                <input id="coursewareInput" type="file" accept=".pdf,.pptx,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" multiple />
                 <span class="file-picker-button">选择文件</span>
                 <span class="file-picker-name" id="coursewareFileName">未选择任何文件</span>
               </div>
@@ -342,6 +344,10 @@
               <span>选择章节/讲次</span>
               <select id="classLectureSelect"></select>
             </label>
+          </div>
+
+          <div class="pdf-page-selection hidden" id="pdfPageSelectionBar">
+            <div id="pdfPageSelectionText">已上传文件会显示在这里</div>
           </div>
 
           <section class="class-schedule-panel" id="classSchedulePanel">
@@ -393,6 +399,13 @@
                 <option value="class">班级反馈</option>
               </select>
             </label>
+            <label class="field hidden" id="scoreDisplayField">
+              <span>是否展示所有学生成绩</span>
+              <select id="showAllScoresSelect">
+                <option value="single" selected>否，只展示当前学生</option>
+                <option value="all">是，展示全班成绩</option>
+              </select>
+            </label>
             <label class="field">
               <span>课后作业</span>
               <input id="homeworkInput" type="text" placeholder="例如：完成第3讲易优精练，预习下一节内容" />
@@ -422,11 +435,6 @@
               <span>班级/共性备注</span>
               <textarea id="classRemarkInput" rows="3" placeholder="例如：整体配合度较高，但不等式证明步骤仍需加强"></textarea>
             </label>
-          </div>
-
-          <div class="pdf-page-selection hidden" id="pdfPageSelectionBar">
-            <span id="pdfPageSelectionText">PDF 页面未选择</span>
-            <button class="secondary-button compact-button" id="pdfPageSelectBtn" type="button">选择页面</button>
           </div>
 
           <label class="field">
@@ -468,12 +476,22 @@
             <div id="exitTestTable" class="exit-test-table"></div>
           </section>
 
-          <div class="student-toolbar">
+          <div class="student-toolbar" id="studentToolbar">
             <h2>学生表现</h2>
             <span id="studentCount">0 人</span>
           </div>
 
           <div id="studentTable" class="student-table"></div>
+
+          <label class="field generation-instruction-field">
+            <span>本次生成要求（仅本次有效）</span>
+            <textarea
+              id="generationInstructionInput"
+              rows="4"
+              maxlength="1200"
+              placeholder="例如：语气更温和；先肯定进步，再具体说明需要改进的地方；课堂表现控制在 200 字左右"
+            ></textarea>
+          </label>
 
           <div class="panel-actions">
             <button class="primary-button" id="generateBtn" type="button">AI 生成反馈</button>
@@ -490,6 +508,9 @@
             <span class="result-note" id="resultNote">生成后会显示在这里</span>
           </div>
           <div id="debugSummary" class="debug-summary hidden"></div>
+          <div class="panel-actions hidden" id="teachingApplyBar">
+            <button class="primary-button" id="applyTeachingDataBtn" type="button">确认应用到教学数据</button>
+          </div>
           <div id="resultList" class="result-list"></div>
           <section class="image-report-panel hidden" id="imageReportPanel">
             <div class="result-head">

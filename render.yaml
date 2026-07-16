@@ -1,12 +1,14 @@
 services:
   - type: web
-    name: course-feedback-web
+    name: course-feedback-web-staging
     runtime: node
     plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
+      - key: DEPLOYMENT_TARGET
+        value: staging
       - key: PUBLIC_MODE
         value: "true"
       - key: ACCESS_CODE
