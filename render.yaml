@@ -15,6 +15,8 @@ services:
         value: SXB22660147
       - key: DAILY_LIMIT
         value: "10"
+      - key: MAX_UPLOAD_TOTAL_MB
+        value: "48"
       - key: SESSION_SECRET
         generateValue: true
       - key: AI_PROVIDER

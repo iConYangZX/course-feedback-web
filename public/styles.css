@@ -961,6 +961,159 @@ textarea:focus {
   gap: 10px;
 }
 
+.lesson-defaults-panel,
+.parent-preview-panel,
+.teacher-internal-note-field {
+  margin: 14px 0 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfbff;
+}
+
+.lesson-defaults-head,
+.parent-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.lesson-defaults-head h3,
+.parent-preview-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.lesson-defaults-head p,
+.parent-preview-head p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.compact-field {
+  width: min(220px, 100%);
+  margin-bottom: 0;
+}
+
+.teacher-internal-note-field {
+  border-color: #d8dee9;
+  background: #f7f8fb;
+}
+
+.teacher-internal-note-field > span,
+.student-internal-note > span {
+  color: #596273;
+}
+
+.student-row.has-override {
+  border-color: #d7aa86;
+  background: #fffaf5;
+}
+
+.student-override-toggle {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.student-override-toggle input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.student-internal-note {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.parent-preview-content {
+  min-height: 220px;
+  padding: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #343854;
+  line-height: 1.75;
+}
+
+.parent-preview-content p {
+  margin: 4px 0 13px;
+  white-space: pre-wrap;
+}
+
+.parent-preview-status {
+  display: inline-flex;
+  margin-bottom: 10px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--violet-soft);
+  color: var(--green-dark);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.parent-preview-status.ready {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.parent-preview-status.stale {
+  background: #fff3e8;
+  color: var(--amber);
+}
+
+.parent-preview-recipient {
+  margin-bottom: 8px;
+  font-size: 17px;
+  font-weight: 850;
+}
+
+.parent-preview-meta {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.quality-check-summary {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid #b8ddd2;
+  border-radius: 8px;
+  background: var(--success-soft);
+  color: var(--success);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.quality-check-summary.has-issues {
+  border-color: #efc79f;
+  background: #fff7ee;
+  color: #9f542b;
+}
+
+.teaching-data-list li small {
+  display: block;
+  margin-top: 3px;
+  color: #596273;
+}
+
 .generation-instruction-field {
   margin-top: 18px;
   padding-top: 16px;
@@ -974,7 +1127,7 @@ textarea:focus {
 
 .student-row {
   display: grid;
-  grid-template-columns: minmax(110px, 0.9fr) 136px 150px minmax(180px, 2fr) 34px;
+  grid-template-columns: minmax(110px, 0.9fr) 136px 150px minmax(180px, 2fr) 94px;
   gap: 10px;
   align-items: center;
   padding: 12px;
@@ -2533,6 +2686,13 @@ textarea:focus {
   .exit-test-row,
   .student-row {
     grid-template-columns: 1fr;
+  }
+
+  .lesson-defaults-head,
+  .parent-preview-head,
+  .student-internal-note {
+    grid-template-columns: 1fr;
+    flex-direction: column;
   }
 
   .a4-preview-wrap {

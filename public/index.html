@@ -481,7 +481,56 @@
             <span id="studentCount">0 人</span>
           </div>
 
+          <section class="lesson-defaults-panel class-only" id="classLessonDefaultsPanel">
+            <div class="lesson-defaults-head">
+              <div>
+                <h3>全班默认表现</h3>
+                <p>先设置大多数学生的共同情况，下面只调整特殊学生。</p>
+              </div>
+              <button class="secondary-button compact-button" id="resetClassLessonDraftBtn" type="button">重置本节</button>
+            </div>
+            <div class="form-grid three">
+              <label class="field">
+                <span>默认表现</span>
+                <select id="classDefaultPerformanceSelect">
+                  <option value="表现优秀">表现优秀</option>
+                  <option value="表现良好" selected>表现良好</option>
+                  <option value="表现较差">表现较差</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>默认关键词</span>
+                <select id="classDefaultKeywordSelect">
+                  <option value="">暂不选择</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>家长可见共性补充</span>
+                <input id="classDefaultParentRemarkInput" type="text" placeholder="例如：本节课整体计算准确率较高" />
+              </label>
+            </div>
+          </section>
+
           <div id="studentTable" class="student-table"></div>
+
+          <label class="field teacher-internal-note-field">
+            <span>教师内部记录（不会发送给 AI、学生或家长）</span>
+            <textarea id="teacherInternalNoteInput" rows="3" placeholder="仅供教师自己留档，例如后续沟通安排、需要持续观察的情况"></textarea>
+          </label>
+
+          <section class="parent-preview-panel" id="parentPreviewPanel">
+            <div class="parent-preview-head">
+              <div>
+                <h3>家长端实时预览</h3>
+                <p>生成前展示内容框架；AI生成后自动显示最终版本。</p>
+              </div>
+              <label class="field compact-field" id="parentPreviewStudentField">
+                <span>预览学生</span>
+                <select id="parentPreviewStudentSelect"></select>
+              </label>
+            </div>
+            <div class="parent-preview-content" id="parentPreviewContent"></div>
+          </section>
 
           <label class="field generation-instruction-field">
             <span>本次生成要求（仅本次有效）</span>
@@ -496,6 +545,7 @@
           <div class="panel-actions">
             <button class="primary-button" id="generateBtn" type="button">AI 生成反馈</button>
             <button class="secondary-button" id="copyAllBtn" type="button">复制全部</button>
+            <button class="secondary-button" id="exportAllBtn" type="button">批量导出</button>
           </div>
         </section>
 
@@ -508,6 +558,7 @@
             <span class="result-note" id="resultNote">生成后会显示在这里</span>
           </div>
           <div id="debugSummary" class="debug-summary hidden"></div>
+          <div id="qualityCheckSummary" class="quality-check-summary hidden"></div>
           <div class="panel-actions hidden" id="teachingApplyBar">
             <button class="primary-button" id="applyTeachingDataBtn" type="button">确认应用到教学数据</button>
           </div>

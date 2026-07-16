@@ -14,10 +14,13 @@ require('dotenv').config()
 const app = express()
 const execFileAsync = promisify(execFile)
 const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
+const MAX_UPLOAD_TOTAL_SIZE_BYTES = getUploadTotalSizeLimit(process.env.MAX_UPLOAD_TOTAL_MB)
+const UPLOAD_TOTAL_BYTES = Symbol('uploadTotalBytes')
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: createBoundedMemoryStorage(MAX_UPLOAD_TOTAL_SIZE_BYTES),
   limits: {
-    fileSize: MAX_UPLOAD_FILE_SIZE_BYTES
+    fileSize: MAX_UPLOAD_FILE_SIZE_BYTES,
+    files: 133
   }
 })
 
@@ -25,11 +28,14 @@ const PORT = Number(process.env.PORT || 5177)
 const DEFAULT_PROVIDER = 'openai'
 const ENV_PATH = path.join(__dirname, '.env')
 const LEGACY_DATA_DIR = path.join(__dirname, 'data')
+// This branch must remain unable to connect to the production database.
+const RELEASE_CHANNEL = 'staging'
 const DEPLOYMENT_TARGET = trim(process.env.DEPLOYMENT_TARGET).toLowerCase()
 const RENDER_GIT_BRANCH = trim(process.env.RENDER_GIT_BRANCH).toLowerCase()
 const RENDER_SERVICE_NAME = trim(process.env.RENDER_SERVICE_NAME).toLowerCase()
 const RENDER_EXTERNAL_HOSTNAME = trim(process.env.RENDER_EXTERNAL_HOSTNAME).toLowerCase()
-const IS_STAGING_DEPLOYMENT = DEPLOYMENT_TARGET === 'staging'
+const IS_STAGING_DEPLOYMENT = RELEASE_CHANNEL === 'staging'
+  || DEPLOYMENT_TARGET === 'staging'
   || RENDER_GIT_BRANCH === 'staging'
   || /(^|[-_.])(staging|test)([-_.]|$)/.test(RENDER_SERVICE_NAME)
   || /(^|[-_.])(staging|test)([-_.]|$)/.test(RENDER_EXTERNAL_HOSTNAME)
@@ -575,7 +581,7 @@ app.post('/api/courseware-lectures', requireAccessMiddleware, upload.single('cou
 app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
   { name: 'courseware', maxCount: 12 },
   { name: 'exitTest', maxCount: 1 },
-  { name: 'pdfPageImage', maxCount: 1000 }
+  { name: 'pdfPageImage', maxCount: 120 }
 ]), async (req, res) => {
   try {
     const session = req.accessSession
@@ -643,6 +649,13 @@ app.use((error, req, res, next) => {
     return
   }
 
+  if (error && error.code === 'LIMIT_TOTAL_FILE_SIZE') {
+    res.status(413).json({
+      error: `单次上传的全部文件合计不能超过 ${formatMegabytes(MAX_UPLOAD_TOTAL_SIZE_BYTES)}MB，请减少文件或选取更少页面`
+    })
+    return
+  }
+
   if (error instanceof multer.MulterError) {
     const message = error.code === 'LIMIT_FILE_SIZE'
       ? `单个文件不能超过 ${Math.floor(MAX_UPLOAD_FILE_SIZE_BYTES / 1024 / 1024)}MB`
@@ -684,6 +697,62 @@ function getUploadedFile(req, fieldName) {
 function getUploadedFiles(req, fieldName) {
   const files = req.files && req.files[fieldName]
   return Array.isArray(files) ? files : []
+}
+
+function getUploadTotalSizeLimit(value) {
+  const configuredMegabytes = Number(value)
+  const megabytes = Number.isFinite(configuredMegabytes)
+    ? Math.min(80, Math.max(20, configuredMegabytes))
+    : 48
+  return Math.floor(megabytes * 1024 * 1024)
+}
+
+function formatMegabytes(bytes) {
+  return Math.round((Number(bytes) / 1024 / 1024) * 10) / 10
+}
+
+function createBoundedMemoryStorage(maxTotalBytes) {
+  return {
+    _handleFile(req, file, callback) {
+      const chunks = []
+      let fileSize = 0
+      let completed = false
+
+      if (!Number.isFinite(req[UPLOAD_TOTAL_BYTES])) req[UPLOAD_TOTAL_BYTES] = 0
+
+      const finish = (error, info) => {
+        if (completed) return
+        completed = true
+        if (error) chunks.length = 0
+        callback(error, info)
+      }
+
+      file.stream.on('data', (chunk) => {
+        if (completed) return
+
+        fileSize += chunk.length
+        req[UPLOAD_TOTAL_BYTES] += chunk.length
+        if (req[UPLOAD_TOTAL_BYTES] > maxTotalBytes) {
+          const error = new Error('Combined upload size limit exceeded')
+          error.code = 'LIMIT_TOTAL_FILE_SIZE'
+          finish(error)
+          return
+        }
+        chunks.push(chunk)
+      })
+      file.stream.once('error', (error) => finish(error))
+      file.stream.once('end', () => {
+        finish(null, {
+          buffer: Buffer.concat(chunks, fileSize),
+          size: fileSize
+        })
+      })
+    },
+    _removeFile(req, file, callback) {
+      delete file.buffer
+      callback(null)
+    }
+  }
 }
 
 function validatePayload(payload, hasCourseware = false) {
@@ -989,6 +1058,7 @@ async function writeDatabaseState(key, value) {
 function getStorageStatus() {
   return {
     deploymentTarget: IS_STAGING_DEPLOYMENT ? 'staging' : (DEPLOYMENT_TARGET || 'production'),
+    releaseChannel: RELEASE_CHANNEL,
     mode: databasePool ? 'database' : 'file',
     databaseConfigured: Boolean(DATABASE_URL),
     databaseConnected: Boolean(databasePool),
@@ -2074,6 +2144,7 @@ function normalizeFeedbackHistory(history) {
       feedbackFormat: trim(source.feedbackFormat) === 'image' ? 'image' : 'text',
       courseNote: trim(source.courseNote),
       exitTest: source.exitTest && typeof source.exitTest === 'object' ? source.exitTest : null,
+      teacherNotes: normalizeTeacherNotes(source.teacherNotes),
       feedbackExclusions: normalizeStudentExclusions(source.feedbackExclusions),
       attendanceExclusions: normalizeStudentExclusions(source.attendanceExclusions),
       feedbacks: Array.isArray(source.feedbacks) ? source.feedbacks.map((feedback) => ({
@@ -2084,6 +2155,18 @@ function normalizeFeedbackHistory(history) {
       createdAt: Number(source.createdAt || Date.now())
     }
   }) : []
+}
+
+function normalizeTeacherNotes(input) {
+  const source = input && typeof input === 'object' ? input : {}
+  return {
+    general: trim(source.general),
+    students: Array.isArray(source.students) ? source.students.map((item) => ({
+      studentId: trim(item && item.studentId),
+      name: trim(item && item.name),
+      note: trim(item && item.note)
+    })).filter((item) => item.note && (item.studentId || item.name)) : []
+  }
 }
 
 function normalizeStudentExclusions(exclusions) {
@@ -3827,6 +3910,7 @@ function normalizeFeedbacks(feedbacks, students, payload = {}) {
     return {
       studentId: student.id,
       name: student.name,
+      generatedFallback: !matched,
       feedback,
       templateFields
     }
@@ -4134,15 +4218,31 @@ function buildAdviceFallback(student) {
 }
 
 function buildFallbackFeedback(student, payload = {}) {
-  const lesson = payload.lessonTitle ? `本节课围绕“${payload.lessonTitle}”展开，` : '本节课整体学习状态较为清晰，'
+  const courseContent = ensureChineseSentence(buildCourseContentFallback(payload))
+  const studyFocusSource = sanitizeCourseNoteForCourseContent(payload.courseNote)
+  const studyFocus = studyFocusSource
+    ? studyFocusSource
+        .split(/\r?\n/)
+        .map((line) => trim(line))
+        .filter(Boolean)
+        .slice(0, 3)
+        .map((line, index) => `${index + 1}、${line.replace(/^[1-9][0-9]*[、.．]\s*/, '')}`)
+        .join('\n')
+    : `1、理解${payload.lessonTitle || '本节课'}的核心知识。\n2、掌握重点方法并完成对应练习。`
   const schedule = buildFallbackScheduleText(payload)
-  const performanceText = ensureChineseSentence(buildPerformanceFallback(student))
+  const performanceText = ensureChineseSentence(`${student.name}同学${schedule}${buildPerformanceFallback(student)}`)
   const exitTestText = getFallbackExitTestText(student, payload)
-  const advice = student.performance === '表现较差'
-    ? '后续建议先把基础概念和典型题步骤补扎实，课后用少量高频题巩固。'
-    : '后续建议继续整理本节课重点和错题，保持稳定练习节奏。'
+  const advice = buildAdviceFallback(student)
 
-  return `${student.name}同学${schedule}${lesson}${performanceText}${exitTestText}${advice}`
+  return [
+    '家长您好，本次课程反馈如下：',
+    '【课堂内容】',
+    courseContent,
+    '【学习重点】',
+    studyFocus,
+    '【课堂表现】',
+    `${performanceText}${exitTestText}${advice}`
+  ].join('\n')
 }
 
 function buildFallbackScheduleText(payload = {}) {

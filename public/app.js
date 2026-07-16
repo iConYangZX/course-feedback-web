@@ -76,12 +76,27 @@ const state = {
   editingClassId: '',
   editingOneProfileId: '',
   feedbacks: [],
+  qualityIssues: [],
+  generatedInputsDirty: false,
   lastGeneratedPayload: null,
   debug: null,
   oneLesson: {
     performance: '表现良好',
     remark: '',
-    keywords: ''
+    keywords: '',
+    internalNote: ''
+  },
+  classLessonDraft: {
+    classId: '',
+    defaults: {
+      performance: '表现良好',
+      keywords: '',
+      parentRemark: ''
+    },
+    overrides: {},
+    internalNote: '',
+    studentInternalNotes: {},
+    previewStudentId: ''
   },
   classSchedule: {
     selectedDate: getLocalDateKey(new Date()),
@@ -306,6 +321,11 @@ function bindElements() {
     classKeywordList: document.querySelector('#classKeywordList'),
     classRemarkInput: document.querySelector('#classRemarkInput'),
     homeworkInput: document.querySelector('#homeworkInput'),
+    classLessonDefaultsPanel: document.querySelector('#classLessonDefaultsPanel'),
+    classDefaultPerformanceSelect: document.querySelector('#classDefaultPerformanceSelect'),
+    classDefaultKeywordSelect: document.querySelector('#classDefaultKeywordSelect'),
+    classDefaultParentRemarkInput: document.querySelector('#classDefaultParentRemarkInput'),
+    resetClassLessonDraftBtn: document.querySelector('#resetClassLessonDraftBtn'),
     pdfPageSelectionBar: document.querySelector('#pdfPageSelectionBar'),
     pdfPageSelectionText: document.querySelector('#pdfPageSelectionText'),
     pdfPageSelectBtn: document.querySelector('#pdfPageSelectBtn'),
@@ -334,11 +354,18 @@ function bindElements() {
     studentToolbar: document.querySelector('#studentToolbar'),
     studentCount: document.querySelector('#studentCount'),
     studentTable: document.querySelector('#studentTable'),
+    teacherInternalNoteInput: document.querySelector('#teacherInternalNoteInput'),
+    parentPreviewPanel: document.querySelector('#parentPreviewPanel'),
+    parentPreviewStudentField: document.querySelector('#parentPreviewStudentField'),
+    parentPreviewStudentSelect: document.querySelector('#parentPreviewStudentSelect'),
+    parentPreviewContent: document.querySelector('#parentPreviewContent'),
     generationInstructionInput: document.querySelector('#generationInstructionInput'),
     generateBtn: document.querySelector('#generateBtn'),
     copyAllBtn: document.querySelector('#copyAllBtn'),
+    exportAllBtn: document.querySelector('#exportAllBtn'),
     resultNote: document.querySelector('#resultNote'),
     debugSummary: document.querySelector('#debugSummary'),
+    qualityCheckSummary: document.querySelector('#qualityCheckSummary'),
     teachingApplyBar: document.querySelector('#teachingApplyBar'),
     applyTeachingDataBtn: document.querySelector('#applyTeachingDataBtn'),
     resultList: document.querySelector('#resultList'),
@@ -395,23 +422,31 @@ function bindEvents() {
 
   els.modeButtons.forEach((button) => {
     button.addEventListener('click', () => {
-      state.mode = button.dataset.mode
-      state.feedbacks = []
-      state.lastGeneratedPayload = null
-      state.debug = null
-      state.pendingTeachingApplication = null
+      const previousMode = state.mode
+      const nextMode = button.dataset.mode
+      state.mode = nextMode
+      clearGeneratedFeedbackState()
+      if (previousMode !== nextMode && (nextMode === 'class' || nextMode === 'oneOnOne')) {
+        resetLessonInputs()
+        if (nextMode === 'class') resetClassLessonDraft(getSelectedClass())
+        if (nextMode === 'oneOnOne') resetOneLesson()
+      }
       clearGenerationInstruction()
       render()
     })
   })
 
   els.newClassBtn.addEventListener('click', () => {
+    clearGeneratedFeedbackState()
+    resetLessonInputs()
     resetClassForm()
     els.classNameInput.focus()
     showToast('可以建立新班级了')
   })
 
   els.newOneProfileBtn.addEventListener('click', () => {
+    clearGeneratedFeedbackState()
+    resetLessonInputs()
     resetOneProfileForm()
     els.oneProfileNameInput.focus()
     showToast('可以建立新学生档案了')
@@ -427,6 +462,31 @@ function bindEvents() {
   els.deleteOneProfileBtn.addEventListener('click', deleteSelectedOneProfile)
   els.generateBtn.addEventListener('click', generateFeedback)
   els.copyAllBtn.addEventListener('click', copyAllFeedbacks)
+  if (els.exportAllBtn) els.exportAllBtn.addEventListener('click', exportAllFeedbacks)
+  if (els.resetClassLessonDraftBtn) els.resetClassLessonDraftBtn.addEventListener('click', () => {
+    resetClassLessonDraft(getSelectedClass())
+    markGeneratedInputsDirty()
+    renderStudentTable()
+    renderParentPreview()
+    showToast('本节课堂表现已重置')
+  })
+  if (els.classDefaultPerformanceSelect) els.classDefaultPerformanceSelect.addEventListener('change', (event) => {
+    updateClassLessonDefault('performance', event.target.value)
+  })
+  if (els.classDefaultKeywordSelect) els.classDefaultKeywordSelect.addEventListener('change', (event) => {
+    updateClassLessonDefault('keywords', event.target.value)
+  })
+  if (els.classDefaultParentRemarkInput) els.classDefaultParentRemarkInput.addEventListener('input', (event) => {
+    updateClassLessonDefault('parentRemark', event.target.value)
+  })
+  if (els.teacherInternalNoteInput) els.teacherInternalNoteInput.addEventListener('input', (event) => {
+    if (state.mode === 'class') ensureClassLessonDraft().internalNote = event.target.value
+    if (state.mode === 'oneOnOne') state.oneLesson.internalNote = event.target.value
+  })
+  if (els.parentPreviewStudentSelect) els.parentPreviewStudentSelect.addEventListener('change', (event) => {
+    state.classLessonDraft.previewStudentId = event.target.value
+    renderParentPreview()
+  })
   if (els.applyTeachingDataBtn) els.applyTeachingDataBtn.addEventListener('click', applyFeedbackToTeachingData)
   els.coursewareInput.addEventListener('change', handleCoursewareChange)
   if (els.pdfPageSelectionBar) {
@@ -438,26 +498,31 @@ function bindEvents() {
   if (els.exitTestInput) els.exitTestInput.addEventListener('change', handleExitTestFileChange)
   if (els.exitTestLectureSelect) els.exitTestLectureSelect.addEventListener('change', () => {
     state.exitTest.selectedLectureIndex = els.exitTestLectureSelect.value
+    scheduleParentPreview()
   })
+  if (els.classLectureSelect) els.classLectureSelect.addEventListener('change', scheduleParentPreview)
   if (els.classDateToggleBtn) els.classDateToggleBtn.addEventListener('click', toggleClassCalendar)
   if (els.classCalendarPrevBtn) els.classCalendarPrevBtn.addEventListener('click', () => shiftClassCalendarMonth(-1))
   if (els.classCalendarNextBtn) els.classCalendarNextBtn.addEventListener('click', () => shiftClassCalendarMonth(1))
   if (els.classCalendarGrid) els.classCalendarGrid.addEventListener('click', handleClassCalendarClick)
   if (els.classTimeSlotSelect) els.classTimeSlotSelect.addEventListener('change', () => {
     state.classSchedule.timeSlot = els.classTimeSlotSelect.value
+    scheduleParentPreview()
   })
   if (els.feedbackScopeSelect) els.feedbackScopeSelect.addEventListener('change', () => {
-    state.feedbacks = []
-    state.lastGeneratedPayload = null
-    state.debug = null
-    state.pendingTeachingApplication = null
+    clearGeneratedFeedbackState()
     renderStudentTable()
     renderFeedbackModeControls()
     renderResults()
+    renderParentPreview()
   })
   if (els.feedbackFormatSelect) els.feedbackFormatSelect.addEventListener('change', () => {
+    const hadGeneratedFeedback = Boolean(state.feedbacks.length)
+    if (hadGeneratedFeedback) clearGeneratedFeedbackState()
     renderFeedbackModeControls()
     renderResults()
+    renderParentPreview()
+    if (hadGeneratedFeedback) showToast('反馈形式已切换，请按当前形式重新生成')
   })
   if (els.showAllScoresSelect) els.showAllScoresSelect.addEventListener('change', () => {
     if (isImageFeedbackMode() && state.feedbacks.length) renderImageReport()
@@ -477,6 +542,7 @@ function bindEvents() {
   if (els.exitTestModeSelect) els.exitTestModeSelect.addEventListener('change', handleExitTestModeChange)
   if (els.exitTestTotalInput) els.exitTestTotalInput.addEventListener('input', () => {
     state.exitTest.totalScore = Number(els.exitTestTotalInput.value || 100)
+    scheduleParentPreview()
   })
   if (els.exitTestTable) {
     els.exitTestTable.addEventListener('input', handleExitTestInput)
@@ -515,12 +581,11 @@ function bindEvents() {
     if (!selectButton) return
 
     state.selectedClassId = selectButton.dataset.id
-    state.feedbacks = []
-    state.lastGeneratedPayload = null
-    state.debug = null
-    state.pendingTeachingApplication = null
+    clearGeneratedFeedbackState()
     clearGenerationInstruction()
     fillClassForm(getSelectedClass())
+    resetClassLessonDraft(getSelectedClass())
+    resetLessonInputs()
     render()
   })
 
@@ -535,34 +600,44 @@ function bindEvents() {
     if (!selectButton) return
 
     state.selectedOneProfileId = selectButton.dataset.id
-    state.feedbacks = []
-    state.lastGeneratedPayload = null
-    state.debug = null
-    state.pendingTeachingApplication = null
+    clearGeneratedFeedbackState()
     clearGenerationInstruction()
     fillOneProfileForm(getSelectedOneProfile())
     resetOneLesson()
+    resetLessonInputs()
     render()
   })
 
   els.studentTable.addEventListener('change', (event) => {
     if (event.target.matches('[data-field="performance"]')) {
-      updateWorkingStudentField(Number(event.target.dataset.index), 'performance', event.target.value)
+      updateWorkingStudentField(Number(event.target.dataset.index), 'performance', event.target.value, event.target.dataset.studentId)
     }
     if (event.target.matches('[data-field="keyword"]') && event.target.value) {
-      appendStudentKeyword(Number(event.target.dataset.index), event.target.value)
+      appendStudentKeyword(Number(event.target.dataset.index), event.target.value, event.target.dataset.studentId)
       event.target.value = ''
       renderStudentTable()
+    }
+    if (event.target.matches('[data-field="inherit-defaults"]')) {
+      setStudentDraftOverrideEnabled(event.target.dataset.studentId, event.target.checked)
     }
   })
 
   els.studentTable.addEventListener('input', (event) => {
     if (event.target.matches('[data-field="remark"]')) {
-      updateWorkingStudentField(Number(event.target.dataset.index), 'remark', event.target.value)
+      updateWorkingStudentField(Number(event.target.dataset.index), 'remark', event.target.value, event.target.dataset.studentId)
+    }
+    if (event.target.matches('[data-field="internalNote"]')) {
+      updateStudentInternalNote(event.target.dataset.studentId, event.target.value)
     }
   })
 
   els.resultList.addEventListener('click', (event) => {
+    const regenerateButton = event.target.closest('[data-action="regenerate-feedback"]')
+    if (regenerateButton) {
+      regenerateStudentFeedback(Number(regenerateButton.dataset.index), regenerateButton)
+      return
+    }
+
     const copyButton = event.target.closest('[data-action="copy-feedback"]')
     if (!copyButton) return
 
@@ -577,6 +652,18 @@ function bindEvents() {
       copyButton.textContent = '复制'
       copyButton.classList.remove('copied')
     }, 1400)
+  })
+
+  ;[
+    els.lessonTitleInput,
+    els.courseNoteInput,
+    els.homeworkInput,
+    els.classRemarkInput,
+    els.templateInput,
+    els.oneProfileTemplateInput
+  ].forEach((input) => {
+    if (!input) return
+    input.addEventListener('input', scheduleParentPreview)
   })
 }
 
@@ -1319,10 +1406,16 @@ function getStudentFeedbackRows(classId, student) {
         (student.id && feedback.studentId === student.id) || feedback.name === student.name
       ))
     })
-    .map((item) => ({
-      date: getTeachingRecordDate(item),
-      text: `${formatTeachingDate(getTeachingRecordDate(item))}    进行${getFeedbackFormatLabel(item)}`
-    }))
+    .map((item) => {
+      const studentNote = item.teacherNotes && Array.isArray(item.teacherNotes.students)
+        ? item.teacherNotes.students.find((note) => (student.id && note.studentId === student.id) || note.name === student.name)
+        : null
+      return {
+        date: getTeachingRecordDate(item),
+        text: `${formatTeachingDate(getTeachingRecordDate(item))}    进行${getFeedbackFormatLabel(item)}`,
+        internalNote: [item.teacherNotes && item.teacherNotes.general, studentNote && studentNote.note].filter(Boolean).join('；')
+      }
+    })
     .sort(compareTeachingRows)
 }
 
@@ -1333,7 +1426,8 @@ function getOneFeedbackRows(profile) {
     .filter((item) => item.profileId === profile.id || item.studentName === profile.name || (item.feedbacks || []).some((feedback) => feedback.name === profile.name))
     .map((item) => ({
       date: getTeachingRecordDate(item),
-      text: `${formatTeachingDate(getTeachingRecordDate(item))}    进行${getFeedbackFormatLabel(item)}`
+      text: `${formatTeachingDate(getTeachingRecordDate(item))}    进行${getFeedbackFormatLabel(item)}`,
+      internalNote: item.teacherNotes && item.teacherNotes.general ? item.teacherNotes.general : ''
     }))
     .sort(compareTeachingRows)
 }
@@ -1419,7 +1513,7 @@ function renderStudentRecordDeleteMenu(options) {
 
 function renderFeedbackRows(rows) {
   if (!rows.length) return '<div class="teaching-empty-line">暂无反馈记录</div>'
-  return `<ul class="teaching-data-list">${rows.map((row) => `<li>${escapeHtml(row.text)}</li>`).join('')}</ul>`
+  return `<ul class="teaching-data-list">${rows.map((row) => `<li>${escapeHtml(row.text)}${row.internalNote ? `<small>教师内部：${escapeHtml(row.internalNote)}</small>` : ''}</li>`).join('')}</ul>`
 }
 
 function renderDateList(dates) {
@@ -3437,6 +3531,10 @@ async function captureTeachingPanel() {
 async function applyFeedbackToTeachingData() {
   const pending = state.pendingTeachingApplication
   if (!pending || pending.applied || pending.applying) return
+  if (state.generatedInputsDirty) {
+    showToast('课堂信息已修改，请重新生成后再应用')
+    return
+  }
 
   pending.applying = true
   renderTeachingApplyBar()
@@ -3445,7 +3543,8 @@ async function applyFeedbackToTeachingData() {
     if (!state.teaching.loaded) await loadTeachingData()
     mergePrimaryIntoTeachingData()
 
-    const entry = buildFeedbackHistoryEntry(pending.payload, pending.feedbacks, pending.createdAt)
+    if (!pending.historyId) pending.historyId = createId('history')
+    const entry = buildFeedbackHistoryEntry(pending.payload, pending.feedbacks, pending.createdAt, pending.historyId)
     state.teaching.data.feedbackHistory = [
       entry,
       ...(state.teaching.data.feedbackHistory || []).filter((item) => item.id !== entry.id)
@@ -3471,9 +3570,10 @@ async function applyFeedbackToTeachingData() {
   }
 }
 
-function buildFeedbackHistoryEntry(payload, feedbacks, createdAt = Date.now()) {
+function buildFeedbackHistoryEntry(payload, feedbacks, createdAt = Date.now(), historyId = '') {
+  const teacherNotes = buildTeacherNotesForHistory(payload)
   return {
-    id: createId('history'),
+    id: historyId || createId('history'),
     mode: payload.mode,
     classId: payload.classId || '',
     feedbackScope: payload.feedbackScope || 'individual',
@@ -3486,8 +3586,31 @@ function buildFeedbackHistoryEntry(payload, feedbacks, createdAt = Date.now()) {
     lessonDateText: payload.lessonDateText || '',
     courseNote: payload.courseNote,
     exitTest: payload.exitTest || null,
+    teacherNotes,
     feedbacks,
     createdAt
+  }
+}
+
+function buildTeacherNotesForHistory(payload = {}) {
+  if (payload.mode === 'oneOnOne') {
+    return {
+      general: String(state.oneLesson.internalNote || '').trim(),
+      students: []
+    }
+  }
+
+  const selectedClass = getSelectedClass()
+  const notes = state.classLessonDraft.studentInternalNotes || {}
+  return {
+    general: String(state.classLessonDraft.internalNote || '').trim(),
+    students: selectedClass
+      ? selectedClass.students.map((student) => ({
+          studentId: student.id,
+          name: student.name,
+          note: String(notes[student.id] || '').trim()
+        })).filter((item) => item.note)
+      : []
   }
 }
 
@@ -3754,6 +3877,7 @@ function getAccountStorageKey(baseKey) {
 function resetAccountWorkspaceState() {
   clearTimeout(scheduleFeedbackDataSync.timer)
   clearTimeout(scheduleTeachingSave.timer)
+  clearTimeout(scheduleParentPreview.timer)
   state.classes = []
   state.oneProfiles = []
   state.selectedClassId = ''
@@ -3761,17 +3885,43 @@ function resetAccountWorkspaceState() {
   state.editingClassId = ''
   state.editingOneProfileId = ''
   state.feedbacks = []
+  state.qualityIssues = []
+  state.generatedInputsDirty = false
   state.lastGeneratedPayload = null
   state.debug = null
   state.adminUsers = []
   state.pendingTeachingApplication = null
+  state.classLessonDraft = createEmptyClassLessonDraft()
+  resetOneLesson()
+  resetLessonInputs()
+  clearGenerationInstruction()
+  state.classTextbook = { fileKey: '', lectures: [] }
+  if (els.classTextbookInput) els.classTextbookInput.value = ''
+  updateFilePicker(els.classTextbookInput, els.classTextbookFileName)
+  state.rearrange = {
+    files: [],
+    questions: [],
+    busy: false,
+    status: '等待上传文件'
+  }
   state.teaching.data = createEmptyTeachingData()
   state.teaching.loaded = false
   state.teaching.loading = false
   state.teaching.selectedClassId = ''
   state.teaching.selectedScoreClassId = ''
   state.teaching.selectedOneProfileId = ''
-  state.exitTest.scores = {}
+  state.teaching.paper = createEmptyPaperState()
+  state.teaching.aiResult = ''
+  state.teaching.aiBusy = false
+}
+
+function clearGeneratedFeedbackState() {
+  state.feedbacks = []
+  state.qualityIssues = []
+  state.generatedInputsDirty = false
+  state.lastGeneratedPayload = null
+  state.debug = null
+  state.pendingTeachingApplication = null
 }
 
 function loadClasses() {
@@ -3857,7 +4007,7 @@ async function saveFeedbackDataToServer(options = {}) {
     const data = await response.json()
     if (!response.ok) throw new Error(data.error || '保存档案数据失败')
 
-    if (!options.silent) showToast('档案已同步到正式数据库')
+    if (!options.silent) showToast('档案已保存到当前账号')
     return true
   } catch (error) {
     if (!options.silent) showToast(error.message || '档案同步失败')
@@ -3875,6 +4025,7 @@ function render() {
   renderClassSchedule()
   renderExitTestTable()
   renderStudentTable()
+  renderParentPreview()
   renderResults()
   renderRearrange()
   renderPdfPageSelection()
@@ -4026,6 +4177,7 @@ function handleClassCalendarClick(event) {
   state.classSchedule.calendarMonth = getMonthKey(getDateFromKey(button.dataset.date))
   state.classSchedule.calendarOpen = false
   renderClassSchedule()
+  scheduleParentPreview()
 }
 
 function buildCalendarDays(monthDate) {
@@ -4108,8 +4260,17 @@ function renderStudentTable() {
   if (els.studentTable) els.studentTable.classList.toggle('hidden', shouldHideClassStudents)
   if (shouldHideClassStudents) {
     els.studentTable.innerHTML = ''
+    if (els.classLessonDefaultsPanel) els.classLessonDefaultsPanel.classList.add('hidden')
+    renderParentPreview()
     return
   }
+
+  if (els.classLessonDefaultsPanel) {
+    els.classLessonDefaultsPanel.classList.toggle('hidden', state.mode !== 'class')
+  }
+
+  ensureClassLessonDraft(getSelectedClass())
+  renderClassLessonDefaults()
 
   const students = getWorkingStudents()
   els.studentCount.textContent = `${students.length} 人`
@@ -4122,14 +4283,14 @@ function renderStudentTable() {
   }
 
   els.studentTable.innerHTML = students.map((student, index) => `
-    <div class="student-row">
+    <div class="student-row ${student.isOverride ? 'has-override' : ''}" data-student-id="${escapeHtml(student.id)}">
       <div class="student-name" title="${escapeHtml(student.name)}">${escapeHtml(student.name)}</div>
-      <select class="${performanceClasses[student.performance] || ''}" data-index="${index}" data-field="performance">
+      <select class="${performanceClasses[student.performance] || ''}" data-index="${index}" data-student-id="${escapeHtml(student.id)}" data-field="performance" ${state.mode === 'class' && !student.isOverride ? 'disabled' : ''}>
         ${performanceOptions.map((option) => `
           <option value="${option}" ${option === student.performance ? 'selected' : ''}>${option}</option>
         `).join('')}
       </select>
-      <select data-index="${index}" data-field="keyword">
+      <select data-index="${index}" data-student-id="${escapeHtml(student.id)}" data-field="keyword" ${state.mode === 'class' && !student.isOverride ? 'disabled' : ''}>
         <option value="">选择关键词</option>
         <optgroup label="好的关键词">
           ${getStudentKeywordGroups().positive.map((option) => `
@@ -4142,10 +4303,131 @@ function renderStudentTable() {
           `).join('')}
         </optgroup>
       </select>
-      <textarea data-index="${index}" data-field="remark" placeholder="备注特殊情况">${escapeHtml(student.remark || '')}</textarea>
-      <span></span>
+      <textarea data-index="${index}" data-student-id="${escapeHtml(student.id)}" data-field="remark" placeholder="家长可见特殊情况" ${state.mode === 'class' && !student.isOverride ? 'disabled' : ''}>${escapeHtml(student.remark || '')}</textarea>
+      ${state.mode === 'class'
+        ? `<label class="student-override-toggle">
+            <input type="checkbox" data-field="inherit-defaults" data-student-id="${escapeHtml(student.id)}" ${student.isOverride ? 'checked' : ''} />
+            <span>${student.isOverride ? '特殊设置' : '使用默认'}</span>
+          </label>`
+        : '<span></span>'}
+      <label class="student-internal-note ${state.mode === 'class' && student.isOverride ? '' : 'hidden'}">
+        <span>教师内部记录</span>
+        <input data-field="internalNote" data-student-id="${escapeHtml(student.id)}" type="text" value="${escapeHtml(student.internalNote || '')}" placeholder="不会发送给学生或家长" />
+      </label>
     </div>
   `).join('')
+
+  renderParentPreview()
+}
+
+function renderClassLessonDefaults() {
+  if (state.mode !== 'class') {
+    if (els.teacherInternalNoteInput) els.teacherInternalNoteInput.value = state.oneLesson.internalNote || ''
+    return
+  }
+  const draft = state.classLessonDraft
+  if (els.classDefaultPerformanceSelect) els.classDefaultPerformanceSelect.value = draft.defaults.performance
+  if (els.classDefaultParentRemarkInput) els.classDefaultParentRemarkInput.value = draft.defaults.parentRemark
+  if (els.classDefaultKeywordSelect) {
+    const groups = getStudentKeywordGroups()
+    els.classDefaultKeywordSelect.innerHTML = [
+      '<option value="">暂不选择</option>',
+      '<optgroup label="好的关键词">',
+      ...groups.positive.map((keyword) => `<option value="${escapeHtml(keyword)}">${escapeHtml(keyword)}</option>`),
+      '</optgroup>',
+      '<optgroup label="需改进关键词">',
+      ...groups.negative.map((keyword) => `<option value="${escapeHtml(keyword)}">${escapeHtml(keyword)}</option>`),
+      '</optgroup>'
+    ].join('')
+    els.classDefaultKeywordSelect.value = draft.defaults.keywords
+  }
+  if (els.teacherInternalNoteInput) els.teacherInternalNoteInput.value = draft.internalNote || ''
+}
+
+function scheduleParentPreview() {
+  markGeneratedInputsDirty()
+  clearTimeout(scheduleParentPreview.timer)
+  scheduleParentPreview.timer = setTimeout(renderParentPreview, 80)
+}
+
+function markGeneratedInputsDirty() {
+  state.generatedInputsDirty = Boolean(state.feedbacks.length)
+  renderTeachingApplyBar()
+}
+
+function renderParentPreview() {
+  if (!els.parentPreviewPanel || !els.parentPreviewContent) return
+  const isClassScope = state.mode === 'class'
+    && els.feedbackScopeSelect
+    && els.feedbackScopeSelect.value === 'class'
+  const students = getWorkingStudents()
+  const selectedClass = getSelectedClass()
+  const selectedProfile = getSelectedOneProfile()
+
+  if ((state.mode === 'class' && !selectedClass) || (state.mode === 'oneOnOne' && !selectedProfile)) {
+    if (els.parentPreviewStudentField) els.parentPreviewStudentField.classList.add('hidden')
+    if (els.parentPreviewStudentSelect) els.parentPreviewStudentSelect.innerHTML = ''
+    els.parentPreviewContent.innerHTML = `<div class="result-empty">${state.mode === 'class' ? '请先选择或建立班级。' : '请先选择或建立学生档案。'}</div>`
+    return
+  }
+
+  if (els.parentPreviewStudentField) {
+    els.parentPreviewStudentField.classList.toggle('hidden', isClassScope || students.length <= 1)
+  }
+  if (els.parentPreviewStudentSelect && !isClassScope) {
+    const currentId = state.mode === 'oneOnOne'
+      ? ((students[0] && students[0].id) || '')
+      : (state.classLessonDraft.previewStudentId || (students[0] && students[0].id) || '')
+    els.parentPreviewStudentSelect.innerHTML = students.map((student) => (
+      `<option value="${escapeHtml(student.id)}" ${student.id === currentId ? 'selected' : ''}>${escapeHtml(student.name)}</option>`
+    )).join('')
+    if (state.mode === 'class' && !students.some((student) => student.id === currentId) && students[0]) {
+      state.classLessonDraft.previewStudentId = students[0].id
+    }
+  }
+
+  const previewStudent = isClassScope
+    ? null
+    : (state.mode === 'oneOnOne'
+        ? students[0]
+        : students.find((student) => student.id === state.classLessonDraft.previewStudentId) || students[0])
+  const finalItem = previewStudent
+    ? state.feedbacks.find((item) => item.studentId === previewStudent.id || item.name === previewStudent.name)
+    : state.feedbacks[0]
+  if (finalItem && !state.generatedInputsDirty) {
+    els.parentPreviewContent.innerHTML = `
+      <div class="parent-preview-status ready">最终版本</div>
+      <div class="parent-preview-recipient">${escapeHtml(finalItem.name)}</div>
+      <p>${escapeHtml(finalItem.feedback)}</p>
+    `
+    return
+  }
+
+  const lessonTitle = els.lessonTitleInput ? els.lessonTitleInput.value.trim() : ''
+  const courseNote = els.courseNoteInput ? els.courseNoteInput.value.trim() : ''
+  const homework = els.homeworkInput ? els.homeworkInput.value.trim() : ''
+  const schedule = buildClassSchedulePayload()
+  const recipient = isClassScope
+    ? ((selectedClass && selectedClass.name) || '班级整体')
+    : ((previewStudent && previewStudent.name) || (selectedProfile && selectedProfile.name) || '待选择学生')
+  const performance = isClassScope
+    ? ((els.classRemarkInput && els.classRemarkInput.value.trim()) || '待填写班级课堂表现')
+    : (previewStudent
+        ? [previewStudent.performance, previewStudent.keywords, previewStudent.remark].filter(Boolean).join('，')
+        : '待填写课堂表现')
+
+  els.parentPreviewContent.innerHTML = `
+    <div class="parent-preview-status ${state.generatedInputsDirty ? 'stale' : ''}">${state.generatedInputsDirty ? '内容已修改，请重新生成' : '生成前内容框架'}</div>
+    <div class="parent-preview-recipient">${escapeHtml(recipient)}</div>
+    ${schedule.dateText ? `<div class="parent-preview-meta">${escapeHtml(schedule.dateText)}${schedule.timeSlot ? ` · ${escapeHtml(schedule.timeSlot)}` : ''}</div>` : ''}
+    <strong>【课堂内容】</strong>
+    <p>${escapeHtml(lessonTitle || courseNote || 'AI 将根据已上传课件生成')}</p>
+    <strong>【学习重点】</strong>
+    <p>${escapeHtml(courseNote || 'AI 将根据课件提炼核心重点')}</p>
+    <strong>【课堂表现】</strong>
+    <p>${escapeHtml(performance)}</p>
+    ${homework ? `<strong>【课后作业】</strong><p>${escapeHtml(homework)}</p>` : ''}
+  `
 }
 
 function renderExitTestTable() {
@@ -4198,6 +4480,7 @@ function handleExitTestModeChange() {
   if (!els.exitTestModeSelect) return
   state.exitTest.mode = els.exitTestModeSelect.value === 'grade' ? 'grade' : 'percent'
   renderExitTestTable()
+  scheduleParentPreview()
 }
 
 function renderExitTestLectureSelect() {
@@ -4223,6 +4506,7 @@ function renderExitTestLectureSelect() {
 async function handleExitTestFileChange() {
   updateFilePicker(els.exitTestInput, els.exitTestFileName)
   resetExitTestLectureSelection()
+  scheduleParentPreview()
 
   const file = els.exitTestInput && els.exitTestInput.files
     ? els.exitTestInput.files[0]
@@ -4270,6 +4554,7 @@ function handleExitTestInput(event) {
   const studentId = row.dataset.studentId
   if (!state.exitTest.scores[studentId]) state.exitTest.scores[studentId] = {}
   state.exitTest.scores[studentId][field] = event.target.value
+  scheduleParentPreview()
 }
 
 function handleExitTestAction(event) {
@@ -4283,15 +4568,18 @@ function handleExitTestAction(event) {
   if (!state.exitTest.scores[studentId]) state.exitTest.scores[studentId] = {}
   state.exitTest.scores[studentId].absent = !state.exitTest.scores[studentId].absent
   renderExitTestTable()
+  scheduleParentPreview()
 }
 
 function renderResults() {
   const imageMode = isImageFeedbackMode()
   els.copyAllBtn.disabled = !state.feedbacks.length
+  if (els.exportAllBtn) els.exportAllBtn.disabled = !state.feedbacks.length
   els.resultNote.textContent = state.feedbacks.length
     ? (imageMode ? `${state.feedbacks.length} 张图片反馈报告已生成 · 下方可逐张查看和导出` : `${state.feedbacks.length} 条反馈 · 全部已展开`)
     : '生成后会显示在这里'
   renderTeachingApplyBar()
+  renderQualityCheckSummary()
   if (els.debugSummary) {
     els.debugSummary.classList.add('hidden')
     els.debugSummary.innerHTML = ''
@@ -4319,11 +4607,57 @@ function renderResults() {
           <span class="result-index">${index + 1}</span>
           <div class="result-name">${escapeHtml(item.name)}</div>
         </div>
-        <button class="copy-button" data-action="copy-feedback" data-index="${index}" type="button">复制</button>
+        <div class="button-row">
+          <button class="secondary-button compact-button" data-action="regenerate-feedback" data-index="${index}" type="button">重新生成</button>
+          <button class="copy-button" data-action="copy-feedback" data-index="${index}" type="button">复制</button>
+        </div>
       </div>
       <p class="result-text">${escapeHtml(item.feedback)}</p>
     </article>
   `).join('')
+}
+
+function validateGeneratedFeedbacks(feedbacks, payload = {}) {
+  const issues = []
+  const students = Array.isArray(payload.students) ? payload.students : []
+  const allNames = students.map((student) => String(student.name || '').trim()).filter(Boolean)
+  const byId = new Map(feedbacks.map((item) => [item.studentId, item]))
+
+  students.forEach((student) => {
+    const item = byId.get(student.id) || feedbacks.find((entry) => entry.name === student.name)
+    if (!item || !String(item.feedback || '').trim()) {
+      issues.push({ studentId: student.id, name: student.name, message: '未生成反馈' })
+      return
+    }
+    if (item.generatedFallback) {
+      issues.push({ studentId: student.id, name: student.name, message: 'AI 未返回该生内容，当前为基础补全版本' })
+    }
+    const text = String(item.feedback)
+    const wrongName = allNames.find((name) => name !== student.name && name.length >= 2 && text.includes(name))
+    if (wrongName) issues.push({ studentId: student.id, name: student.name, message: `出现其他学生姓名“${wrongName}”` })
+    if (!/【(?:课程内容|课堂内容)】/.test(text)) issues.push({ studentId: student.id, name: student.name, message: '缺少课程内容' })
+    if (!/【(?:学习重点|核心重点)】/.test(text)) issues.push({ studentId: student.id, name: student.name, message: '缺少学习重点' })
+    if (!/【课堂表现】/.test(text)) issues.push({ studentId: student.id, name: student.name, message: '缺少课堂表现' })
+    if (student.exitTestScore && student.exitTestScore !== '请假' && !text.includes(String(student.exitTestScore))) {
+      issues.push({ studentId: student.id, name: student.name, message: '未体现出门测成绩' })
+    }
+  })
+  return issues
+}
+
+function renderQualityCheckSummary() {
+  if (!els.qualityCheckSummary) return
+  if (!state.feedbacks.length) {
+    els.qualityCheckSummary.classList.add('hidden')
+    els.qualityCheckSummary.innerHTML = ''
+    return
+  }
+  const issues = Array.isArray(state.qualityIssues) ? state.qualityIssues : []
+  els.qualityCheckSummary.classList.remove('hidden')
+  els.qualityCheckSummary.classList.toggle('has-issues', Boolean(issues.length))
+  els.qualityCheckSummary.innerHTML = issues.length
+    ? `<strong>生成检查发现 ${issues.length} 项需要确认</strong><span>${escapeHtml(issues.slice(0, 6).map((issue) => `${issue.name}：${issue.message}`).join('；'))}${issues.length > 6 ? '……' : ''}</span>`
+    : '<strong>生成检查通过</strong><span>学生数量、姓名、课程结构和已录入成绩均已核对。</span>'
 }
 
 function normalizeGeneratedFeedbacksForPayload(feedbacks, payload = {}) {
@@ -4392,6 +4726,7 @@ function buildMissingGeneratedFeedback(student, payload = {}, sharedFields = {})
   return {
     studentId: student.id,
     name: student.name,
+    generatedFallback: true,
     feedback: [
       '【课程内容】',
       courseContent,
@@ -4417,10 +4752,12 @@ function renderTeachingApplyBar() {
   const pending = state.pendingTeachingApplication
   const shouldShow = Boolean(pending && state.feedbacks.length)
   els.teachingApplyBar.classList.toggle('hidden', !shouldShow)
-  els.applyTeachingDataBtn.disabled = !shouldShow || pending.applying || pending.applied
-  els.applyTeachingDataBtn.textContent = pending && pending.applied
-    ? '已应用到教学数据'
-    : (pending && pending.applying ? '正在应用...' : '确认应用到教学数据')
+  els.applyTeachingDataBtn.disabled = !shouldShow || pending.applying || pending.applied || state.generatedInputsDirty
+  els.applyTeachingDataBtn.textContent = state.generatedInputsDirty
+    ? '内容已修改，请重新生成后应用'
+    : (pending && pending.applied
+        ? '已应用到教学数据'
+        : (pending && pending.applying ? '正在应用...' : '确认应用到教学数据'))
 }
 
 function isImageFeedbackMode() {
@@ -5556,6 +5893,7 @@ function renderFeedbackModeControls() {
   if (els.classFeedbackTemplateField) els.classFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'class' || isImageFormat)
   if (els.oneFeedbackTemplateField) els.oneFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'oneOnOne' || isImageFormat)
   if (els.classFeedbackOptions) els.classFeedbackOptions.classList.toggle('hidden', !isClassScope)
+  if (els.classLessonDefaultsPanel) els.classLessonDefaultsPanel.classList.toggle('hidden', state.mode !== 'class' || isClassScope)
   if (els.classPositiveKeywordList) {
     els.classPositiveKeywordList.innerHTML = getClassKeywordGroups().positive.map((keyword) => (
       `<button class="keyword-chip positive" data-keyword="${escapeHtml(keyword)}" type="button">${escapeHtml(keyword)}</button>`
@@ -5611,6 +5949,7 @@ function handleClassKeywordClick(event) {
   }
 
   els.classRemarkInput.value = Array.from(current).join('、')
+  scheduleParentPreview()
 }
 
 function renderOneProfileKeywordControls() {
@@ -5651,6 +5990,7 @@ function appendKeywordToTextarea(textarea, keyword) {
 }
 
 function resetClassForm() {
+  resetClassLessonDraft()
   state.editingClassId = ''
   state.classTextbook = { fileKey: '', lectures: [] }
   els.classNameInput.value = ''
@@ -5667,6 +6007,7 @@ function resetClassForm() {
 }
 
 function resetOneProfileForm() {
+  resetOneLesson()
   state.editingOneProfileId = ''
   els.oneProfileNameInput.value = ''
   els.oneProfileGradeSelect.value = '高一'
@@ -5679,8 +6020,42 @@ function resetOneLesson() {
   state.oneLesson = {
     performance: '表现良好',
     remark: '',
-    keywords: ''
+    keywords: '',
+    internalNote: ''
   }
+  if (els.teacherInternalNoteInput) els.teacherInternalNoteInput.value = ''
+}
+
+function resetExitTestDraft() {
+  state.exitTest.mode = 'percent'
+  state.exitTest.totalScore = 100
+  state.exitTest.scores = {}
+  resetExitTestLectureSelection()
+  if (els.exitTestInput) els.exitTestInput.value = ''
+  updateFilePicker(els.exitTestInput, els.exitTestFileName)
+}
+
+function resetLessonCourseware() {
+  state.coursewareFiles = []
+  if (els.coursewareInput) els.coursewareInput.value = ''
+  resetPdfPageSelection()
+  updateFilePicker(els.coursewareInput, els.coursewareFileName)
+}
+
+function resetLessonInputs() {
+  resetLessonCourseware()
+  resetExitTestDraft()
+  state.classSchedule.selectedDate = getLocalDateKey(new Date())
+  state.classSchedule.calendarMonth = getMonthKey(new Date())
+  state.classSchedule.timeSlot = ''
+  state.classSchedule.calendarOpen = false
+  if (els.lessonTitleInput) els.lessonTitleInput.value = ''
+  if (els.courseNoteInput) els.courseNoteInput.value = ''
+  if (els.homeworkInput) els.homeworkInput.value = ''
+  if (els.classRemarkInput) els.classRemarkInput.value = ''
+  if (els.feedbackScopeSelect) els.feedbackScopeSelect.value = 'individual'
+  if (els.feedbackFormatSelect) els.feedbackFormatSelect.value = 'text'
+  if (els.showAllScoresSelect) els.showAllScoresSelect.value = 'single'
 }
 
 function fillClassForm(classInfo) {
@@ -5798,13 +6173,15 @@ async function saveClass() {
 
   state.selectedClassId = classInfo.id
   state.editingClassId = classInfo.id
-  state.feedbacks = []
+  clearGeneratedFeedbackState()
+  resetClassLessonDraft(classInfo)
+  resetLessonInputs()
   persistClasses()
   els.saveClassBtn.disabled = true
-  els.saveClassBtn.textContent = '正在同步档案...'
+  els.saveClassBtn.textContent = '正在保存档案...'
   const synced = await saveFeedbackDataToServer({ silent: true })
   render()
-  showToast(synced ? '班级已保存并同步' : '班级已保存在本机，数据库同步失败，请稍后再试')
+  showToast(synced ? '班级已保存到当前账号' : '班级已保存在本机，测试环境保存失败，请稍后再试')
   els.saveClassBtn.disabled = false
   els.saveClassBtn.textContent = '保存班级'
 }
@@ -5843,7 +6220,9 @@ function saveOneProfile() {
 
   state.selectedOneProfileId = profile.id
   state.editingOneProfileId = profile.id
-  state.feedbacks = []
+  clearGeneratedFeedbackState()
+  resetOneLesson()
+  resetLessonInputs()
   persistOneProfiles()
   render()
   showToast('学生档案已保存')
@@ -5866,8 +6245,9 @@ function deleteClassById(classId) {
   state.classes = state.classes.filter((item) => item.id !== classInfo.id)
   state.selectedClassId = state.classes[0] ? state.classes[0].id : ''
   state.editingClassId = state.selectedClassId
-  state.feedbacks = []
-  state.debug = null
+  clearGeneratedFeedbackState()
+  resetClassLessonDraft(getSelectedClass())
+  resetLessonInputs()
   persistClasses()
   fillClassForm(getSelectedClass())
   render()
@@ -5891,9 +6271,9 @@ function deleteOneProfileById(profileId) {
   state.oneProfiles = state.oneProfiles.filter((item) => item.id !== profile.id)
   state.selectedOneProfileId = state.oneProfiles[0] ? state.oneProfiles[0].id : ''
   state.editingOneProfileId = state.selectedOneProfileId
-  state.feedbacks = []
-  state.debug = null
+  clearGeneratedFeedbackState()
   resetOneLesson()
+  resetLessonInputs()
   persistOneProfiles()
   fillOneProfileForm(getSelectedOneProfile())
   render()
@@ -5905,71 +6285,21 @@ async function generateFeedback() {
 
   if (!payload) return
 
-  const formData = new FormData()
-
-  const files = payload.materialId ? [] : getSelectedCoursewareFiles()
-  const exitTestFile = els.exitTestInput && els.exitTestInput.files
-    ? els.exitTestInput.files[0]
-    : null
-
   setGenerating(true)
 
   try {
-    payload.coursewareMeta = []
-    for (let index = 0; index < files.length; index += 1) {
-      const file = files[index]
-      if (isPdfFile(file)) {
-        els.generateBtn.textContent = `正在读取 PDF ${index + 1}/${files.length}`
-        await appendPdfPreviewData(formData, file, payload, index)
-      } else {
-        const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === getFileKey(file))
-        payload.coursewareMeta[index] = {
-          fileIndex: index,
-          fileName: file.name,
-          selectedPdfPages: item ? buildCoursewareSelectedPagesFromRange(item) : [],
-          clientPdfText: ''
-        }
-      }
-      formData.append('courseware', file)
-    }
-    els.generateBtn.textContent = 'AI 生成中...'
-
-    formData.append('payload', JSON.stringify(payload))
-    if (exitTestFile && payload.exitTest) formData.append('exitTest', exitTestFile)
-
-    const response = await fetch('/api/generate-feedback', {
-      method: 'POST',
-      body: formData
+    const data = await submitFeedbackRequest(payload, (status) => {
+      els.generateBtn.textContent = status
     })
-    const data = await response.json()
-
-    if (response.status === 401) {
-      updateAccessState({ authenticated: false })
-      renderAccessState()
-      showAccessMessage(data.error || '请先登录账号')
-      throw new Error(data.error || '请先登录账号')
-    }
-
-    if (response.status === 429) {
-      updateAccessState({ usage: data.usage || state.access.usage })
-      renderAccessState()
-      throw new Error(data.error || '今天的生成次数已用完')
-    }
-
-    if (!response.ok || data.error) {
-      throw new Error(data.error || '生成失败')
-    }
-
-    if (data.usage) {
-      updateAccessState({ usage: data.usage })
-      renderAccessState()
-    }
 
     state.feedbacks = normalizeGeneratedFeedbacksForPayload(data.feedbacks, payload)
+    state.qualityIssues = validateGeneratedFeedbacks(state.feedbacks, payload)
+    state.generatedInputsDirty = false
     state.lastGeneratedPayload = payload
     state.debug = data.debug || null
     state.pendingTeachingApplication = {
       id: createId('pending-teaching'),
+      historyId: createId('history'),
       payload,
       feedbacks: state.feedbacks,
       createdAt: Date.now(),
@@ -5978,6 +6308,7 @@ async function generateFeedback() {
     }
     clearGenerationInstruction()
     renderResults()
+    renderParentPreview()
     renderImageReport(payload)
     showToast(data.demo ? (data.message || '已生成演示反馈，配置 API Key 后会调用 AI') : '反馈已生成')
     document.querySelector('#resultsPanel').scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -5985,6 +6316,113 @@ async function generateFeedback() {
     showToast(error.message || '生成失败')
   } finally {
     setGenerating(false)
+  }
+}
+
+async function submitFeedbackRequest(payload, onStatus = () => {}) {
+  const formData = new FormData()
+  const files = payload.materialId ? [] : getSelectedCoursewareFiles()
+  const exitTestFile = els.exitTestInput && els.exitTestInput.files
+    ? els.exitTestInput.files[0]
+    : null
+
+  payload.coursewareMeta = []
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index]
+    if (isPdfFile(file)) {
+      onStatus(`正在读取 PDF ${index + 1}/${files.length}`)
+      await appendPdfPreviewData(formData, file, payload, index)
+    } else {
+      const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === getFileKey(file))
+      payload.coursewareMeta[index] = {
+        fileIndex: index,
+        fileName: file.name,
+        selectedPdfPages: item ? buildCoursewareSelectedPagesFromRange(item) : [],
+        clientPdfText: ''
+      }
+    }
+    formData.append('courseware', file)
+  }
+  onStatus('AI 生成中...')
+  formData.append('payload', JSON.stringify(payload))
+  if (exitTestFile && payload.exitTest) formData.append('exitTest', exitTestFile)
+
+  const response = await fetch('/api/generate-feedback', { method: 'POST', body: formData })
+  const data = await response.json()
+
+  if (response.status === 401) {
+    updateAccessState({ authenticated: false })
+    renderAccessState()
+    showAccessMessage(data.error || '请先登录账号')
+    throw new Error(data.error || '请先登录账号')
+  }
+  if (response.status === 429) {
+    updateAccessState({ usage: data.usage || state.access.usage })
+    renderAccessState()
+    throw new Error(data.error || '今天的生成次数已用完')
+  }
+  if (!response.ok || data.error) throw new Error(data.error || '生成失败')
+  if (data.usage) {
+    updateAccessState({ usage: data.usage })
+    renderAccessState()
+  }
+  return data
+}
+
+async function regenerateStudentFeedback(index, button = null) {
+  const currentItem = state.feedbacks[index]
+  const payload = state.lastGeneratedPayload
+  if (!currentItem || !payload || payload.feedbackScope === 'class') return
+  if (state.generatedInputsDirty) {
+    showToast('课堂信息已修改，请重新生成全部反馈')
+    return
+  }
+  const student = (payload.students || []).find((item) => item.id === currentItem.studentId)
+    || (payload.students || []).find((item) => item.name === currentItem.name)
+  if (!student) {
+    showToast('没有找到该学生的生成资料')
+    return
+  }
+
+  const singlePayload = {
+    ...payload,
+    generationInstruction: els.generationInstructionInput ? els.generationInstructionInput.value.trim() : '',
+    students: [student],
+    exitTest: payload.exitTest
+      ? {
+          ...payload.exitTest,
+          students: (payload.exitTest.students || []).filter((item) => item.id === student.id || item.name === student.name)
+        }
+      : undefined
+  }
+  if (button) {
+    button.disabled = true
+    button.textContent = '生成中'
+  }
+  try {
+    const data = await submitFeedbackRequest(singlePayload)
+    const generated = normalizeGeneratedFeedbacksForPayload(data.feedbacks, singlePayload)[0]
+    if (!generated) throw new Error('没有返回该学生的反馈')
+    state.feedbacks[index] = generated
+    state.generatedInputsDirty = false
+    if (state.pendingTeachingApplication) {
+      state.pendingTeachingApplication.feedbacks = state.feedbacks
+      state.pendingTeachingApplication.payload = payload
+      state.pendingTeachingApplication.applied = false
+    }
+    state.qualityIssues = validateGeneratedFeedbacks(state.feedbacks, payload)
+    clearGenerationInstruction()
+    renderResults()
+    renderImageReport(payload)
+    renderParentPreview()
+    showToast(`${student.name} 的反馈已重新生成`)
+  } catch (error) {
+    showToast(error.message || '重新生成失败')
+  } finally {
+    if (button && button.isConnected) {
+      button.disabled = false
+      button.textContent = '重新生成'
+    }
   }
 }
 
@@ -6027,6 +6465,7 @@ function buildGeneratePayload() {
     const lectureNote = selectedLecture
       ? `教材讲次：${selectedLecture.title || '所选讲次'}（第 ${selectedLecture.startPage}-${selectedLecture.endPage} 页）`
       : ''
+    const workingStudents = getWorkingStudents()
     const classStudents = feedbackScope === 'class'
       ? [{
           id: `${selectedClass.id}-class-summary`,
@@ -6035,8 +6474,12 @@ function buildGeneratePayload() {
           remark: '',
           keywords: classRemark
         }]
-      : selectedClass.students.map((student) => ({
-          ...student,
+      : workingStudents.map((student) => ({
+          id: student.id,
+          name: student.name,
+          performance: student.performance,
+          remark: student.remark,
+          keywords: student.keywords,
           exitTestScore: exitTest ? getExitTestScoreText(exitTest, student.name) : ''
         }))
 
@@ -6166,6 +6609,7 @@ async function handleCoursewareChange() {
   if (els.coursewareInput) els.coursewareInput.value = ''
   const files = getCoursewareFiles()
   const pdfFiles = files.filter(isPdfFile)
+  scheduleParentPreview()
   updateFilePicker(els.coursewareInput, els.coursewareFileName)
   syncCoursewareSelectionItems(files)
   renderPdfPageSelection()
@@ -6550,6 +6994,7 @@ function handleCoursewareSelectionChange(event) {
     }
   }
   renderPdfPageSelection()
+  scheduleParentPreview()
 }
 
 function handleCoursewareSelectionClick(event) {
@@ -6557,6 +7002,7 @@ function handleCoursewareSelectionClick(event) {
   if (removeButton) {
     removeCoursewareFile(removeButton.dataset.coursewareRemove)
     renderPdfPageSelection()
+    scheduleParentPreview()
     return
   }
 }
@@ -7304,6 +7750,54 @@ function copyAllFeedbacks() {
   copyText(text, '全部反馈已复制')
 }
 
+async function exportAllFeedbacks() {
+  if (!state.feedbacks.length) {
+    showToast('还没有可导出的反馈')
+    return
+  }
+
+  if (!isImageFeedbackMode()) {
+    const text = state.feedbacks
+      .map((item) => `${item.name}\n${item.feedback}`)
+      .join('\n\n================================\n\n')
+    const className = state.lastGeneratedPayload && state.lastGeneratedPayload.className
+      ? state.lastGeneratedPayload.className
+      : '课程反馈'
+    downloadBlob(new Blob([`\ufeff${text}`], { type: 'text/plain;charset=utf-8' }), `${sanitizeFileName(className)}-全部反馈.txt`)
+    showToast('全部文字反馈已导出')
+    return
+  }
+
+  const sheets = Array.from(document.querySelectorAll('[data-image-report-sheet]'))
+  if (!sheets.length) {
+    showToast('还没有图片反馈报告')
+    return
+  }
+  try {
+    await ensureJsPdfReady()
+    const { jsPDF } = window.jspdf
+    const pdf = new jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' })
+    const pageWidth = pdf.internal.pageSize.getWidth()
+    const pageHeight = pdf.internal.pageSize.getHeight()
+    const margin = 18
+    for (let index = 0; index < sheets.length; index += 1) {
+      const canvas = await window.html2canvas(sheets[index], { scale: 2, backgroundColor: '#ffffff' })
+      const scale = Math.min((pageWidth - margin * 2) / canvas.width, (pageHeight - margin * 2) / canvas.height)
+      const width = canvas.width * scale
+      const height = canvas.height * scale
+      if (index > 0) pdf.addPage()
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.94), 'JPEG', (pageWidth - width) / 2, margin, width, height)
+    }
+    const className = state.lastGeneratedPayload && state.lastGeneratedPayload.className
+      ? state.lastGeneratedPayload.className
+      : '课程反馈'
+    pdf.save(`${sanitizeFileName(className)}-全部图片反馈.pdf`)
+    showToast(`已导出 ${sheets.length} 位学生的反馈 PDF`)
+  } catch (error) {
+    showToast(error.message || '批量导出失败')
+  }
+}
+
 async function copyText(text, message) {
   try {
     await navigator.clipboard.writeText(text)
@@ -7469,34 +7963,123 @@ function getWorkingStudents() {
       name: profile.name,
       performance: state.oneLesson.performance,
       remark: state.oneLesson.remark,
-      keywords: state.oneLesson.keywords
+      keywords: state.oneLesson.keywords,
+      internalNote: state.oneLesson.internalNote || '',
+      isOverride: true
     }]
   }
 
   const selectedClass = getSelectedClass()
-  return selectedClass ? selectedClass.students : []
+  if (!selectedClass) return []
+  ensureClassLessonDraft(selectedClass)
+
+  return selectedClass.students.map((student) => {
+    const override = state.classLessonDraft.overrides[student.id]
+    const defaults = state.classLessonDraft.defaults
+    return {
+      id: student.id,
+      name: student.name,
+      performance: override ? override.performance : defaults.performance,
+      remark: override ? override.parentRemark : defaults.parentRemark,
+      keywords: override ? override.keywords : defaults.keywords,
+      internalNote: state.classLessonDraft.studentInternalNotes[student.id] || '',
+      isOverride: Boolean(override)
+    }
+  })
 }
 
-function updateWorkingStudentField(index, field, value) {
+function createEmptyClassLessonDraft(classInfo = null) {
+  return {
+    classId: classInfo ? classInfo.id : '',
+    defaults: {
+      performance: '表现良好',
+      keywords: '',
+      parentRemark: ''
+    },
+    overrides: {},
+    internalNote: '',
+    studentInternalNotes: {},
+    previewStudentId: classInfo && classInfo.students && classInfo.students[0] ? classInfo.students[0].id : ''
+  }
+}
+
+function ensureClassLessonDraft(classInfo = getSelectedClass()) {
+  if (!classInfo) {
+    state.classLessonDraft = createEmptyClassLessonDraft()
+    return state.classLessonDraft
+  }
+  if (!state.classLessonDraft || state.classLessonDraft.classId !== classInfo.id) {
+    state.classLessonDraft = createEmptyClassLessonDraft(classInfo)
+  }
+  return state.classLessonDraft
+}
+
+function resetClassLessonDraft(classInfo = getSelectedClass()) {
+  state.classLessonDraft = createEmptyClassLessonDraft(classInfo)
+  if (els.teacherInternalNoteInput) els.teacherInternalNoteInput.value = ''
+}
+
+function updateClassLessonDefault(field, value) {
+  const draft = ensureClassLessonDraft()
+  if (!(field in draft.defaults)) return
+  draft.defaults[field] = value
+  markGeneratedInputsDirty()
+  renderStudentTable()
+}
+
+function setStudentDraftOverrideEnabled(studentId, enabled) {
+  const draft = ensureClassLessonDraft()
+  if (!studentId) return
+  if (enabled) {
+    draft.overrides[studentId] = {
+      performance: draft.defaults.performance,
+      keywords: draft.defaults.keywords,
+      parentRemark: draft.defaults.parentRemark
+    }
+  } else {
+    delete draft.overrides[studentId]
+    delete draft.studentInternalNotes[studentId]
+  }
+  markGeneratedInputsDirty()
+  renderStudentTable()
+}
+
+function updateStudentInternalNote(studentId, value) {
+  if (state.mode === 'oneOnOne') {
+    state.oneLesson.internalNote = value
+    return
+  }
+  const draft = ensureClassLessonDraft()
+  if (!studentId) return
+  if (String(value || '').trim()) draft.studentInternalNotes[studentId] = value
+  else delete draft.studentInternalNotes[studentId]
+}
+
+function updateWorkingStudentField(index, field, value, studentId = '') {
   if (!Number.isInteger(index)) return
 
   if (state.mode === 'oneOnOne') {
     if (index !== 0 || !(field in state.oneLesson)) return
     state.oneLesson[field] = value
+    markGeneratedInputsDirty()
+    renderParentPreview()
     return
   }
 
-  const students = getWorkingStudents()
-  const student = students[index]
-  if (!student) return
-
-  student[field] = value
-  persistClasses()
+  const draft = ensureClassLessonDraft()
+  const id = studentId || (getWorkingStudents()[index] && getWorkingStudents()[index].id)
+  const override = draft.overrides[id]
+  if (!override) return
+  const targetField = field === 'remark' ? 'parentRemark' : field
+  if (!(targetField in override)) return
+  override[targetField] = value
+  markGeneratedInputsDirty()
+  renderParentPreview()
 }
 
-function appendStudentKeyword(index, keyword) {
+function appendStudentKeyword(index, keyword, studentId = '') {
   const students = getWorkingStudents()
-  const student = students[index]
+  const student = students.find((item) => item.id === studentId) || students[index]
   if (!student || !keyword) return
 
   const remark = String(student.remark || '').trim()
@@ -7513,10 +8096,17 @@ function appendStudentKeyword(index, keyword) {
   if (state.mode === 'oneOnOne') {
     state.oneLesson.keywords = student.keywords
     state.oneLesson.remark = student.remark
+    markGeneratedInputsDirty()
     return
   }
 
-  persistClasses()
+  const draft = ensureClassLessonDraft()
+  const override = draft.overrides[student.id]
+  if (!override) return
+  override.keywords = student.keywords
+  override.parentRemark = student.remark
+  markGeneratedInputsDirty()
+  renderParentPreview()
 }
 
 function getProfileMeta(profile) {
