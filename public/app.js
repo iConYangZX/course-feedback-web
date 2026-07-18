@@ -300,6 +300,9 @@ function bindElements() {
     feedbackScopeSelect: document.querySelector('#feedbackScopeSelect'),
     scoreDisplayField: document.querySelector('#scoreDisplayField'),
     showAllScoresSelect: document.querySelector('#showAllScoresSelect'),
+    scoreRateDisplayField: document.querySelector('#scoreRateDisplayField'),
+    scoreRateDisplayToggle: document.querySelector('#scoreRateDisplayToggle'),
+    scoreRateDisplayText: document.querySelector('#scoreRateDisplayText'),
     classFeedbackTemplateField: document.querySelector('#classFeedbackTemplateField'),
     classFeedbackOptions: document.querySelector('#classFeedbackOptions'),
     classPositiveKeywordList: document.querySelector('#classPositiveKeywordList'),
@@ -460,6 +463,10 @@ function bindEvents() {
     renderResults()
   })
   if (els.showAllScoresSelect) els.showAllScoresSelect.addEventListener('change', () => {
+    if (isImageFeedbackMode() && state.feedbacks.length) renderImageReport()
+  })
+  if (els.scoreRateDisplayToggle) els.scoreRateDisplayToggle.addEventListener('click', () => {
+    setScoreRateStatisticsVisible(!isScoreRateStatisticsVisible())
     if (isImageFeedbackMode() && state.feedbacks.length) renderImageReport()
   })
   if (els.classPositiveKeywordList) els.classPositiveKeywordList.addEventListener('click', handleClassKeywordClick)
@@ -3478,6 +3485,7 @@ function buildFeedbackHistoryEntry(payload, feedbacks, createdAt = Date.now()) {
     classId: payload.classId || '',
     feedbackScope: payload.feedbackScope || 'individual',
     feedbackFormat: payload.feedbackFormat || 'text',
+    showScoreRateStatisticsInImage: payload.showScoreRateStatisticsInImage !== false,
     className: payload.className,
     profileId: payload.profileId || '',
     studentName: payload.mode === 'oneOnOne' && payload.students && payload.students[0] ? payload.students[0].name : '',
@@ -4429,6 +4437,21 @@ function isImageFeedbackMode() {
     && els.feedbackFormatSelect.value === 'image'
 }
 
+function isScoreRateStatisticsVisible() {
+  return !els.scoreRateDisplayToggle
+    || els.scoreRateDisplayToggle.getAttribute('aria-pressed') !== 'false'
+}
+
+function setScoreRateStatisticsVisible(visible) {
+  if (!els.scoreRateDisplayToggle) return
+  const shouldShow = Boolean(visible)
+  els.scoreRateDisplayToggle.setAttribute('aria-pressed', shouldShow ? 'true' : 'false')
+  els.scoreRateDisplayToggle.classList.toggle('is-on', shouldShow)
+  if (els.scoreRateDisplayText) {
+    els.scoreRateDisplayText.textContent = shouldShow ? '是，显示统计' : '否，只显示成绩'
+  }
+}
+
 function renderImageReport(payload = null) {
   if (!els.imageReportPanel || !els.imageReportPreview) return
 
@@ -4552,6 +4575,8 @@ function renderImageReportSheet(options) {
           }))
     : sortReportScoreRows(reportScores)
   const hasScoreRows = scoreRows.length > 0
+  const showRateStatistics = isScoreRateStatisticsVisible()
+    && scoreRows.some((score) => score.rate !== null && Number.isFinite(Number(score.rate)))
   const scoredRows = scoreRows.filter((score) => (
     !score.absent
     && score.score !== null
@@ -4566,13 +4591,18 @@ function renderImageReportSheet(options) {
   const min = numericScores.length ? Math.min(...numericScores) : '-'
   const rates = scoredRows.map((score) => Number(score.rate)).filter(Number.isFinite)
   const rate = rates.length ? `${(rates.reduce((sum, value) => sum + value, 0) / rates.length).toFixed(1)}%` : '-'
+  const exitTestLayoutClass = !hasScoreRows
+    ? 'without-exit-test'
+    : (scoreRows.length > 16
+        ? 'with-exit-test exit-test-extra-dense'
+        : (scoreRows.length > 8 ? 'with-exit-test exit-test-dense' : 'with-exit-test'))
   const className = reportPayload.className || (selectedClass && selectedClass.name) || ''
   const studentName = state.mode === 'oneOnOne'
     ? ((selectedProfile && selectedProfile.name) || item.name || reportPayload.className || '')
     : item.name
 
   return `
-    <article class="report-sheet image-report-sheet" id="${index === 0 ? 'imageReportSheet' : `imageReportSheet-${index}`}" data-image-report-sheet data-report-name="${escapeHtml(studentName || item.name || `报告${index + 1}`)}">
+    <article class="report-sheet image-report-sheet ${exitTestLayoutClass}" id="${index === 0 ? 'imageReportSheet' : `imageReportSheet-${index}`}" data-image-report-sheet data-report-name="${escapeHtml(studentName || item.name || `报告${index + 1}`)}" data-has-exit-test="${hasScoreRows ? 'true' : 'false'}">
       <header class="report-header">
         <div></div>
         <h2>${subjectText ? `${escapeHtml(subjectText)}课程反馈报告` : '课程反馈报告'}</h2>
@@ -4604,15 +4634,15 @@ function renderImageReportSheet(options) {
         <h3>【课后作业】</h3>
         <div class="report-paragraph">${formatReportText(homeworkText)}</div>
       </section>` : ''}
-      ${hasScoreRows ? `<section>
+      ${hasScoreRows ? `<section class="report-exit-test-section">
         <h3>【出门测成绩${showAllScores ? '（全班）' : ''}】</h3>
         <table class="report-table">
-          <thead><tr><th>姓名</th><th>成绩</th><th>正确率</th></tr></thead>
+          <thead><tr><th>姓名</th><th>成绩</th>${showRateStatistics ? '<th>正确率</th>' : ''}</tr></thead>
           <tbody>
-            ${scoreRows.map((score) => `<tr><td>${escapeHtml(score.name)}</td><td>${escapeHtml(score.displayScore || score.score || '—')}</td><td>${score.rate !== null ? `${Number(score.rate).toFixed(1)}%` : '—'}</td></tr>`).join('')}
+            ${scoreRows.map((score) => `<tr><td>${escapeHtml(score.name)}</td><td>${escapeHtml(score.displayScore || score.score || '—')}</td>${showRateStatistics ? `<td>${score.rate !== null ? `${Number(score.rate).toFixed(1)}%` : '—'}</td>` : ''}</tr>`).join('')}
           </tbody>
         </table>
-        ${isIndividual ? '' : `<p>平均分：${avg} 最高分：${max} 最低分：${min} 得分率：${rate}</p>`}
+        ${isIndividual ? '' : `<p class="report-score-summary">平均分：${avg} 最高分：${max} 最低分：${min}${showRateStatistics ? ` 得分率：${rate}` : ''}</p>`}
       </section>` : ''}
       <footer>以上为本次课程反馈，如有疑问欢迎沟通。</footer>
     </article>
@@ -5553,6 +5583,7 @@ function renderFeedbackModeControls() {
   if (els.studentToolbar) els.studentToolbar.classList.toggle('hidden', isClassScope)
   if (studentTable) studentTable.classList.toggle('hidden', isClassScope)
   if (els.scoreDisplayField) els.scoreDisplayField.classList.toggle('hidden', !isClassIndividualImage)
+  if (els.scoreRateDisplayField) els.scoreRateDisplayField.classList.toggle('hidden', state.mode !== 'class' || !isImageFormat)
   if (els.classFeedbackTemplateField) els.classFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'class' || isImageFormat)
   if (els.oneFeedbackTemplateField) els.oneFeedbackTemplateField.classList.toggle('hidden', state.mode !== 'oneOnOne' || isImageFormat)
   if (els.classFeedbackOptions) els.classFeedbackOptions.classList.toggle('hidden', !isClassScope)
@@ -6019,6 +6050,7 @@ function buildGeneratePayload() {
     const feedbackScope = els.feedbackScopeSelect ? els.feedbackScopeSelect.value : 'individual'
     const feedbackFormat = els.feedbackFormatSelect ? els.feedbackFormatSelect.value : 'text'
     const showAllScoresInIndividualReports = els.showAllScoresSelect && els.showAllScoresSelect.value === 'all'
+    const showScoreRateStatisticsInImage = isScoreRateStatisticsVisible()
     const classRemark = els.classRemarkInput ? els.classRemarkInput.value.trim() : ''
     const homework = els.homeworkInput ? els.homeworkInput.value.trim() : ''
     const schedule = buildClassSchedulePayload()
@@ -6045,6 +6077,7 @@ function buildGeneratePayload() {
       feedbackScope,
       feedbackFormat,
       showAllScoresInIndividualReports,
+      showScoreRateStatisticsInImage,
       classId: selectedClass.id,
       className: selectedClass.name,
       grade: selectedClass.grade,

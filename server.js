@@ -2058,6 +2058,7 @@ function normalizeFeedbackHistory(history) {
       lessonDateText: trim(source.lessonDateText),
       feedbackScope: trim(source.feedbackScope) === 'class' ? 'class' : 'individual',
       feedbackFormat: trim(source.feedbackFormat) === 'image' ? 'image' : 'text',
+      showScoreRateStatisticsInImage: source.showScoreRateStatisticsInImage !== false,
       courseNote: trim(source.courseNote),
       exitTest: source.exitTest && typeof source.exitTest === 'object' ? source.exitTest : null,
       feedbackExclusions: normalizeStudentExclusions(source.feedbackExclusions),

@@ -406,6 +406,13 @@
                 <option value="all">是，展示全班成绩</option>
               </select>
             </label>
+            <div class="field hidden" id="scoreRateDisplayField">
+              <span>图片中统计正确率/得分率</span>
+              <button class="rate-stat-toggle is-on" id="scoreRateDisplayToggle" type="button" aria-pressed="true">
+                <span class="rate-stat-toggle-label" id="scoreRateDisplayText">是，显示统计</span>
+                <span class="rate-stat-toggle-switch" aria-hidden="true"></span>
+              </button>
+            </div>
             <label class="field">
               <span>课后作业</span>
               <input id="homeworkInput" type="text" placeholder="例如：完成第3讲易优精练，预习下一节内容" />
