@@ -4560,7 +4560,8 @@ function startJsonHeartbeat(res) {
   }
 
   res.status(200)
-  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  // Render buffers ordinary JSON responses; the event-stream type keeps long AI requests open.
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
   res.setHeader('Cache-Control', 'no-cache, no-transform')
   res.setHeader('X-Accel-Buffering', 'no')
   if (typeof res.flushHeaders === 'function') res.flushHeaders()
