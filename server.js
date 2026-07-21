@@ -21,6 +21,7 @@ const AI_REQUEST_TIMEOUT_MS = Number.isFinite(configuredAIRequestTimeout)
 const AI_REQUEST_RETRY_COUNT = 1
 const JSON_HEARTBEAT_INTERVAL_MS = 12000
 const JSON_HEARTBEAT_CHUNK_SIZE = 16 * 1024
+const JSON_HEARTBEAT_INITIAL_CHUNK_SIZE = 64 * 1024
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -4553,9 +4554,9 @@ function startJsonHeartbeat(res) {
     timer: null,
     stopped: false
   }
-  const writeHeartbeat = () => {
+  const writeHeartbeat = (chunkSize = JSON_HEARTBEAT_CHUNK_SIZE) => {
     if (heartbeat.stopped || res.writableEnded || res.destroyed) return
-    res.write(`${' '.repeat(JSON_HEARTBEAT_CHUNK_SIZE)}\n`)
+    res.write(`${' '.repeat(chunkSize)}\n`)
   }
 
   res.status(200)
@@ -4564,7 +4565,7 @@ function startJsonHeartbeat(res) {
   res.setHeader('X-Accel-Buffering', 'no')
   if (typeof res.flushHeaders === 'function') res.flushHeaders()
 
-  writeHeartbeat()
+  writeHeartbeat(JSON_HEARTBEAT_INITIAL_CHUNK_SIZE)
   heartbeat.timer = setInterval(writeHeartbeat, JSON_HEARTBEAT_INTERVAL_MS)
   return heartbeat
 }
