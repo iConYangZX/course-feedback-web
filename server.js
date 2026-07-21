@@ -19,6 +19,8 @@ const AI_REQUEST_TIMEOUT_MS = Number.isFinite(configuredAIRequestTimeout)
   ? Math.max(30000, configuredAIRequestTimeout)
   : 150000
 const AI_REQUEST_RETRY_COUNT = 1
+const FEEDBACK_BATCH_SIZE = 5
+const FEEDBACK_BATCH_CONCURRENCY = 3
 const JSON_HEARTBEAT_INTERVAL_MS = 12000
 const JSON_HEARTBEAT_CHUNK_SIZE = 16 * 1024
 const JSON_HEARTBEAT_INITIAL_CHUNK_SIZE = 64 * 1024
@@ -622,16 +624,18 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
       return
     }
 
-    const aiResponse = await requestAI(payload, courseware, aiConfig)
+    const generation = await requestFeedbacks(payload, courseware, aiConfig)
     const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
-    const parsed = parseFeedbackResponse(aiResponse, aiConfig.provider)
+    const debug = buildDebugSummary(payload, courseware)
+    debug.aiBatchCount = generation.batchCount
+    debug.aiFailedBatchCount = generation.failedBatchCount
 
     sendJsonResult(res, {
       provider: aiConfig.provider,
       model: aiConfig.model,
-      debug: buildDebugSummary(payload, courseware),
+      debug,
       usage: nextUsage,
-      feedbacks: normalizeFeedbacks(parsed.feedbacks, payload.students, payload)
+      feedbacks: normalizeFeedbacks(generation.feedbacks, payload.students, payload)
     }, responseHeartbeat)
   } catch (error) {
     console.error(error)
@@ -3168,6 +3172,108 @@ async function requestAI(payload, courseware, aiConfig) {
   }
 
   return requestDeepSeek(payload, courseware, aiConfig)
+}
+
+async function requestFeedbacks(payload, courseware, aiConfig) {
+  const students = Array.isArray(payload.students) ? payload.students : []
+  const shouldBatch = payload.feedbackScope !== 'class' && students.length > FEEDBACK_BATCH_SIZE
+
+  if (!shouldBatch) {
+    const response = await requestAI(payload, courseware, aiConfig)
+    const parsed = parseFeedbackResponse(response, aiConfig.provider)
+    return {
+      feedbacks: Array.isArray(parsed.feedbacks) ? parsed.feedbacks : [],
+      batchCount: 1,
+      failedBatchCount: 0
+    }
+  }
+
+  const batches = []
+  for (let index = 0; index < students.length; index += FEEDBACK_BATCH_SIZE) {
+    batches.push(students.slice(index, index + FEEDBACK_BATCH_SIZE))
+  }
+
+  const results = new Array(batches.length)
+  let nextBatchIndex = 0
+  const workerCount = Math.min(FEEDBACK_BATCH_CONCURRENCY, batches.length)
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextBatchIndex < batches.length) {
+      const batchIndex = nextBatchIndex
+      nextBatchIndex += 1
+
+      try {
+        const batchPayload = buildFeedbackBatchPayload(payload, batches[batchIndex])
+        results[batchIndex] = {
+          status: 'fulfilled',
+          feedbacks: await requestFeedbackBatch(batchPayload, courseware, aiConfig)
+        }
+      } catch (error) {
+        console.error(`AI feedback batch ${batchIndex + 1}/${batches.length} failed`, error)
+        results[batchIndex] = {
+          status: 'rejected',
+          error
+        }
+      }
+    }
+  }))
+
+  const successfulFeedbacks = results.flatMap((result) => (
+    result && result.status === 'fulfilled' ? result.feedbacks : []
+  ))
+  const failedResults = results.filter((result) => !result || result.status !== 'fulfilled')
+
+  if (!successfulFeedbacks.length) {
+    const firstError = failedResults.find((result) => result && result.error)
+    throw (firstError && firstError.error) || new Error('AI 未返回可用的反馈内容，请稍后重试')
+  }
+
+  return {
+    feedbacks: successfulFeedbacks,
+    batchCount: batches.length,
+    failedBatchCount: failedResults.length
+  }
+}
+
+async function requestFeedbackBatch(payload, courseware, aiConfig) {
+  let lastError = null
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await requestAI(payload, courseware, aiConfig)
+      const parsed = parseFeedbackResponse(response, aiConfig.provider)
+      const feedbacks = Array.isArray(parsed.feedbacks) ? parsed.feedbacks : []
+      if (feedbacks.length) return feedbacks
+      lastError = new Error('AI 返回的反馈内容不完整')
+    } catch (error) {
+      lastError = error
+      break
+    }
+  }
+
+  throw lastError || new Error('AI 未返回可用的反馈内容')
+}
+
+function buildFeedbackBatchPayload(payload, students) {
+  const studentIds = new Set(students.map((student) => trim(student && student.id)).filter(Boolean))
+  const studentNames = new Set(students.map((student) => trim(student && student.name)).filter(Boolean))
+  const exitTest = payload.exitTest && typeof payload.exitTest === 'object'
+    ? {
+        ...payload.exitTest,
+        students: Array.isArray(payload.exitTest.students)
+          ? payload.exitTest.students.filter((student) => (
+              studentIds.has(trim(student && student.id))
+              || studentNames.has(trim(student && student.name))
+            ))
+          : []
+      }
+    : null
+
+  return {
+    ...payload,
+    students,
+    ...(exitTest ? { exitTest } : {})
+  }
 }
 
 async function requestOpenAI(payload, courseware, aiConfig) {
