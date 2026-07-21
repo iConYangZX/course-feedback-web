@@ -14,6 +14,12 @@ require('dotenv').config()
 const app = express()
 const execFileAsync = promisify(execFile)
 const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
+const configuredAIRequestTimeout = Number(process.env.AI_REQUEST_TIMEOUT_MS || 150000)
+const AI_REQUEST_TIMEOUT_MS = Number.isFinite(configuredAIRequestTimeout)
+  ? Math.max(30000, configuredAIRequestTimeout)
+  : 150000
+const AI_REQUEST_RETRY_COUNT = 1
+const JSON_HEARTBEAT_INTERVAL_MS = 12000
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -569,6 +575,8 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
   { name: 'exitTest', maxCount: 1 },
   { name: 'pdfPageImage', maxCount: 1000 }
 ]), async (req, res) => {
+  let responseHeartbeat = null
+
   try {
     const session = req.accessSession
     const coursewareFiles = getUploadedFiles(req, 'courseware')
@@ -593,6 +601,8 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     validatePayload(payload, Boolean(coursewareFiles.length || storedMaterialFile))
 
     const aiConfig = getAIConfig()
+    if (aiConfig.apiKey) responseHeartbeat = startJsonHeartbeat(res)
+
     const courseware = await normalizeCoursewareUploads(coursewareFiles, storedMaterialFile, payload, pdfPageImages)
     const exitTestCourseware = exitTestFile ? await normalizeCourseware(exitTestFile, {
       selectedPdfPages: payload.exitTest && payload.exitTest.selectedPdfPages
@@ -601,12 +611,12 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
 
     if (!aiConfig.apiKey) {
       const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
-      res.json({
+      sendJsonResult(res, {
         demo: true,
         message: `当前未配置 ${aiConfig.keyName}，已返回演示反馈。`,
         usage: nextUsage,
         feedbacks: buildDemoFeedbacks(payload)
-      })
+      }, responseHeartbeat)
       return
     }
 
@@ -614,18 +624,20 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
     const parsed = parseFeedbackResponse(aiResponse, aiConfig.provider)
 
-    res.json({
+    sendJsonResult(res, {
       provider: aiConfig.provider,
       model: aiConfig.model,
       debug: buildDebugSummary(payload, courseware),
       usage: nextUsage,
       feedbacks: normalizeFeedbacks(parsed.feedbacks, payload.students, payload)
-    })
+    }, responseHeartbeat)
   } catch (error) {
     console.error(error)
-    res.status(400).json({
+    sendJsonResult(res, {
       error: getUserFacingError(error)
-    })
+    }, responseHeartbeat, 400)
+  } finally {
+    stopJsonHeartbeat(responseHeartbeat)
   }
 })
 
@@ -2127,14 +2139,14 @@ async function requestOpenAIText(prompt, aiConfig) {
     input: prompt
   }
 
-  const response = await fetch(`${aiConfig.baseUrl}/responses`, withProxy({
+  const response = await fetchAI(`${aiConfig.baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${aiConfig.apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
-  }))
+  })
 
   const text = await response.text()
   const parsed = parseProviderResponseJson(text, 'AI')
@@ -2157,7 +2169,7 @@ async function requestChatText(prompt, aiConfig, options = {}) {
     throw new Error('请先填写 API 端点 URL')
   }
 
-  const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+  const response = await fetchAI(`${aiConfig.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${aiConfig.apiKey}`,
@@ -2179,7 +2191,7 @@ async function requestChatText(prompt, aiConfig, options = {}) {
       max_tokens: 1200,
       stream: false
     })
-  }))
+  })
 
   const text = await response.text()
   const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
@@ -2269,14 +2281,14 @@ async function requestOpenAIPaperAnalysis(payload, courseware, aiConfig) {
     }
   }
 
-  const response = await fetch(`${aiConfig.baseUrl}/responses`, withProxy({
+  const response = await fetchAI(`${aiConfig.baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${aiConfig.apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
-  }))
+  })
   const text = await response.text()
   const parsed = parseProviderResponseJson(text, 'AI')
   if (!response.ok) {
@@ -2317,14 +2329,14 @@ async function requestChatPaperAnalysis(payload, courseware, aiConfig, options =
   }
 
   try {
-    const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+    const response = await fetchAI(`${aiConfig.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${aiConfig.apiKey}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(body)
-    }))
+    })
     const text = await response.text()
     const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
     if (!response.ok) {
@@ -2335,14 +2347,14 @@ async function requestChatPaperAnalysis(payload, courseware, aiConfig, options =
   } catch (error) {
     if (!includeImage || !isLikelyImageRequestError(error)) throw error
     body.messages[1].content = buildPaperAnalysisContent(payload, courseware, 'text')
-    const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+    const response = await fetchAI(`${aiConfig.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${aiConfig.apiKey}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(body)
-    }))
+    })
     const text = await response.text()
     const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
     if (!response.ok) {
@@ -2598,14 +2610,14 @@ async function requestOpenAIPaperScoreRecognition(payload, courseware, aiConfig)
     }
   }
 
-  const response = await fetch(`${aiConfig.baseUrl}/responses`, withProxy({
+  const response = await fetchAI(`${aiConfig.baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${aiConfig.apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
-  }))
+  })
   const text = await response.text()
   const parsed = parseProviderResponseJson(text, 'AI')
   if (!response.ok) {
@@ -2645,14 +2657,14 @@ async function requestChatPaperScoreRecognition(payload, courseware, aiConfig, o
     }
   }
 
-  const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+  const response = await fetchAI(`${aiConfig.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${aiConfig.apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
-  }))
+  })
   const text = await response.text()
   const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
   if (!response.ok) {
@@ -2811,19 +2823,19 @@ async function normalizeCourseware(file, options = {}) {
   const pdfPageImages = Array.isArray(options.pdfPageImages) ? options.pdfPageImages : []
   const selectedPdfPages = normalizePageNumbers(options.selectedPdfPages)
   const clientPdfText = trim(options.clientPdfText)
-  const shouldUseSelectedPdfPages = isPdf && (selectedPdfPages.length || pdfPageImages.length || clientPdfText)
-  const extraction = shouldUseSelectedPdfPages
+  const hasBrowserSelectedPageContent = isPdf && Boolean(pdfPageImages.length || clientPdfText)
+  const extraction = hasBrowserSelectedPageContent
     ? { text: '', source: 'pdf-selected-pages', pageCount: selectedPdfPages.length || pdfPageImages.length }
     : (isImage
         ? { text: await extractImageText(file.buffer, originalName), source: 'image-ocr', pageCount: 1 }
         : await extractCoursewareText(file.buffer, originalName))
-  const rawExtractedText = shouldUseSelectedPdfPages
+  const rawExtractedText = hasBrowserSelectedPageContent
     ? clientPdfText
     : (extraction.text || clientPdfText)
-  const extractedText = !isPdf && selectedPdfPages.length
+  const extractedText = selectedPdfPages.length && !hasBrowserSelectedPageContent
     ? sliceTextByApproxPages(rawExtractedText, selectedPdfPages)
     : rawExtractedText
-  const extractionSource = extractedText && shouldUseSelectedPdfPages
+  const extractionSource = extractedText && hasBrowserSelectedPageContent
     ? 'pdf-selected-pages'
     : (extraction.text ? extraction.source : (clientPdfText ? 'browser-pdf-text' : extraction.source))
 
@@ -3219,14 +3231,14 @@ async function requestOpenAI(payload, courseware, aiConfig) {
     }
   }
 
-  const response = await fetch(`${aiConfig.baseUrl}/responses`, withProxy({
+  const response = await fetchAI(`${aiConfig.baseUrl}/responses`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${aiConfig.apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
-  }))
+  })
 
   const text = await response.text()
   let parsed
@@ -3325,14 +3337,14 @@ async function sendChatCompatibleRequest(userContent, aiConfig, options = {}) {
     }
   }
 
-  const response = await fetch(`${aiConfig.baseUrl}/chat/completions`, withProxy({
+  const response = await fetchAI(`${aiConfig.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${aiConfig.apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
-  }))
+  })
 
   const text = await response.text()
   let parsed
@@ -4469,12 +4481,121 @@ function withProxy(options) {
   }
 }
 
+async function fetchAI(url, options = {}) {
+  for (let attempt = 0; attempt <= AI_REQUEST_RETRY_COUNT; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS)
+
+    try {
+      const response = await fetch(url, withProxy({
+        ...options,
+        signal: controller.signal
+      }))
+
+      if (attempt < AI_REQUEST_RETRY_COUNT && isRetryableAIStatus(response.status)) {
+        await response.text().catch(() => '')
+        await waitForRetry(attempt)
+        continue
+      }
+
+      return response
+    } catch (error) {
+      if (controller.signal.aborted) {
+        const timeoutError = new Error('AI 请求超时')
+        timeoutError.code = 'AI_REQUEST_TIMEOUT'
+        timeoutError.cause = error
+        throw timeoutError
+      }
+
+      if (attempt >= AI_REQUEST_RETRY_COUNT || !isRetryableAIError(error)) throw error
+      await waitForRetry(attempt)
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  throw new Error('AI 服务连接失败')
+}
+
+function isRetryableAIStatus(status) {
+  return [408, 425, 429, 500, 502, 503, 504].includes(Number(status))
+}
+
+function isRetryableAIError(error) {
+  const message = trim(error && error.message).toLowerCase()
+  const causeCode = trim(error && error.cause && error.cause.code).toUpperCase()
+  const retryableCodes = new Set([
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'EAI_AGAIN',
+    'ENETDOWN',
+    'ENETUNREACH',
+    'ETIMEDOUT',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT',
+    'UND_ERR_SOCKET'
+  ])
+
+  return retryableCodes.has(causeCode)
+    || message.includes('fetch failed')
+    || message.includes('load failed')
+    || message.includes('network')
+    || message.includes('socket')
+}
+
+function waitForRetry(attempt) {
+  return new Promise((resolve) => setTimeout(resolve, 700 * (attempt + 1)))
+}
+
+function startJsonHeartbeat(res) {
+  const heartbeat = {
+    timer: null,
+    stopped: false
+  }
+  const writeHeartbeat = () => {
+    if (heartbeat.stopped || res.writableEnded || res.destroyed) return
+    res.write(`${' '.repeat(1024)}\n`)
+  }
+
+  res.status(200)
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('X-Accel-Buffering', 'no')
+  if (typeof res.flushHeaders === 'function') res.flushHeaders()
+
+  writeHeartbeat()
+  heartbeat.timer = setInterval(writeHeartbeat, JSON_HEARTBEAT_INTERVAL_MS)
+  return heartbeat
+}
+
+function stopJsonHeartbeat(heartbeat) {
+  if (!heartbeat || heartbeat.stopped) return
+  heartbeat.stopped = true
+  if (heartbeat.timer) clearInterval(heartbeat.timer)
+}
+
+function sendJsonResult(res, payload, heartbeat = null, status = 200) {
+  stopJsonHeartbeat(heartbeat)
+  if (res.writableEnded || res.destroyed) return
+
+  if (heartbeat) {
+    res.end(JSON.stringify(payload))
+    return
+  }
+
+  res.status(status).json(payload)
+}
+
 function getUserFacingError(error) {
   const message = error && error.message ? error.message : ''
   const causeCode = error && error.cause && error.cause.code ? error.cause.code : ''
 
-  if (message.includes('fetch failed') || causeCode === 'UND_ERR_CONNECT_TIMEOUT') {
-    return '连接 AI 服务超时。你的配置已读取到，但当前网络访问 api.openai.com 不通，请开启可访问 OpenAI 的网络/代理后重试。'
+  if (error && error.code === 'AI_REQUEST_TIMEOUT') {
+    return 'AI 服务响应超时，本次未完成生成。请稍后重试，或减少一次读取的课件页数。'
+  }
+
+  if (isRetryableAIError(error) || causeCode === 'UND_ERR_CONNECT_TIMEOUT') {
+    return 'AI 服务连接暂时中断，系统已自动重试。请稍后再次生成。'
   }
 
   return message || '生成失败'

@@ -1,6 +1,7 @@
 const STORAGE_KEY = 'courseFeedback.web.classes'
 const ONE_PROFILE_STORAGE_KEY = 'courseFeedback.web.oneProfiles'
 const TEACHING_CACHE_KEY = 'courseFeedback.web.teachingData.cache'
+const PDF_WORKER_URL = '/vendor/pdfjs/pdf.worker.min.js'
 
 const DEFAULT_TEMPLATE = [
   '家长您好，本次课程反馈如下：',
@@ -2768,7 +2769,7 @@ async function buildPaperScoreRecognitionFormData(file, student, questions) {
 async function appendPaperScorePdfData(formData, file, payload) {
   if (!window.pdfjsLib) return
 
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
   const pageCount = pdf.numPages || 0
   const imagePageCount = Math.min(pageCount, PAPER_SCORE_MAX_PAGE_IMAGES)
@@ -2897,7 +2898,7 @@ async function appendPaperPdfData(formData, file, payload) {
     return
   }
 
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
   const paper = getTeachingPaperState()
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
   const pageCount = pdf.numPages || 0
@@ -3013,7 +3014,7 @@ async function exportPaperReportPdf(report = null, studentId = '') {
 
 async function ensureJsPdfReady() {
   if (window.jspdf && window.jspdf.jsPDF) return
-  await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js')
+  await loadScriptOnce('/vendor/jspdf/jspdf.umd.min.js')
   if (!window.jspdf || !window.jspdf.jsPDF) throw new Error('PDF 组件加载失败，请刷新后重试')
 }
 
@@ -5249,7 +5250,7 @@ async function buildQuestionRecognizeFormData() {
 async function appendPdfQuestionPages(formData, file, startIndex) {
   if (!window.pdfjsLib) throw new Error('PDF 解析组件加载失败，请刷新页面重试')
 
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
 
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
   const remaining = Math.max(0, REARRANGE_MAX_PAGE_IMAGES - startIndex)
@@ -5558,7 +5559,7 @@ function getMaterialUploadStatusMessage(status) {
 async function detectPdfLecturesFromFile(file) {
   if (!window.pdfjsLib) return []
 
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
   const lectures = await detectPdfLectures(pdf)
 
@@ -5951,7 +5952,19 @@ async function generateFeedback() {
       const file = files[index]
       if (isPdfFile(file)) {
         els.generateBtn.textContent = `正在读取 PDF ${index + 1}/${files.length}`
-        await appendPdfPreviewData(formData, file, payload, index)
+        try {
+          await appendPdfPreviewData(formData, file, payload, index)
+        } catch (error) {
+          const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === getFileKey(file))
+          payload.coursewareMeta[index] = {
+            fileIndex: index,
+            fileName: file.name,
+            selectedPdfPages: item ? buildCoursewareSelectedPagesFromRange(item) : [],
+            clientPdfText: ''
+          }
+          console.warn('Browser PDF parsing failed; falling back to server extraction', error)
+          showToast('PDF 本地读取中断，已切换为服务器读取')
+        }
       } else {
         const item = (state.pdfSelection.items || []).find((entry) => entry.fileKey === getFileKey(file))
         payload.coursewareMeta[index] = {
@@ -5972,7 +5985,7 @@ async function generateFeedback() {
       method: 'POST',
       body: formData
     })
-    const data = await response.json()
+    const data = await readGenerateResponse(response)
 
     if (response.status === 401) {
       updateAccessState({ authenticated: false })
@@ -6013,10 +6026,55 @@ async function generateFeedback() {
     showToast(data.demo ? (data.message || '已生成演示反馈，配置 API Key 后会调用 AI') : '反馈已生成')
     document.querySelector('#resultsPanel').scrollIntoView({ behavior: 'smooth', block: 'start' })
   } catch (error) {
-    showToast(error.message || '生成失败')
+    showToast(getGenerationErrorMessage(error))
   } finally {
     setGenerating(false)
   }
+}
+
+async function readGenerateResponse(response) {
+  const text = await response.text()
+  const body = text.trim()
+
+  if (!body) {
+    throw new Error(response.ok
+      ? '服务器没有返回生成结果，请重新生成'
+      : `服务器暂时不可用（${response.status}），请稍后重试`)
+  }
+
+  try {
+    return JSON.parse(body)
+  } catch (error) {
+    if ([502, 503, 504].includes(response.status)) {
+      throw new Error('服务器生成连接暂时中断，请稍后重试')
+    }
+    throw new Error('服务器返回内容异常，请刷新页面后重试')
+  }
+}
+
+function getGenerationErrorMessage(error) {
+  const message = String(error && error.message ? error.message : '').trim()
+  const lowerMessage = message.toLowerCase()
+
+  if (
+    lowerMessage.includes('load failed')
+    || lowerMessage.includes('failed to fetch')
+    || lowerMessage.includes('networkerror')
+    || lowerMessage.includes('network request failed')
+    || lowerMessage.includes('network connection was lost')
+  ) {
+    return '生成过程中网络连接中断，请保持页面打开并重新生成。系统会自动处理短暂断线。'
+  }
+
+  if (lowerMessage.includes('pdf') && (
+    lowerMessage.includes('worker')
+    || lowerMessage.includes('load')
+    || lowerMessage.includes('fetch')
+  )) {
+    return 'PDF 读取组件加载失败，请刷新页面后重试。'
+  }
+
+  return message || '生成失败，请稍后重试'
 }
 
 function buildGeneratePayload() {
@@ -6354,7 +6412,7 @@ async function loadPdfPageSelections(files, openWhenReady = false) {
 
 async function loadPdfSelectionItem(file) {
   if (!window.pdfjsLib) throw new Error('PDF 解析组件加载失败，请刷新页面重试')
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
   const pageCount = pdf.numPages
   const lectures = await detectPdfLectures(pdf)
@@ -7256,7 +7314,7 @@ async function appendPdfPreviewData(formData, file, payload, fileIndex = 0) {
     return
   }
 
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
 
   const arrayBuffer = await file.arrayBuffer()
   const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise
