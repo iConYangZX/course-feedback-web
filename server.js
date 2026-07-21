@@ -20,6 +20,7 @@ const AI_REQUEST_TIMEOUT_MS = Number.isFinite(configuredAIRequestTimeout)
   : 150000
 const AI_REQUEST_RETRY_COUNT = 1
 const JSON_HEARTBEAT_INTERVAL_MS = 12000
+const JSON_HEARTBEAT_CHUNK_SIZE = 16 * 1024
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -4554,7 +4555,7 @@ function startJsonHeartbeat(res) {
   }
   const writeHeartbeat = () => {
     if (heartbeat.stopped || res.writableEnded || res.destroyed) return
-    res.write(`${' '.repeat(1024)}\n`)
+    res.write(`${' '.repeat(JSON_HEARTBEAT_CHUNK_SIZE)}\n`)
   }
 
   res.status(200)
