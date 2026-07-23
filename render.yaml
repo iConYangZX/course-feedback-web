@@ -20,6 +20,6 @@ services:
       - key: CUSTOM_API_KEY
         sync: false
       - key: CUSTOM_MODEL
-        value: gpt-5.4-mini
+        value: gpt-5.6-sol
       - key: CUSTOM_BASE_URL
         value: https://api.tokenskingdom.com/v1

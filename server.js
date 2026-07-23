@@ -14,10 +14,6 @@ require('dotenv').config()
 const app = express()
 const execFileAsync = promisify(execFile)
 const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
-const configuredAIRequestTimeout = Number(process.env.AI_REQUEST_TIMEOUT_MS || 150000)
-const AI_REQUEST_TIMEOUT_MS = Number.isFinite(configuredAIRequestTimeout)
-  ? Math.max(30000, configuredAIRequestTimeout)
-  : 150000
 const AI_REQUEST_RETRY_COUNT = 1
 const FEEDBACK_BATCH_SIZE = 5
 const FEEDBACK_BATCH_CONCURRENCY = 3
@@ -743,7 +739,7 @@ function getAIConfig() {
       provider,
       apiKey: trim(process.env.CUSTOM_API_KEY),
       keyName: 'CUSTOM_API_KEY',
-      model: trim(process.env.CUSTOM_MODEL) || 'gpt-3.5-turbo',
+      model: trim(process.env.CUSTOM_MODEL) || 'gpt-5.6-sol',
       baseUrl: trim(process.env.CUSTOM_BASE_URL).replace(/\/$/, '')
     }
   }
@@ -776,7 +772,7 @@ function updateEnvFile(nextConfig) {
 
   if (provider === 'custom') {
     if (nextConfig.apiKey) currentEnv.CUSTOM_API_KEY = nextConfig.apiKey
-    currentEnv.CUSTOM_MODEL = nextConfig.model || currentEnv.CUSTOM_MODEL || 'gpt-3.5-turbo'
+    currentEnv.CUSTOM_MODEL = nextConfig.model || currentEnv.CUSTOM_MODEL || 'gpt-5.6-sol'
     currentEnv.CUSTOM_BASE_URL = nextConfig.baseUrl || currentEnv.CUSTOM_BASE_URL || ''
   }
 
@@ -4590,15 +4586,11 @@ function withProxy(options) {
 }
 
 async function fetchAI(url, options = {}) {
-  for (let attempt = 0; attempt <= AI_REQUEST_RETRY_COUNT; attempt += 1) {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS)
+  const requestOptions = applyAIModelCompatibility(options)
 
+  for (let attempt = 0; attempt <= AI_REQUEST_RETRY_COUNT; attempt += 1) {
     try {
-      const response = await fetch(url, withProxy({
-        ...options,
-        signal: controller.signal
-      }))
+      const response = await fetch(url, withProxy(requestOptions))
 
       if (attempt < AI_REQUEST_RETRY_COUNT && isRetryableAIStatus(response.status)) {
         await response.text().catch(() => '')
@@ -4608,21 +4600,33 @@ async function fetchAI(url, options = {}) {
 
       return response
     } catch (error) {
-      if (controller.signal.aborted) {
-        const timeoutError = new Error('AI 请求超时')
-        timeoutError.code = 'AI_REQUEST_TIMEOUT'
-        timeoutError.cause = error
-        throw timeoutError
-      }
-
       if (attempt >= AI_REQUEST_RETRY_COUNT || !isRetryableAIError(error)) throw error
       await waitForRetry(attempt)
-    } finally {
-      clearTimeout(timeout)
     }
   }
 
   throw new Error('AI 服务连接失败')
+}
+
+function applyAIModelCompatibility(options = {}) {
+  if (typeof options.body !== 'string') return options
+
+  try {
+    const body = JSON.parse(options.body)
+    const model = trim(body && body.model).toLowerCase()
+    const isGPT56ChatRequest = /^gpt-5\.6(?:-|$)/.test(model) && Array.isArray(body.messages)
+    if (!isGPT56ChatRequest || body.reasoning_effort !== undefined) return options
+
+    return {
+      ...options,
+      body: JSON.stringify({
+        ...body,
+        reasoning_effort: 'none'
+      })
+    }
+  } catch (error) {
+    return options
+  }
 }
 
 function isRetryableAIStatus(status) {
@@ -4698,10 +4702,6 @@ function sendJsonResult(res, payload, heartbeat = null, status = 200) {
 function getUserFacingError(error) {
   const message = error && error.message ? error.message : ''
   const causeCode = error && error.cause && error.cause.code ? error.cause.code : ''
-
-  if (error && error.code === 'AI_REQUEST_TIMEOUT') {
-    return 'AI 服务响应超时，本次未完成生成。请稍后重试，或减少一次读取的课件页数。'
-  }
 
   if (isRetryableAIError(error) || causeCode === 'UND_ERR_CONNECT_TIMEOUT') {
     return 'AI 服务连接暂时中断，系统已自动重试。请稍后再次生成。'
