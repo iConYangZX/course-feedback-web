@@ -5978,14 +5978,11 @@ async function generateFeedback() {
     }
     els.generateBtn.textContent = 'AI 生成中...'
 
+    payload.generationRequestId = createGenerationRequestId()
     formData.append('payload', JSON.stringify(payload))
     if (exitTestFile && payload.exitTest) formData.append('exitTest', exitTestFile)
 
-    const response = await fetch('/api/generate-feedback', {
-      method: 'POST',
-      body: formData
-    })
-    const data = await readGenerateResponse(response)
+    const { response, data } = await requestFeedbackGeneration(formData)
 
     if (response.status === 401) {
       updateAccessState({ authenticated: false })
@@ -6030,6 +6027,45 @@ async function generateFeedback() {
   } finally {
     setGenerating(false)
   }
+}
+
+async function requestFeedbackGeneration(formData) {
+  let lastError = null
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch('/api/generate-feedback', {
+        method: 'POST',
+        body: formData
+      })
+      const data = await readGenerateResponse(response)
+      return { response, data }
+    } catch (error) {
+      lastError = error
+      if (attempt > 0 || !isGenerationConnectionError(error)) throw error
+      showToast('生成连接中断，正在自动重新连接…')
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+    }
+  }
+
+  throw lastError || new Error('生成连接中断，请稍后重试')
+}
+
+function createGenerationRequestId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID()
+  }
+  return `generation-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function isGenerationConnectionError(error) {
+  const message = String(error && error.message ? error.message : '').toLowerCase()
+  return error instanceof TypeError
+    || message.includes('load failed')
+    || message.includes('failed to fetch')
+    || message.includes('networkerror')
+    || message.includes('network request failed')
+    || message.includes('network connection was lost')
 }
 
 async function readGenerateResponse(response) {

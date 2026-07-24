@@ -14,9 +14,11 @@ require('dotenv').config()
 const app = express()
 const execFileAsync = promisify(execFile)
 const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
-const AI_REQUEST_RETRY_COUNT = 1
+const AI_REQUEST_RETRY_COUNT = 2
 const FEEDBACK_BATCH_SIZE = 5
 const FEEDBACK_BATCH_CONCURRENCY = 3
+const GENERATION_REQUEST_CACHE_TTL_MS = 15 * 60 * 1000
+const GENERATION_REQUEST_CACHE_MAX_ENTRIES = 100
 const JSON_HEARTBEAT_INTERVAL_MS = 12000
 const JSON_HEARTBEAT_CHUNK_SIZE = 16 * 1024
 const JSON_HEARTBEAT_INITIAL_CHUNK_SIZE = 64 * 1024
@@ -81,6 +83,7 @@ let usageState = {}
 let accountState = { users: [] }
 let feedbackDataState = { owners: {} }
 let materialState = { items: [] }
+const generationRequestCache = new Map()
 
 app.use(express.json({ limit: '1mb' }))
 app.use(express.static(path.join(__dirname, 'public')))
@@ -580,9 +583,20 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
   try {
     const session = req.accessSession
     const coursewareFiles = getUploadedFiles(req, 'courseware')
-    const coursewareFile = coursewareFiles[0] || null
     const exitTestFile = getUploadedFile(req, 'exitTest')
     const pdfPageImages = getUploadedFiles(req, 'pdfPageImage')
+    const payload = parsePayload(req.body.payload)
+    const requestCacheKey = getGenerationRequestCacheKey(session, payload)
+    const aiConfig = getAIConfig()
+
+    cleanupGenerationRequestCache()
+    const cachedRequest = requestCacheKey ? generationRequestCache.get(requestCacheKey) : null
+    if (cachedRequest) {
+      if (aiConfig.apiKey) responseHeartbeat = startJsonHeartbeat(res)
+      const cachedResult = await cachedRequest.promise
+      sendJsonResult(res, cachedResult, responseHeartbeat)
+      return
+    }
 
     const usageClientId = getUsageClientId(session)
     const usageInfo = getUsageInfoForSession(session)
@@ -594,45 +608,37 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
       return
     }
 
-    const payload = parsePayload(req.body.payload)
     const storedMaterialFile = !coursewareFiles.length && payload.materialId
       ? await getStoredMaterialFile(session, payload.materialId)
       : null
     validatePayload(payload, Boolean(coursewareFiles.length || storedMaterialFile))
 
-    const aiConfig = getAIConfig()
     if (aiConfig.apiKey) responseHeartbeat = startJsonHeartbeat(res)
 
-    const courseware = await normalizeCoursewareUploads(coursewareFiles, storedMaterialFile, payload, pdfPageImages)
-    const exitTestCourseware = exitTestFile ? await normalizeCourseware(exitTestFile, {
-      selectedPdfPages: payload.exitTest && payload.exitTest.selectedPdfPages
-    }) : null
-    if (exitTestCourseware) payload.exitTestFile = buildUploadedFileSummary(exitTestCourseware)
-
-    if (!aiConfig.apiKey) {
-      const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
-      sendJsonResult(res, {
-        demo: true,
-        message: `当前未配置 ${aiConfig.keyName}，已返回演示反馈。`,
-        usage: nextUsage,
-        feedbacks: buildDemoFeedbacks(payload)
-      }, responseHeartbeat)
-      return
+    const generationPromise = generateFeedbackResult({
+      payload,
+      coursewareFiles,
+      storedMaterialFile,
+      exitTestFile,
+      pdfPageImages,
+      aiConfig,
+      usageClientId,
+      usageInfo
+    })
+    if (requestCacheKey) {
+      generationRequestCache.set(requestCacheKey, {
+        promise: generationPromise,
+        createdAt: Date.now(),
+        settledAt: null
+      })
+      generationPromise.then(
+        () => markGenerationRequestSettled(requestCacheKey),
+        () => generationRequestCache.delete(requestCacheKey)
+      )
     }
 
-    const generation = await requestFeedbacks(payload, courseware, aiConfig)
-    const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
-    const debug = buildDebugSummary(payload, courseware)
-    debug.aiBatchCount = generation.batchCount
-    debug.aiFailedBatchCount = generation.failedBatchCount
-
-    sendJsonResult(res, {
-      provider: aiConfig.provider,
-      model: aiConfig.model,
-      debug,
-      usage: nextUsage,
-      feedbacks: normalizeFeedbacks(generation.feedbacks, payload.students, payload)
-    }, responseHeartbeat)
+    const result = await generationPromise
+    sendJsonResult(res, result, responseHeartbeat)
   } catch (error) {
     console.error(error)
     sendJsonResult(res, {
@@ -642,6 +648,84 @@ app.post('/api/generate-feedback', requireAccessMiddleware, upload.fields([
     stopJsonHeartbeat(responseHeartbeat)
   }
 })
+
+async function generateFeedbackResult(input) {
+  const {
+    payload,
+    coursewareFiles,
+    storedMaterialFile,
+    exitTestFile,
+    pdfPageImages,
+    aiConfig,
+    usageClientId,
+    usageInfo
+  } = input
+  const courseware = await normalizeCoursewareUploads(
+    coursewareFiles,
+    storedMaterialFile,
+    payload,
+    pdfPageImages
+  )
+  const exitTestCourseware = exitTestFile ? await normalizeCourseware(exitTestFile, {
+    selectedPdfPages: payload.exitTest && payload.exitTest.selectedPdfPages
+  }) : null
+  if (exitTestCourseware) payload.exitTestFile = buildUploadedFileSummary(exitTestCourseware)
+
+  if (!aiConfig.apiKey) {
+    const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+    return {
+      demo: true,
+      message: `当前未配置 ${aiConfig.keyName}，已返回演示反馈。`,
+      usage: nextUsage,
+      feedbacks: buildDemoFeedbacks(payload)
+    }
+  }
+
+  const generation = await requestFeedbacks(payload, courseware, aiConfig)
+  const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+  const debug = buildDebugSummary(payload, courseware)
+  debug.aiBatchCount = generation.batchCount
+  debug.aiFailedBatchCount = generation.failedBatchCount
+
+  return {
+    provider: aiConfig.provider,
+    model: aiConfig.model,
+    debug,
+    usage: nextUsage,
+    feedbacks: normalizeFeedbacks(generation.feedbacks, payload.students, payload)
+  }
+}
+
+function getGenerationRequestCacheKey(session, payload = {}) {
+  const requestId = trim(payload.generationRequestId).slice(0, 120)
+  if (!requestId || !/^[A-Za-z0-9_-]+$/.test(requestId)) return ''
+  return `${getUsageClientId(session)}:${requestId}`
+}
+
+function markGenerationRequestSettled(requestCacheKey) {
+  const cachedRequest = generationRequestCache.get(requestCacheKey)
+  if (cachedRequest) cachedRequest.settledAt = Date.now()
+}
+
+function cleanupGenerationRequestCache() {
+  const now = Date.now()
+  for (const [key, cachedRequest] of generationRequestCache.entries()) {
+    if (cachedRequest.settledAt && now - cachedRequest.settledAt > GENERATION_REQUEST_CACHE_TTL_MS) {
+      generationRequestCache.delete(key)
+    }
+  }
+
+  if (generationRequestCache.size <= GENERATION_REQUEST_CACHE_MAX_ENTRIES) return
+  const settledEntries = [...generationRequestCache.entries()]
+    .filter(([, cachedRequest]) => cachedRequest.settledAt)
+    .sort((left, right) => left[1].settledAt - right[1].settledAt)
+  while (
+    generationRequestCache.size > GENERATION_REQUEST_CACHE_MAX_ENTRIES
+    && settledEntries.length
+  ) {
+    generationRequestCache.delete(settledEntries.shift()[0])
+  }
+}
 
 app.use((error, req, res, next) => {
   if (res.headersSent) {
