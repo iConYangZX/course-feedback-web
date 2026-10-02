@@ -7467,8 +7467,8 @@ async function appendPdfPreviewData(formData, file, payload, fileIndex = 0) {
       .trim()
 
     if (extractedText) {
-      payload.coursewareMeta[fileIndex].clientPdfText = extractedText.slice(0, 30000)
-      if (fileIndex === 0) payload.clientPdfText = extractedText.slice(0, 30000)
+      payload.coursewareMeta[fileIndex].clientPdfText = extractedText
+      if (fileIndex === 0) payload.clientPdfText = extractedText
     }
   } finally {
     await pdf.destroy().catch(() => {})
