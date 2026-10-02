@@ -74,10 +74,14 @@ test('feedback and image-summary entry points request streaming and consume real
   const calls = []
   const images = [{ dataUrl: 'data:image/jpeg;base64,synthetic-image' }]
   const resultText = JSON.stringify({ feedbacks: [{ studentId: 'student-1', name: '合成同学', feedback: '完成' }] })
-  const api = load([...parserNames, 'requestOpenAI', 'sendChatCompatibleRequest', 'requestChatText', 'requestOpenAIText', 'hasCoursewareVisionImages', 'getCoursewareVisionImages'], {
+  const api = load([...parserNames, 'requestAI', 'requestChatCompatible', 'requestOpenAI', 'sendChatCompatibleRequest', 'requestChatText', 'requestOpenAIText', 'hasCoursewareVisionImages', 'getCoursewareVisionImages'], {
     readAIResponseText,
     buildSystemPrompt: () => '合成测试',
     buildUserContent: () => [{ type: 'input_image', image_url: images[0].dataUrl }],
+    buildChatCompatibleUserContent: (payload, courseware, options) => {
+      assert.equal(options.includeImage, true)
+      return courseware.visionImages.map((image) => ({ type: 'image_url', image_url: { url: image.dataUrl } }))
+    },
     fetchAI: async (url, options) => {
       const body = JSON.parse(options.body)
       assert.equal(body.stream, true)
@@ -85,11 +89,13 @@ test('feedback and image-summary entry points request streaming and consume real
       return streamResponse(resultText, url.endsWith('/responses'))
     }
   })
-  await api.requestOpenAI({}, { visionImages: images }, aiConfig)
-  await api.sendChatCompatibleRequest([{ type: 'image_url', image_url: { url: images[0].dataUrl } }], aiConfig)
+  await api.requestAI({}, { visionImages: images }, { ...aiConfig, provider: 'openai' }, { maxOutputTokens: 16000 })
+  await api.requestAI({}, { visionImages: images }, aiConfig, { maxOutputTokens: 16000 })
   assert.equal(await api.requestChatText('分析图片', aiConfig, { images }), resultText)
   assert.equal(await api.requestOpenAIText('分析图片', aiConfig, { images }), resultText)
   assert.equal(calls.length, 4)
+  assert.equal(calls[0].body.max_output_tokens, 16000, 'Responses receives the increased recovery budget')
+  assert.equal(calls[1].body.max_tokens, 16000, 'custom chat receives the increased recovery budget')
   assert.equal(calls[0].body.input[0].content[0].image_url, images[0].dataUrl)
   assert.equal(calls[1].body.messages[1].content[0].image_url.url, images[0].dataUrl)
   assert.equal(calls[2].body.messages[1].content[1].image_url.url, images[0].dataUrl)

@@ -110,7 +110,7 @@ test('a failed or empty chunk rejects the whole summary instead of returning par
     return '已分析'
   }), /第 1\/5 段分析失败.*524/)
   assert.equal(calls, 2)
-  await assert.rejects(createCoursewareSummary(paper(1), async () => '  '), /未返回这一段的分析内容/)
+  await assert.rejects(createCoursewareSummary(paper(1), async () => '  '), /重试后仍未返回有效课件分析/)
 })
 
 test('missing page images and unreadable files fail explicitly, while image-only inputs remain valid', async () => {
@@ -120,4 +120,146 @@ test('missing page images and unreadable files fail explicitly, while image-only
   assert.equal(chunks.length, 1)
   assert.equal(chunks[0].visionImages.length, 1)
   assert.equal(await createCoursewareSummary(null, async () => 'unused'), null)
+})
+
+function aiError(code, message = 'AI 返回内容过长，请减少学生数量') {
+  const error = new Error(message)
+  error.code = code
+  return error
+}
+
+test('truncated image groups split to complete original pages without increasing global concurrency', async () => {
+  const original = paper(12)
+  const completed = []
+  let active = 0
+  let peak = 0
+  const result = await createCoursewareSummary(original, async (chunk) => {
+    active += 1
+    peak = Math.max(peak, active)
+    try {
+      await new Promise(setImmediate)
+      if (chunk.visionImages.length > 1) throw aiError('AI_OUTPUT_TRUNCATED')
+      assert.equal(chunk.visionImages.length, 1)
+      const page = chunk.pageNumbers[0]
+      assert.equal(chunk.visionImages[0], original.visionImages[page - 1], 'original image is never cropped or replaced')
+      assert.equal(chunk.extractedText, `第 ${page} 页：第${page}个知识点。 `)
+      completed.push(page)
+      return `第${page}页完整知识点`
+    } finally { active -= 1 }
+  })
+  assert.equal(peak, 2)
+  assert.deepEqual(completed.sort((left, right) => left - right), original.selectedPdfPages)
+  assert.equal(result.summaryStats.initialChunkCount, 2)
+  assert.equal(result.summaryStats.completedChunkCount, 12)
+  assert.equal(result.summaryStats.splitCount, 10)
+  assert.equal(result.summaryStats.requestCount, 22)
+  assert.equal(result.summaryStats.coveredImageCount, 12)
+  assert.equal(result.summaryStats.coveredTextChars, original.extractedText.length)
+  for (let page = 1; page < 12; page += 1) {
+    assert.ok(result.extractedText.indexOf(`第${page}页完整知识点`) < result.extractedText.indexOf(`第${page + 1}页完整知识点`))
+  }
+})
+
+test('one dense page is retried once with more output space while retaining all original evidence', async () => {
+  const original = paper(1)
+  const attempts = []
+  const result = await createCoursewareSummary(original, async (chunk) => {
+    attempts.push(chunk.maxOutputTokens)
+    assert.equal(chunk.visionImages[0], original.visionImages[0])
+    assert.equal(chunk.extractedText, original.extractedText)
+    if (chunk.maxOutputTokens === 2400) throw aiError('AI_OUTPUT_TRUNCATED')
+    return '完整单页摘要'
+  })
+  assert.deepEqual(attempts, [2400, 4800])
+  assert.equal(result.summaryStats.outputBudgetIncreaseCount, 1)
+  assert.equal(result.summaryStats.coveredImageCount, 1)
+  assert.equal(result.summaryStats.coveredTextChars, original.extractedText.length)
+})
+
+test('persistent single-page truncation stops after its one larger retry without requesting fewer students', async () => {
+  let attempts = 0
+  await assert.rejects(createCoursewareSummary(paper(1), async () => {
+    attempts += 1
+    throw aiError('AI_OUTPUT_TRUNCATED')
+  }), (error) => error.code === 'AI_OUTPUT_TRUNCATED' && /自动细分课件/.test(error.message) && !/减少.*学生|减少.*人数/.test(error.message))
+  assert.equal(attempts, 2)
+})
+
+test('text recovery preserves every character and Unicode pair across smaller summaries', async () => {
+  const text = `${'甲'.repeat(3999)}😀${'乙'.repeat(3999)}`
+  const completed = []
+  const result = await createCoursewareSummary({ name: '纯文本.txt', extractedText: text }, async (chunk) => {
+    if (chunk.extractedText.length > 2000) throw aiError('AI_OUTPUT_TRUNCATED')
+    assert.equal(/[\uD800-\uDBFF]$/.test(chunk.extractedText), false)
+    assert.equal(/^[\uDC00-\uDFFF]/.test(chunk.extractedText), false)
+    completed.push(chunk.extractedText)
+    return '摘要完成'
+  })
+  assert.equal(completed.join(''), text)
+  assert.equal(result.summaryStats.coveredTextChars, text.length)
+  assert.ok(result.summaryStats.splitCount > 0)
+})
+
+test('text with page labels splits at whole-page boundaries before splitting paragraphs', async () => {
+  const original = paper(3)
+  original.visionImages = []
+  const completed = []
+  const result = await createCoursewareSummary(original, async (chunk) => {
+    const pages = [...chunk.extractedText.matchAll(/第\s*(\d+)\s*页/g)]
+    if (pages.length > 1) throw aiError('AI_OUTPUT_TRUNCATED')
+    assert.equal(pages.length, 1)
+    completed.push(chunk.extractedText)
+    return `第${pages[0][1]}页已完整分析`
+  })
+  assert.equal(completed.join(''), original.extractedText)
+  assert.equal(result.summaryStats.completedChunkCount, 3)
+  assert.equal(result.summaryStats.outputBudgetIncreaseCount, 0)
+})
+
+test('invalid or interrupted summaries retry the same evidence once without splitting it', async () => {
+  for (const code of ['AI_INVALID_OUTPUT', 'AI_RESPONSE_INTERRUPTED']) {
+    const original = paper(6)
+    const attempts = []
+    const result = await createCoursewareSummary(original, async (chunk) => {
+      attempts.push(chunk)
+      if (attempts.length === 1) throw aiError(code)
+      return '完整摘要'
+    })
+    assert.equal(attempts.length, 2)
+    assert.equal(attempts[0], attempts[1])
+    assert.equal(result.summaryStats.splitCount, 0)
+    assert.equal(result.summaryStats.coveredImageCount, 6)
+    assert.equal(result.summaryStats.retryCount, 1)
+  }
+})
+
+test('permanent invalid output and ordinary provider errors have bounded attempts', async () => {
+  for (const [code, expected] of [['AI_INVALID_OUTPUT', 2], ['AI_RESPONSE_INTERRUPTED', 2], ['HTTP_401', 1]]) {
+    let attempts = 0
+    await assert.rejects(createCoursewareSummary(paper(6), async () => {
+      attempts += 1
+      throw aiError(code, 'provider error')
+    }), (error) => error.code === code)
+    assert.equal(attempts, expected)
+  }
+})
+
+test('unknown page numbers stay unknown after image subdivision and text is still fully covered', async () => {
+  const original = {
+    name: '页面.pdf', extractedText: '没有页码的完整正文。',
+    visionImages: Array.from({ length: 4 }, (_, index) => ({ name: `picture-${index}.png`, dataUrl: `data:image/png;base64,original-${index}` }))
+  }
+  const completedImages = []
+  let completedText = ''
+  const result = await createCoursewareSummary(original, async (chunk) => {
+    if (chunk.visionImages.length > 1) throw aiError('AI_OUTPUT_TRUNCATED')
+    assert.deepEqual(chunk.pageNumbers, [])
+    completedImages.push(...chunk.visionImages)
+    completedText += chunk.extractedText
+    return '完整分析'
+  })
+  assert.equal(new Set(completedImages).size, 4)
+  assert.equal(completedText, original.extractedText)
+  assert.equal(result.summaryStats.coveredImageCount, 4)
+  assert.equal(result.summaryStats.coveredTextChars, original.extractedText.length)
 })
