@@ -8,14 +8,13 @@ const express = require('express')
 const multer = require('multer')
 const AdmZip = require('adm-zip')
 const pdfParse = require('pdf-parse')
-const { fetch, ProxyAgent } = require('undici')
+const { fetch, Agent, ProxyAgent } = require('undici')
 require('dotenv').config()
 
 const app = express()
 const execFileAsync = promisify(execFile)
 const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
 const AI_REQUEST_RETRY_COUNT = 2
-const AI_REQUEST_TIMEOUT_MS = 120000
 const FEEDBACK_BATCH_SIZE = 5
 const FEEDBACK_BATCH_CONCURRENCY = 3
 const GENERATION_REQUEST_CACHE_TTL_MS = 15 * 60 * 1000
@@ -53,7 +52,11 @@ const PDFTOPPM_PATHS = [
 ]
 const DATABASE_URL = trim(process.env.DATABASE_URL)
 const proxyUrl = trim(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.ALL_PROXY)
-const proxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null
+// Generation can take arbitrarily long. Disable response deadlines for both routes;
+// connection establishment still retains the network library's normal safeguards.
+const aiResponseOptions = { headersTimeout: 0, bodyTimeout: 0 }
+const proxyAgent = proxyUrl ? new ProxyAgent({ uri: proxyUrl, ...aiResponseOptions }) : null
+const aiDispatcher = proxyAgent || new Agent(aiResponseOptions)
 const PUBLIC_MODE = parseBoolean(process.env.PUBLIC_MODE)
 const ACCESS_CODE = trim(process.env.ACCESS_CODE)
 const DAILY_LIMIT = parseDailyLimit(process.env.DAILY_LIMIT)
@@ -4711,18 +4714,14 @@ function parseDailyLimit(value) {
 }
 
 function withProxy(options) {
-  if (!proxyAgent) return options
   return {
     ...options,
-    dispatcher: proxyAgent
+    dispatcher: aiDispatcher
   }
 }
 
 async function fetchAI(url, options = {}) {
-  const requestOptions = applyAIModelCompatibility({
-    ...options,
-    signal: options.signal || AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS)
-  })
+  const requestOptions = applyAIModelCompatibility(options)
 
   for (let attempt = 0; attempt <= AI_REQUEST_RETRY_COUNT; attempt += 1) {
     try {
@@ -4798,7 +4797,9 @@ function waitForRetry(attempt) {
 function startJsonHeartbeat(res) {
   const heartbeat = {
     timer: null,
-    stopped: false
+    stopped: false,
+    response: res,
+    onClose: null
   }
   const writeHeartbeat = (chunkSize = JSON_HEARTBEAT_CHUNK_SIZE) => {
     if (heartbeat.stopped || res.writableEnded || res.destroyed) return
@@ -4814,6 +4815,10 @@ function startJsonHeartbeat(res) {
 
   writeHeartbeat(JSON_HEARTBEAT_INITIAL_CHUNK_SIZE)
   heartbeat.timer = setInterval(writeHeartbeat, JSON_HEARTBEAT_INTERVAL_MS)
+  // A closed browser connection must not leave a timer running while its cached
+  // generation continues. Reconnecting attaches a new heartbeat to the same job.
+  heartbeat.onClose = () => stopJsonHeartbeat(heartbeat)
+  res.once('close', heartbeat.onClose)
   return heartbeat
 }
 
@@ -4821,6 +4826,9 @@ function stopJsonHeartbeat(heartbeat) {
   if (!heartbeat || heartbeat.stopped) return
   heartbeat.stopped = true
   if (heartbeat.timer) clearInterval(heartbeat.timer)
+  if (heartbeat.response && heartbeat.onClose) {
+    heartbeat.response.removeListener('close', heartbeat.onClose)
+  }
 }
 
 function sendJsonResult(res, payload, heartbeat = null, status = 200) {
@@ -4839,8 +4847,11 @@ function getUserFacingError(error) {
   const message = error && error.message ? error.message : ''
   const causeCode = error && error.cause && error.cause.code ? error.cause.code : ''
 
-  if (error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-    return 'AI 处理超时，请减少材料或学生数量后重试'
+  if (error && error.name === 'TimeoutError') {
+    return 'AI 服务连接超时，请稍后重试；网站未设置生成时长限制'
+  }
+  if (error && error.name === 'AbortError') {
+    return 'AI 请求已中断，请重新生成；网站未设置生成时长限制'
   }
 
   if (isRetryableAIError(error) || causeCode === 'UND_ERR_CONNECT_TIMEOUT') {

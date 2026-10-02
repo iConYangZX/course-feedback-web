@@ -2,7 +2,6 @@ const STORAGE_KEY = 'courseFeedback.web.classes'
 const ONE_PROFILE_STORAGE_KEY = 'courseFeedback.web.oneProfiles'
 const TEACHING_CACHE_KEY = 'courseFeedback.web.teachingData.cache'
 const PDF_WORKER_URL = '/vendor/pdfjs/pdf.worker.min.js'
-const AI_REQUEST_TIMEOUT_MS = 240000
 
 const DEFAULT_TEMPLATE = [
   '家长您好，本次课程反馈如下：',
@@ -154,6 +153,7 @@ const state = {
 }
 
 const els = {}
+const generationProgress = { startedAt: null, timer: null, message: '' }
 
 function createEmptyPaperState() {
   return {
@@ -5315,10 +5315,8 @@ async function imageFileToJpegBlob(file) {
 }
 
 async function requestAiJson(url, options, fallbackMessage, readResponse = readJsonResponse) {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS)
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal })
+    const response = await fetch(url, options)
     const data = await readResponse(response, fallbackMessage)
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       throw new Error(`${fallbackMessage}：服务器返回内容异常，请稍后重试`)
@@ -5326,15 +5324,10 @@ async function requestAiJson(url, options, fallbackMessage, readResponse = readJ
     if (response.ok && data.error) throw new Error(data.error)
     return { response, data }
   } catch (error) {
-    if (error.name === 'AbortError') {
-      throw new Error(`${fallbackMessage}：等待超过 4 分钟，请减少文件或页数后重试。已填写的内容仍保留。`)
-    }
     if (isGenerationConnectionError(error)) {
       throw new TypeError('网络连接中断，请检查网络后重试。已填写的内容仍保留。')
     }
     throw error
-  } finally {
-    clearTimeout(timeout)
   }
 }
 
@@ -6293,14 +6286,40 @@ function buildGeneratePayload() {
 }
 
 function setGenerationStatus(message, status) {
+  generationProgress.message = message
+  if (status !== 'busy') stopGenerationProgress()
   if (!els.generationStatus) return
   els.generationStatus.textContent = message
   els.generationStatus.dataset.state = status
   els.generationStatus.classList.toggle('hidden', !message)
+  if (status === 'busy') updateGenerationProgress()
+}
+
+function updateGenerationProgress() {
+  if (!state.generating || generationProgress.startedAt === null || !els.generationStatus) return
+  if (els.generationStatus.dataset.state !== 'busy') return
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - generationProgress.startedAt) / 1000))
+  const minutes = Math.floor(elapsedSeconds / 60)
+  const elapsedText = minutes
+    ? `${minutes} 分 ${elapsedSeconds % 60} 秒`
+    : `${elapsedSeconds} 秒`
+  els.generationStatus.textContent = `${generationProgress.message} 已等待 ${elapsedText}。`
+}
+
+function stopGenerationProgress() {
+  if (generationProgress.timer !== null) clearInterval(generationProgress.timer)
+  generationProgress.timer = null
+  generationProgress.startedAt = null
 }
 
 function setGenerating(isGenerating) {
+  stopGenerationProgress()
   state.generating = isGenerating
+  if (isGenerating) {
+    generationProgress.startedAt = Date.now()
+    // Update gently so the live status remains useful without constant announcements.
+    generationProgress.timer = setInterval(updateGenerationProgress, 10000)
+  }
   els.generateBtn.setAttribute('aria-busy', String(isGenerating))
   els.generateBtn.disabled = isGenerating
   els.generateBtn.textContent = isGenerating ? 'AI 生成中...' : 'AI 生成反馈'
