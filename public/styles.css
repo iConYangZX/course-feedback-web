@@ -2730,3 +2730,71 @@ textarea:focus {
     justify-items: center;
   }
 }
+
+
+/* Clear request feedback and keyboard focus throughout the teaching workspace. */
+:where(button, input, select, textarea, a):focus-visible {
+  outline: 3px solid var(--green-dark);
+  outline-offset: 3px;
+}
+
+button:disabled {
+  opacity: 0.58;
+}
+
+.generation-status {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--violet-soft);
+  color: var(--green-dark);
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.generation-status[data-state="error"] {
+  background: var(--red-soft);
+  border-color: #e8a5b0;
+  color: #a42f46;
+}
+
+.generation-status[data-state="success"] {
+  background: var(--success-soft);
+  border-color: #a7d7c7;
+  color: #19644f;
+}
+
+.teaching-analysis, .file-chip, .paper-file-name {
+  overflow-wrap: anywhere;
+}
+
+.toast {
+  bottom: max(24px, env(safe-area-inset-bottom));
+  z-index: 80;
+}
+
+@media (max-width: 680px) {
+  input, select, textarea {
+    font-size: 16px;
+  }
+
+  .icon-action, .icon-close-button, .compact-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .access-gate {
+    overflow-y: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

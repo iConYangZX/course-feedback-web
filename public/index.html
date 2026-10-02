@@ -36,7 +36,7 @@
           <input id="loginPasswordInput" type="password" placeholder="请输入密码" autocomplete="current-password" />
         </label>
         <button class="primary-button" id="accessLoginBtn" type="button">进入系统</button>
-        <div id="accessMessage" class="access-message"></div>
+        <div id="accessMessage" class="access-message" role="alert"></div>
       </div>
     </section>
 
@@ -58,7 +58,7 @@
               <section class="sidebar-section nested-sidebar-section class-only">
                 <div class="section-title-row">
                   <h2>班级</h2>
-                  <button class="icon-action" id="newClassBtn" type="button" title="新建班级">+</button>
+                  <button class="icon-action" id="newClassBtn" type="button" title="新建班级" aria-label="新建班级">+</button>
                 </div>
                 <div id="classList" class="class-list"></div>
               </section>
@@ -66,7 +66,7 @@
               <section class="sidebar-section nested-sidebar-section one-only hidden">
                 <div class="section-title-row">
                   <h2>学生档案</h2>
-                  <button class="icon-action" id="newOneProfileBtn" type="button" title="新建学生档案">+</button>
+                  <button class="icon-action" id="newOneProfileBtn" type="button" title="新建学生档案" aria-label="新建学生档案">+</button>
                 </div>
                 <div id="oneProfileList" class="class-list"></div>
               </section>
@@ -501,9 +501,10 @@
           </label>
 
           <div class="panel-actions">
-            <button class="primary-button" id="generateBtn" type="button">AI 生成反馈</button>
+            <button class="primary-button" id="generateBtn" type="button" aria-describedby="generationStatus">AI 生成反馈</button>
             <button class="secondary-button" id="copyAllBtn" type="button">复制全部</button>
           </div>
+          <div id="generationStatus" class="generation-status hidden" role="status" aria-live="polite" aria-atomic="true"></div>
         </section>
 
         <section class="results-panel" id="resultsPanel" aria-live="polite">
@@ -574,7 +575,7 @@
       </main>
     </div>
 
-    <div id="toast" class="toast" role="status"></div>
+    <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
     <div class="modal-backdrop hidden" id="pdfPageModal" role="dialog" aria-modal="true" aria-labelledby="pdfPageModalTitle">
       <div class="pdf-page-dialog">
         <div class="panel-heading compact">

@@ -2,6 +2,7 @@ const STORAGE_KEY = 'courseFeedback.web.classes'
 const ONE_PROFILE_STORAGE_KEY = 'courseFeedback.web.oneProfiles'
 const TEACHING_CACHE_KEY = 'courseFeedback.web.teachingData.cache'
 const PDF_WORKER_URL = '/vendor/pdfjs/pdf.worker.min.js'
+const AI_REQUEST_TIMEOUT_MS = 240000
 
 const DEFAULT_TEMPLATE = [
   '家长您好，本次课程反馈如下：',
@@ -77,6 +78,7 @@ const state = {
   editingClassId: '',
   editingOneProfileId: '',
   feedbacks: [],
+  generating: false,
   lastGeneratedPayload: null,
   debug: null,
   oneLesson: {
@@ -340,6 +342,7 @@ function bindElements() {
     studentTable: document.querySelector('#studentTable'),
     generationInstructionInput: document.querySelector('#generationInstructionInput'),
     generateBtn: document.querySelector('#generateBtn'),
+    generationStatus: document.querySelector('#generationStatus'),
     copyAllBtn: document.querySelector('#copyAllBtn'),
     resultNote: document.querySelector('#resultNote'),
     debugSummary: document.querySelector('#debugSummary'),
@@ -1638,7 +1641,7 @@ function renderClassStats(classInfo, records) {
         <div class="teaching-title">${escapeHtml(classInfo.name)} 成绩统计</div>
         <div class="teaching-meta">${records.length} 条记录</div>
       </div>
-      <button class="secondary-button compact-button" data-teaching-action="analyze-class" data-id="${escapeHtml(classInfo.id)}" type="button">AI 分析</button>
+      <button class="secondary-button compact-button" data-teaching-action="analyze-class" data-id="${escapeHtml(classInfo.id)}" type="button" ${state.teaching.aiBusy ? 'disabled aria-busy="true"' : ''}>${state.teaching.aiBusy ? '分析中...' : 'AI 分析'}</button>
     </div>
     <div class="stats-grid">
       <div><strong>${avg}</strong><span>平均分</span></div>
@@ -1647,7 +1650,7 @@ function renderClassStats(classInfo, records) {
       <div><strong>${records.length}</strong><span>测评次数</span></div>
     </div>
     <canvas id="teachingScoreChart" class="score-chart" width="680" height="260"></canvas>
-    <div class="teaching-analysis">${escapeHtml(state.teaching.aiResult || '')}</div>
+    <div class="teaching-analysis" role="status" aria-live="polite">${escapeHtml(state.teaching.aiResult || '')}</div>
   `
 }
 
@@ -1706,7 +1709,7 @@ function renderTeachingPaperAnalysis() {
         ${renderPaperStudentPreview(allStudents, students, paper.scope)}
         <label class="field paper-file-field">
           <span>上传试卷</span>
-          <input class="hidden" data-paper-field="file" type="file" accept=".pdf,.docx,.pptx,.txt,.md,image/*" />
+          <input class="hidden" data-paper-field="file" type="file" ${paper.busy ? 'disabled' : ''} accept=".pdf,.docx,.pptx,.txt,.md,image/*" />
           <div class="paper-file-control">
             <span class="paper-file-button">选择文件</span>
             <span class="paper-file-name">${escapeHtml(paper.fileName || '未选择文件')}</span>
@@ -2480,14 +2483,14 @@ function renderOneLongProfile(profile, records) {
         <div class="teaching-title">${escapeHtml(profile.name)} · ${escapeHtml(profile.grade || '')}</div>
         <div class="teaching-meta">${records.length} 条成绩记录</div>
       </div>
-      <button class="secondary-button compact-button" data-teaching-action="analyze-one-profile" data-id="${escapeHtml(profile.id)}" type="button">AI 综合分析</button>
+      <button class="secondary-button compact-button" data-teaching-action="analyze-one-profile" data-id="${escapeHtml(profile.id)}" type="button" ${state.teaching.aiBusy ? 'disabled aria-busy="true"' : ''}>${state.teaching.aiBusy ? '分析中...' : 'AI 综合分析'}</button>
     </div>
     <div class="form-grid two">
       <label class="field"><span>平时性格</span><textarea data-one-field="personality" data-id="${escapeHtml(profile.id)}" rows="4">${escapeHtml(profile.personality || '')}</textarea></label>
       <label class="field"><span>做题习惯</span><textarea data-one-field="habit" data-id="${escapeHtml(profile.id)}" rows="4">${escapeHtml(profile.habit || '')}</textarea></label>
     </div>
     <canvas id="oneProfileTrendChart" class="score-chart" width="680" height="260"></canvas>
-    <div class="teaching-analysis">${escapeHtml(state.teaching.aiResult || '')}</div>
+    <div class="teaching-analysis" role="status" aria-live="polite">${escapeHtml(state.teaching.aiResult || '')}</div>
   `
 }
 
@@ -2705,11 +2708,10 @@ async function recognizePaperStudentScores(input) {
 
   try {
     const formData = await buildPaperScoreRecognitionFormData(file, student, questions)
-    const response = await fetch('/api/teaching-data/paper-score-recognition', {
+    const { response, data } = await requestAiJson('/api/teaching-data/paper-score-recognition', {
       method: 'POST',
       body: formData
-    })
-    const data = await response.json()
+    }, '批改图识别失败')
 
     if (response.status === 401) {
       updateAccessState({ authenticated: false })
@@ -2758,7 +2760,11 @@ async function buildPaperScoreRecognitionFormData(file, student, questions) {
   }
 
   if (isPdfFile(file)) {
-    await appendPaperScorePdfData(formData, file, payload)
+    try {
+      await appendPaperScorePdfData(formData, file, payload)
+    } catch (error) {
+      showToast('PDF 本地读取中断，已切换为服务器读取')
+    }
   }
 
   formData.append('payload', JSON.stringify(payload))
@@ -2771,29 +2777,33 @@ async function appendPaperScorePdfData(formData, file, payload) {
 
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-  const pageCount = pdf.numPages || 0
-  const imagePageCount = Math.min(pageCount, PAPER_SCORE_MAX_PAGE_IMAGES)
-  const textParts = []
+  try {
+    const pageCount = pdf.numPages || 0
+    const imagePageCount = Math.min(pageCount, PAPER_SCORE_MAX_PAGE_IMAGES)
+    const textParts = []
 
-  payload.selectedPdfPages = Array.from({ length: pageCount }, (item, index) => index + 1)
-  payload.pdfPageCount = pageCount
-  payload.imagePageCount = imagePageCount
+    payload.selectedPdfPages = Array.from({ length: pageCount }, (item, index) => index + 1)
+    payload.pdfPageCount = pageCount
+    payload.imagePageCount = imagePageCount
 
-  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber)
-    const textContent = await page.getTextContent().catch(() => null)
-    if (textContent && Array.isArray(textContent.items)) {
-      const pageText = textContent.items.map((item) => item.str || '').join(' ').replace(/\s+/g, ' ').trim()
-      if (pageText) textParts.push(`第 ${pageNumber} 页：${pageText}`)
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber)
+      const textContent = await page.getTextContent().catch(() => null)
+      if (textContent && Array.isArray(textContent.items)) {
+        const pageText = textContent.items.map((item) => item.str || '').join(' ').replace(/\s+/g, ' ').trim()
+        if (pageText) textParts.push(`第 ${pageNumber} 页：${pageText}`)
+      }
+
+      if (pageNumber <= imagePageCount) {
+        const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.76 })
+        if (blob) formData.append('scorePageImage', blob, `${file.name}-page-${pageNumber}.jpg`)
+      }
     }
 
-    if (pageNumber <= imagePageCount) {
-      const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.76 })
-      if (blob) formData.append('scorePageImage', blob, `${file.name}-page-${pageNumber}.jpg`)
-    }
+    if (textParts.length) payload.clientPdfText = textParts.join('\n').slice(0, 30000)
+  } finally {
+    await pdf.destroy().catch(() => {})
   }
-
-  if (textParts.length) payload.clientPdfText = textParts.join('\n').slice(0, 30000)
 }
 
 function applyRecognizedPaperScores(studentId, scores, questions) {
@@ -2821,6 +2831,7 @@ function togglePaperStudent(studentId) {
 
 async function analyzePaperFile() {
   const paper = getTeachingPaperState()
+  if (paper.busy) return
   if (!paper.file) {
     showToast('请先上传试卷文件')
     return
@@ -2835,11 +2846,10 @@ async function analyzePaperFile() {
     paper.status = 'AI 正在深度分析试卷...'
     renderTeachingPanel()
 
-    const response = await fetch('/api/teaching-data/paper-analysis', {
+    const { response, data } = await requestAiJson('/api/teaching-data/paper-analysis', {
       method: 'POST',
       body: formData
-    })
-    const data = await response.json()
+    }, '试卷分析失败')
 
     if (response.status === 401) {
       updateAccessState({ authenticated: false })
@@ -2884,7 +2894,11 @@ async function buildPaperAnalysisFormData(file) {
   }
 
   if (isPdfFile(file)) {
-    await appendPaperPdfData(formData, file, payload)
+    try {
+      await appendPaperPdfData(formData, file, payload)
+    } catch (error) {
+      showToast('PDF 本地读取中断，已切换为服务器读取')
+    }
   }
 
   formData.append('payload', JSON.stringify(payload))
@@ -2901,32 +2915,36 @@ async function appendPaperPdfData(formData, file, payload) {
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
   const paper = getTeachingPaperState()
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-  const pageCount = pdf.numPages || 0
-  const imagePageCount = Math.min(pageCount, PAPER_ANALYSIS_MAX_PAGE_IMAGES)
-  const textParts = []
+  try {
+    const pageCount = pdf.numPages || 0
+    const imagePageCount = Math.min(pageCount, PAPER_ANALYSIS_MAX_PAGE_IMAGES)
+    const textParts = []
 
-  payload.selectedPdfPages = Array.from({ length: pageCount }, (item, index) => index + 1)
-  payload.pdfPageCount = pageCount
-  payload.imagePageCount = imagePageCount
+    payload.selectedPdfPages = Array.from({ length: pageCount }, (item, index) => index + 1)
+    payload.pdfPageCount = pageCount
+    payload.imagePageCount = imagePageCount
 
-  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
-    paper.status = `正在读取 PDF 第 ${pageNumber}/${pageCount} 页`
-    renderTeachingPanel()
-    const page = await pdf.getPage(pageNumber)
-    const textContent = await page.getTextContent().catch(() => null)
-    if (textContent && Array.isArray(textContent.items)) {
-      const pageText = textContent.items.map((item) => item.str || '').join(' ').replace(/\s+/g, ' ').trim()
-      if (pageText) textParts.push(`第 ${pageNumber} 页：${pageText}`)
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      paper.status = `正在读取 PDF 第 ${pageNumber}/${pageCount} 页`
+      renderTeachingPanel()
+      const page = await pdf.getPage(pageNumber)
+      const textContent = await page.getTextContent().catch(() => null)
+      if (textContent && Array.isArray(textContent.items)) {
+        const pageText = textContent.items.map((item) => item.str || '').join(' ').replace(/\s+/g, ' ').trim()
+        if (pageText) textParts.push(`第 ${pageNumber} 页：${pageText}`)
+      }
+
+      if (pageNumber <= imagePageCount) {
+        const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.76 })
+        if (blob) formData.append('paperPageImage', blob, `${file.name}-page-${pageNumber}.jpg`)
+      }
     }
 
-    if (pageNumber <= imagePageCount) {
-      const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.76 })
-      if (blob) formData.append('paperPageImage', blob, `${file.name}-page-${pageNumber}.jpg`)
+    if (textParts.length) {
+      payload.clientPdfText = textParts.join('\n').slice(0, 50000)
     }
-  }
-
-  if (textParts.length) {
-    payload.clientPdfText = textParts.join('\n').slice(0, 50000)
+  } finally {
+    await pdf.destroy().catch(() => {})
   }
 }
 
@@ -3247,16 +3265,16 @@ async function analyzeOneTeachingProfile(profileId) {
 }
 
 async function requestTeachingAnalysis(payload) {
+  if (state.teaching.aiBusy) return
   try {
     state.teaching.aiBusy = true
     state.teaching.aiResult = 'AI 正在分析...'
     renderTeachingPanel()
-    const response = await fetch('/api/teaching-data/ai-analysis', {
+    const { response, data } = await requestAiJson('/api/teaching-data/ai-analysis', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
-    })
-    const data = await response.json()
+    }, 'AI 分析失败')
     if (!response.ok) throw new Error(data.error || 'AI 分析失败')
     if (data.usage) {
       updateAccessState({ usage: data.usage })
@@ -3264,8 +3282,8 @@ async function requestTeachingAnalysis(payload) {
     }
     state.teaching.aiResult = data.text || ''
   } catch (error) {
-    state.teaching.aiResult = ''
-    showToast(error.message || 'AI 分析失败')
+    state.teaching.aiResult = error.message || 'AI 分析失败，请稍后重试'
+    showToast(state.teaching.aiResult)
   } finally {
     state.teaching.aiBusy = false
     renderTeachingPanel()
@@ -4965,6 +4983,9 @@ function renderRearrange() {
   if (!els.rearrangePanel) return
 
   els.rearrangeStatus.textContent = state.rearrange.status || '等待上传文件'
+  els.rearrangeUploadBtn.disabled = state.rearrange.busy
+  els.rearrangeFileInput.disabled = state.rearrange.busy
+  els.recognizeQuestionsBtn.setAttribute('aria-busy', String(state.rearrange.busy))
   els.recognizeQuestionsBtn.disabled = state.rearrange.busy || !state.rearrange.files.length
   els.exportQuestionsBtn.disabled = state.rearrange.busy || !state.rearrange.questions.length
   els.recognizeQuestionsBtn.textContent = state.rearrange.busy ? '处理中...' : 'AI 识别题目'
@@ -5166,6 +5187,7 @@ function updateQuestionFromEditor(event) {
 }
 
 async function recognizeQuestions() {
+  if (state.rearrange.busy) return
   if (!state.rearrange.files.length) {
     showToast('请先上传试卷文件')
     return
@@ -5177,11 +5199,10 @@ async function recognizeQuestions() {
     const formData = await buildQuestionRecognizeFormData()
     setRearrangeBusy(true, 'AI 正在识别题目...')
 
-    const response = await fetch('/api/rearrange/recognize', {
+    const { response, data } = await requestAiJson('/api/rearrange/recognize', {
       method: 'POST',
       body: formData
-    })
-    const data = await readJsonResponse(response, '题目识别失败')
+    }, '题目识别失败')
 
     if (response.status === 401) {
       updateAccessState({ authenticated: false })
@@ -5253,20 +5274,24 @@ async function appendPdfQuestionPages(formData, file, startIndex) {
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
 
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-  const remaining = Math.max(0, REARRANGE_MAX_PAGE_IMAGES - startIndex)
-  const pageTotal = Math.min(pdf.numPages, remaining)
+  try {
+    const remaining = Math.max(0, REARRANGE_MAX_PAGE_IMAGES - startIndex)
+    const pageTotal = Math.min(pdf.numPages, remaining)
 
-  if (!pageTotal) return 0
+    if (!pageTotal) return 0
 
-  for (let pageNumber = 1; pageNumber <= pageTotal; pageNumber += 1) {
-    state.rearrange.status = `正在读取 PDF 第 ${pageNumber}/${pageTotal} 页`
-    renderRearrange()
-    const page = await pdf.getPage(pageNumber)
-    const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.7 })
-    formData.append('rearrangePageImage', blob, `${file.name}-page-${startIndex + pageNumber}.jpg`)
+    for (let pageNumber = 1; pageNumber <= pageTotal; pageNumber += 1) {
+      state.rearrange.status = `正在读取 PDF 第 ${pageNumber}/${pageTotal} 页`
+      renderRearrange()
+      const page = await pdf.getPage(pageNumber)
+      const blob = await renderPdfPageToImageBlob(page, { maxEdge: 1600, quality: 0.7 })
+      formData.append('rearrangePageImage', blob, `${file.name}-page-${startIndex + pageNumber}.jpg`)
+    }
+
+    return pageTotal
+  } finally {
+    await pdf.destroy().catch(() => {})
   }
-
-  return pageTotal
 }
 
 async function appendImageQuestionPage(formData, file, pageIndex) {
@@ -5289,18 +5314,44 @@ async function imageFileToJpegBlob(file) {
   return canvasToBlob(canvas, 'image/jpeg', 0.72)
 }
 
-async function readJsonResponse(response, fallbackMessage) {
-  const text = await response.text()
+async function requestAiJson(url, options, fallbackMessage, readResponse = readJsonResponse) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS)
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal })
+    const data = await readResponse(response, fallbackMessage)
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error(`${fallbackMessage}：服务器返回内容异常，请稍后重试`)
+    }
+    if (response.ok && data.error) throw new Error(data.error)
+    return { response, data }
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error(`${fallbackMessage}：等待超过 4 分钟，请减少文件或页数后重试。已填写的内容仍保留。`)
+    }
+    if (isGenerationConnectionError(error)) {
+      throw new TypeError('网络连接中断，请检查网络后重试。已填写的内容仍保留。')
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
 
+async function readJsonResponse(response, fallbackMessage = '请求失败') {
+  const text = await response.text()
   try {
     return JSON.parse(text)
   } catch (error) {
-    const isHtml = /^\s*</.test(text)
-    const message = isHtml
-      ? `${fallbackMessage}：测试版后端接口没有返回 JSON，请确认部署已更新为 Node 后端服务。`
-      : `${fallbackMessage}：${text.slice(0, 160) || '接口返回为空'}`
-
-    return { error: message }
+    const messages = {
+      401: '登录状态已失效，请重新登录',
+      413: '上传内容过大，请压缩文件或减少页数后重试',
+      429: '请求次数已达限制，请稍后重试',
+      502: 'AI 服务连接暂时中断，请稍后重试',
+      503: 'AI 服务暂时繁忙，请稍后重试',
+      504: 'AI 服务响应超时，请减少文件或页数后重试'
+    }
+    return { error: messages[response.status] || `${fallbackMessage}：服务器未返回有效结果，请稍后重试` }
   }
 }
 
@@ -5561,16 +5612,20 @@ async function detectPdfLecturesFromFile(file) {
 
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-  const lectures = await detectPdfLectures(pdf)
+  try {
+    const lectures = await detectPdfLectures(pdf)
 
-  if (lectures.length) return lectures
+    if (lectures.length) return lectures
 
-  return [{
-    key: 'full-book',
-    title: '整本教材',
-    startPage: 1,
-    endPage: pdf.numPages || 1
-  }]
+    return [{
+      key: 'full-book',
+      title: '整本教材',
+      startPage: 1,
+      endPage: pdf.numPages || 1
+    }]
+  } finally {
+    await pdf.destroy().catch(() => {})
+  }
 }
 
 function renderFeedbackModeControls() {
@@ -5933,6 +5988,7 @@ function deleteOneProfileById(profileId) {
 }
 
 async function generateFeedback() {
+  if (state.generating) return
   const payload = buildGeneratePayload()
 
   if (!payload) return
@@ -5945,6 +6001,7 @@ async function generateFeedback() {
     : null
 
   setGenerating(true)
+  setGenerationStatus('正在读取课件并准备生成，请保持页面打开。', 'busy')
 
   try {
     payload.coursewareMeta = []
@@ -5977,6 +6034,7 @@ async function generateFeedback() {
       formData.append('courseware', file)
     }
     els.generateBtn.textContent = 'AI 生成中...'
+    setGenerationStatus('AI 正在生成反馈，内容较多时需要稍候，请勿重复提交。', 'busy')
 
     payload.generationRequestId = createGenerationRequestId()
     formData.append('payload', JSON.stringify(payload))
@@ -6018,12 +6076,15 @@ async function generateFeedback() {
       applied: false
     }
     clearGenerationInstruction()
+    setGenerationStatus(data.demo ? '已生成演示反馈。' : '反馈已生成，可以查看、复制或导出。', 'success')
     renderResults()
     renderImageReport(payload)
     showToast(data.demo ? (data.message || '已生成演示反馈，配置 API Key 后会调用 AI') : '反馈已生成')
     document.querySelector('#resultsPanel').scrollIntoView({ behavior: 'smooth', block: 'start' })
   } catch (error) {
-    showToast(getGenerationErrorMessage(error))
+    const message = getGenerationErrorMessage(error)
+    setGenerationStatus(message, 'error')
+    showToast(message)
   } finally {
     setGenerating(false)
   }
@@ -6034,11 +6095,10 @@ async function requestFeedbackGeneration(formData) {
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const response = await fetch('/api/generate-feedback', {
+      const { response, data } = await requestAiJson('/api/generate-feedback', {
         method: 'POST',
         body: formData
-      })
-      const data = await readGenerateResponse(response)
+      }, '反馈生成失败', readGenerateResponse)
       return { response, data }
     } catch (error) {
       lastError = error
@@ -6069,23 +6129,7 @@ function isGenerationConnectionError(error) {
 }
 
 async function readGenerateResponse(response) {
-  const text = await response.text()
-  const body = text.trim()
-
-  if (!body) {
-    throw new Error(response.ok
-      ? '服务器没有返回生成结果，请重新生成'
-      : `服务器暂时不可用（${response.status}），请稍后重试`)
-  }
-
-  try {
-    return JSON.parse(body)
-  } catch (error) {
-    if ([502, 503, 504].includes(response.status)) {
-      throw new Error('服务器生成连接暂时中断，请稍后重试')
-    }
-    throw new Error('服务器返回内容异常，请刷新页面后重试')
-  }
+  return readJsonResponse(response, '反馈生成失败')
 }
 
 function getGenerationErrorMessage(error) {
@@ -6248,7 +6292,16 @@ function buildGeneratePayload() {
   }
 }
 
+function setGenerationStatus(message, status) {
+  if (!els.generationStatus) return
+  els.generationStatus.textContent = message
+  els.generationStatus.dataset.state = status
+  els.generationStatus.classList.toggle('hidden', !message)
+}
+
 function setGenerating(isGenerating) {
+  state.generating = isGenerating
+  els.generateBtn.setAttribute('aria-busy', String(isGenerating))
   els.generateBtn.disabled = isGenerating
   els.generateBtn.textContent = isGenerating ? 'AI 生成中...' : 'AI 生成反馈'
 }
@@ -6450,27 +6503,31 @@ async function loadPdfSelectionItem(file) {
   if (!window.pdfjsLib) throw new Error('PDF 解析组件加载失败，请刷新页面重试')
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
   const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-  const pageCount = pdf.numPages
-  const lectures = await detectPdfLectures(pdf)
-  const firstLecture = lectures[0]
-  const selectedPages = firstLecture
-    ? buildPageRange(firstLecture.startPage, firstLecture.endPage)
-    : Array.from({ length: pageCount }, (item, index) => index + 1)
-  return {
-    fileKey: getFileKey(file),
-    fileName: file.name,
-    isPdf: true,
-    isWord: false,
-    included: true,
-    pageCount,
-    selectedPages,
-    lectures,
-    selectedLectureIndex: firstLecture ? '0' : '',
-    rangeStartPage: selectedPages[0] || 1,
-    rangeEndPage: selectedPages[selectedPages.length - 1] || pageCount || '',
-    loading: false,
-    isOpen: false,
-    error: ''
+  try {
+    const pageCount = pdf.numPages
+    const lectures = await detectPdfLectures(pdf)
+    const firstLecture = lectures[0]
+    const selectedPages = firstLecture
+      ? buildPageRange(firstLecture.startPage, firstLecture.endPage)
+      : Array.from({ length: pageCount }, (item, index) => index + 1)
+    return {
+      fileKey: getFileKey(file),
+      fileName: file.name,
+      isPdf: true,
+      isWord: false,
+      included: true,
+      pageCount,
+      selectedPages,
+      lectures,
+      selectedLectureIndex: firstLecture ? '0' : '',
+      rangeStartPage: selectedPages[0] || 1,
+      rangeEndPage: selectedPages[selectedPages.length - 1] || pageCount || '',
+      loading: false,
+      isOpen: false,
+      error: ''
+    }
+  } finally {
+    await pdf.destroy().catch(() => {})
   }
 }
 
@@ -7354,44 +7411,48 @@ async function appendPdfPreviewData(formData, file, payload, fileIndex = 0) {
 
   const arrayBuffer = await file.arrayBuffer()
   const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise
-  const selectedPages = getSelectedPdfPages(file, pdf.numPages)
-  const textParts = []
+  try {
+    const selectedPages = getSelectedPdfPages(file, pdf.numPages)
+    const textParts = []
 
-  if (!selectedPages.length) {
-    throw new Error('请至少选择 1 页 PDF')
-  }
-
-  if (!Array.isArray(payload.coursewareMeta)) payload.coursewareMeta = []
-  payload.coursewareMeta[fileIndex] = {
-    fileIndex,
-    fileName: file.name,
-    selectedPdfPages: selectedPages,
-    clientPdfText: ''
-  }
-
-  for (let index = 0; index < selectedPages.length; index += 1) {
-    const pageNumber = selectedPages[index]
-    els.generateBtn.textContent = `正在读取 PDF ${index + 1}/${selectedPages.length}`
-    const page = await pdf.getPage(pageNumber)
-    const textContent = await page.getTextContent().catch(() => null)
-    if (textContent && Array.isArray(textContent.items)) {
-      textParts.push(`第 ${pageNumber} 页：${textContent.items.map((item) => item.str || '').join(' ')}`)
+    if (!selectedPages.length) {
+      throw new Error('请至少选择 1 页 PDF')
     }
 
-    const imageBlob = await renderPdfPageToImageBlob(page)
-    if (imageBlob) {
-      formData.append('pdfPageImage', imageBlob, `courseware-${fileIndex}-page-${pageNumber}.jpg`)
+    if (!Array.isArray(payload.coursewareMeta)) payload.coursewareMeta = []
+    payload.coursewareMeta[fileIndex] = {
+      fileIndex,
+      fileName: file.name,
+      selectedPdfPages: selectedPages,
+      clientPdfText: ''
     }
-  }
 
-  const extractedText = textParts
-    .join('\n')
-    .replace(/\s+/g, ' ')
-    .trim()
+    for (let index = 0; index < selectedPages.length; index += 1) {
+      const pageNumber = selectedPages[index]
+      els.generateBtn.textContent = `正在读取 PDF ${index + 1}/${selectedPages.length}`
+      const page = await pdf.getPage(pageNumber)
+      const textContent = await page.getTextContent().catch(() => null)
+      if (textContent && Array.isArray(textContent.items)) {
+        textParts.push(`第 ${pageNumber} 页：${textContent.items.map((item) => item.str || '').join(' ')}`)
+      }
 
-  if (extractedText) {
-    payload.coursewareMeta[fileIndex].clientPdfText = extractedText.slice(0, 30000)
-    if (fileIndex === 0) payload.clientPdfText = extractedText.slice(0, 30000)
+      const imageBlob = await renderPdfPageToImageBlob(page)
+      if (imageBlob) {
+        formData.append('pdfPageImage', imageBlob, `courseware-${fileIndex}-page-${pageNumber}.jpg`)
+      }
+    }
+
+    const extractedText = textParts
+      .join('\n')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    if (extractedText) {
+      payload.coursewareMeta[fileIndex].clientPdfText = extractedText.slice(0, 30000)
+      if (fileIndex === 0) payload.clientPdfText = extractedText.slice(0, 30000)
+    }
+  } finally {
+    await pdf.destroy().catch(() => {})
   }
 }
 
@@ -7400,7 +7461,7 @@ async function renderPdfPageToImageBlob(page, options = {}) {
   const maxScale = options.maxScale || 1.8
   const maxEdge = options.maxEdge || 1400
   const quality = options.quality || 0.82
-  const scale = Math.min(maxScale, maxEdge / Math.max(baseViewport.width, 1))
+  const scale = Math.min(maxScale, maxEdge / Math.max(baseViewport.width, baseViewport.height, 1))
   const viewport = page.getViewport({ scale })
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
@@ -7415,7 +7476,13 @@ async function renderPdfPageToImageBlob(page, options = {}) {
     viewport
   }).promise
 
-  return canvasToBlob(canvas, 'image/jpeg', quality)
+  try {
+    return await canvasToBlob(canvas, 'image/jpeg', quality)
+  } finally {
+    canvas.width = 0
+    canvas.height = 0
+    page.cleanup()
+  }
 }
 
 function copyAllFeedbacks() {
@@ -7719,5 +7786,5 @@ function showToast(message) {
   clearTimeout(showToast.timer)
   showToast.timer = setTimeout(() => {
     els.toast.classList.remove('show')
-  }, 2200)
+  }, Math.min(9000, Math.max(4000, String(message).length * 100)))
 }

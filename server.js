@@ -15,6 +15,7 @@ const app = express()
 const execFileAsync = promisify(execFile)
 const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
 const AI_REQUEST_RETRY_COUNT = 2
+const AI_REQUEST_TIMEOUT_MS = 120000
 const FEEDBACK_BATCH_SIZE = 5
 const FEEDBACK_BATCH_CONCURRENCY = 3
 const GENERATION_REQUEST_CACHE_TTL_MS = 15 * 60 * 1000
@@ -745,16 +746,28 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: '服务器处理文件时出错，请稍后重试' })
 })
 
-initializeStorage()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`Course feedback web app running at http://localhost:${PORT}`)
+if (require.main === module) {
+  initializeStorage()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`Course feedback web app running at http://localhost:${PORT}`)
+      })
     })
-  })
-  .catch((error) => {
-    console.error('Failed to initialize storage', error)
-    process.exit(1)
-  })
+    .catch((error) => {
+      console.error('Failed to initialize storage', error)
+      process.exit(1)
+    })
+}
+
+module.exports = {
+  parseProviderResponseJson,
+  parseFeedbackResponse,
+  parsePaperAnalysisResponse,
+  parsePaperScoreRecognitionResponse,
+  extractAIResponseText,
+  parseJsonText,
+  applyAIModelCompatibility
+}
 
 function parsePayload(rawPayload) {
   if (!rawPayload) return {}
@@ -2235,19 +2248,13 @@ async function requestOpenAIText(prompt, aiConfig) {
   })
 
   const text = await response.text()
-  const parsed = parseProviderResponseJson(text, 'AI')
+  const parsed = parseProviderResponseJson(text, 'AI', response.status)
   if (!response.ok) {
     const message = parsed.error && parsed.error.message ? parsed.error.message : text
     throw new Error(`AI 请求失败：${message}`)
   }
 
-  if (parsed.output_text) return trim(parsed.output_text)
-
-  const output = Array.isArray(parsed.output) ? parsed.output : []
-  return trim(output.flatMap((item) => Array.isArray(item.content) ? item.content : [])
-    .map((part) => part.text || '')
-    .filter(Boolean)
-    .join('\n')) || 'AI 暂未返回内容'
+  return extractAIResponseText(parsed)
 }
 
 async function requestChatText(prompt, aiConfig, options = {}) {
@@ -2280,15 +2287,13 @@ async function requestChatText(prompt, aiConfig, options = {}) {
   })
 
   const text = await response.text()
-  const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
+  const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI', response.status)
   if (!response.ok) {
     const message = parsed.error && parsed.error.message ? parsed.error.message : text
     throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
   }
 
-  return trim(parsed.choices && parsed.choices[0] && parsed.choices[0].message
-    ? parsed.choices[0].message.content
-    : '') || 'AI 暂未返回内容'
+  return extractAIResponseText(parsed)
 }
 
 function buildPolishPrompt(text, context) {
@@ -2376,7 +2381,7 @@ async function requestOpenAIPaperAnalysis(payload, courseware, aiConfig) {
     body: JSON.stringify(body)
   })
   const text = await response.text()
-  const parsed = parseProviderResponseJson(text, 'AI')
+  const parsed = parseProviderResponseJson(text, 'AI', response.status)
   if (!response.ok) {
     const message = parsed.error && parsed.error.message ? parsed.error.message : text
     throw new Error(`AI 请求失败：${message}`)
@@ -2424,7 +2429,7 @@ async function requestChatPaperAnalysis(payload, courseware, aiConfig, options =
       body: JSON.stringify(body)
     })
     const text = await response.text()
-    const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
+    const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI', response.status)
     if (!response.ok) {
       const message = parsed.error && parsed.error.message ? parsed.error.message : text
       throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
@@ -2442,7 +2447,7 @@ async function requestChatPaperAnalysis(payload, courseware, aiConfig, options =
       body: JSON.stringify(body)
     })
     const text = await response.text()
-    const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
+    const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI', response.status)
     if (!response.ok) {
       const message = parsed.error && parsed.error.message ? parsed.error.message : text
       throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
@@ -2564,22 +2569,13 @@ function getPaperAnalysisJsonSchema() {
 }
 
 function parsePaperAnalysisResponse(response, provider) {
-  if (provider === 'deepseek' || provider === 'custom') {
-    const content = response.choices && response.choices[0] && response.choices[0].message
-      ? response.choices[0].message.content
-      : ''
-    return parseJsonText(content)
+  const parsed = parseJsonText(extractAIResponseText(response), { strict: true })
+  const questions = Array.isArray(parsed.questions) ? parsed.questions : []
+  const sections = Array.isArray(parsed.sections) ? parsed.sections : []
+  if (!questions.length && !sections.some((section) => Array.isArray(section.questions) && section.questions.length)) {
+    throw new Error('AI 未识别出试卷题目，请使用清晰的试卷后重试')
   }
-
-  if (response.output_text) return parseJsonText(response.output_text)
-
-  const output = Array.isArray(response.output) ? response.output : []
-  const text = output.flatMap((item) => Array.isArray(item.content) ? item.content : [])
-    .map((part) => part.text || '')
-    .filter(Boolean)
-    .join('\n')
-
-  return parseJsonText(text)
+  return parsed
 }
 
 function normalizePaperAnalysis(input, payload = {}) {
@@ -2705,7 +2701,7 @@ async function requestOpenAIPaperScoreRecognition(payload, courseware, aiConfig)
     body: JSON.stringify(body)
   })
   const text = await response.text()
-  const parsed = parseProviderResponseJson(text, 'AI')
+  const parsed = parseProviderResponseJson(text, 'AI', response.status)
   if (!response.ok) {
     const message = parsed.error && parsed.error.message ? parsed.error.message : text
     throw new Error(`AI 请求失败：${message}`)
@@ -2752,7 +2748,7 @@ async function requestChatPaperScoreRecognition(payload, courseware, aiConfig, o
     body: JSON.stringify(body)
   })
   const text = await response.text()
-  const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI')
+  const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI', response.status)
   if (!response.ok) {
     const message = parsed.error && parsed.error.message ? parsed.error.message : text
     throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
@@ -2848,22 +2844,11 @@ function getPaperScoreRecognitionJsonSchema() {
 }
 
 function parsePaperScoreRecognitionResponse(response, provider) {
-  if (provider === 'deepseek' || provider === 'custom') {
-    const content = response.choices && response.choices[0] && response.choices[0].message
-      ? response.choices[0].message.content
-      : ''
-    return parseJsonText(content)
+  const parsed = parseJsonText(extractAIResponseText(response), { strict: true })
+  if (!Array.isArray(parsed.scores) || !parsed.scores.length) {
+    throw new Error('AI 未识别出有效分数，请使用清晰的答卷后重试')
   }
-
-  if (response.output_text) return parseJsonText(response.output_text)
-
-  const output = Array.isArray(response.output) ? response.output : []
-  const text = output.flatMap((item) => Array.isArray(item.content) ? item.content : [])
-    .map((part) => part.text || '')
-    .filter(Boolean)
-    .join('\n')
-
-  return parseJsonText(text)
+  return parsed
 }
 
 function normalizePaperScoreRecognition(input, payload = {}) {
@@ -3261,6 +3246,7 @@ async function requestFeedbacks(payload, courseware, aiConfig) {
   if (!shouldBatch) {
     const response = await requestAI(payload, courseware, aiConfig)
     const parsed = parseFeedbackResponse(response, aiConfig.provider)
+    assertCompleteFeedbacks(parsed.feedbacks, students)
     return {
       feedbacks: Array.isArray(parsed.feedbacks) ? parsed.feedbacks : [],
       batchCount: 1,
@@ -3303,7 +3289,7 @@ async function requestFeedbacks(payload, courseware, aiConfig) {
   ))
   const failedResults = results.filter((result) => !result || result.status !== 'fulfilled')
 
-  if (!successfulFeedbacks.length) {
+  if (failedResults.length || !successfulFeedbacks.length) {
     const firstError = failedResults.find((result) => result && result.error)
     throw (firstError && firstError.error) || new Error('AI 未返回可用的反馈内容，请稍后重试')
   }
@@ -3315,6 +3301,13 @@ async function requestFeedbacks(payload, courseware, aiConfig) {
   }
 }
 
+function assertCompleteFeedbacks(feedbacks, students = []) {
+  const matches = matchFeedbacksByStudent(students, feedbacks)
+  if (students.some((student) => !trim(matches.get(student.id) && matches.get(student.id).feedback))) {
+    throw new Error('AI 返回的学生反馈不完整，请减少学生数量后重新生成')
+  }
+}
+
 async function requestFeedbackBatch(payload, courseware, aiConfig) {
   let lastError = null
 
@@ -3323,6 +3316,7 @@ async function requestFeedbackBatch(payload, courseware, aiConfig) {
       const response = await requestAI(payload, courseware, aiConfig)
       const parsed = parseFeedbackResponse(response, aiConfig.provider)
       const feedbacks = Array.isArray(parsed.feedbacks) ? parsed.feedbacks : []
+      assertCompleteFeedbacks(feedbacks, payload.students)
       if (feedbacks.length) return feedbacks
       lastError = new Error('AI 返回的反馈内容不完整')
     } catch (error) {
@@ -3429,13 +3423,7 @@ async function requestOpenAI(payload, courseware, aiConfig) {
   })
 
   const text = await response.text()
-  let parsed
-
-  try {
-    parsed = JSON.parse(text)
-  } catch (error) {
-    throw new Error(`AI 返回无法解析：${text.slice(0, 200)}`)
-  }
+  const parsed = parseProviderResponseJson(text, 'AI', response.status)
 
   if (!response.ok) {
     const message = parsed.error && parsed.error.message ? parsed.error.message : text
@@ -3535,13 +3523,7 @@ async function sendChatCompatibleRequest(userContent, aiConfig, options = {}) {
   })
 
   const text = await response.text()
-  let parsed
-
-  try {
-    parsed = JSON.parse(text)
-  } catch (error) {
-    throw new Error(`${options.providerLabel || 'AI'} 返回无法解析：${text.slice(0, 200)}`)
-  }
+  const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI', response.status)
 
   if (!response.ok) {
     const message = parsed.error && parsed.error.message ? parsed.error.message : text
@@ -3915,33 +3897,21 @@ function isLikelyImageRequestError(error) {
     || message.includes('unsupported')
     || message.includes('invalid')
     || message.includes('无法解析')
+    || message.includes('网关暂时不可用')
 }
 
 function parseFeedbackResponse(response, provider) {
-  if (provider === 'deepseek' || provider === 'custom') {
-    const content = response.choices && response.choices[0] && response.choices[0].message
-      ? response.choices[0].message.content
-      : ''
-
-    return parseJsonText(content)
+  const parsed = parseJsonText(extractAIResponseText(response), { strict: true })
+  if (!Array.isArray(parsed.feedbacks) || !parsed.feedbacks.some((item) => item && trim(item.feedback))) {
+    throw new Error('AI 未返回可用的学生反馈，请重新生成')
   }
-
-  if (response.output_text) {
-    return parseJsonText(response.output_text)
-  }
-
-  const output = Array.isArray(response.output) ? response.output : []
-  const text = output.flatMap((item) => Array.isArray(item.content) ? item.content : [])
-    .map((part) => part.text || '')
-    .filter(Boolean)
-    .join('\n')
-
-  return parseJsonText(text)
+  return parsed
 }
 
-function parseJsonText(text) {
+function parseJsonText(text, options = {}) {
   const cleanText = String(text || '')
-    .replace(/^```json\s*/i, '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
     .replace(/```$/i, '')
     .trim()
 
@@ -3955,14 +3925,77 @@ function parseJsonText(text) {
     if (extracted) return extracted
   }
 
+  if (options.strict) throw new Error('AI 返回的内容格式不完整，请重新生成')
   return { feedbacks: [], questions: [], scores: [] }
 }
 
-function parseProviderResponseJson(text, providerLabel) {
-  const parsed = tryParseJson(text)
-  if (parsed) return parsed
+function extractAIContentText(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map((part) => {
+    if (typeof part === 'string') return part
+    if (!part || typeof part !== 'object') return ''
+    return typeof part.text === 'string' ? part.text : (part.text && part.text.value) || ''
+  }).join('')
+}
 
-  throw new Error(buildNonJsonAIResponseMessage(text, providerLabel))
+function extractAIResponseText(response) {
+  if (!response || typeof response !== 'object') throw new Error('AI 未返回有效内容，请重试')
+  if (response.error) throw new Error(`AI 请求失败：${response.error.message || '服务暂时不可用'}`)
+  const choice = Array.isArray(response.choices) ? response.choices[0] : null
+  if (response.status === 'incomplete' || (choice && choice.finish_reason === 'length')) {
+    throw new Error('AI 返回内容过长，被服务商截断，请减少学生数量或材料后重试')
+  }
+  if (choice && (choice.finish_reason === 'content_filter' || (choice.message && choice.message.refusal))) {
+    throw new Error('AI 服务未能处理此内容，请调整输入后重试')
+  }
+  const text = extractAIContentText(choice && choice.message && choice.message.content)
+    || extractAIContentText(response.output_text)
+    || (Array.isArray(response.output) ? response.output : [])
+      .map((item) => extractAIContentText(item.content)).join('\n')
+  if (!text.trim()) throw new Error('AI 返回内容为空，请稍后重试')
+  return text.trim()
+}
+
+function parseProviderResponseJson(text, providerLabel, status = 200) {
+  const source = String(text || '').replace(/^\uFEFF/, '').trim()
+  const parsed = tryParseJson(source)
+  if (parsed && typeof parsed === 'object') return parsed
+
+  // Some compatible gateways return SSE even when stream:false was requested.
+  if (/^data:/m.test(source)) {
+    let content = ''
+    let finishReason = null
+    let completeResponse = null
+    let finished = false
+    for (const frame of source.split(/\r?\n\r?\n/)) {
+      const data = frame.split(/\r?\n/).filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart()).join('\n').trim()
+      if (!data) continue
+      if (data === '[DONE]') { finished = true; continue }
+      const event = tryParseJson(data)
+      if (!event || typeof event !== 'object') throw new Error(buildNonJsonAIResponseMessage('', providerLabel, status))
+      if (event.error || event.type === 'error') {
+        throw new Error(`${providerLabel || 'AI'} 请求失败：${(event.error && event.error.message) || event.message || '服务暂时不可用'}`)
+      }
+      if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') {
+        completeResponse = event.response
+        finished = true
+      }
+      if (event.type === 'response.output_text.delta') content += event.delta || ''
+      const choice = Array.isArray(event.choices) ? event.choices.find((item) => !item.index) : null
+      if (choice) {
+        content += extractAIContentText(choice.delta && choice.delta.content)
+        if (choice.message) completeResponse = event
+        if (choice.finish_reason) { finishReason = choice.finish_reason; finished = true }
+      }
+    }
+    if (!finished) throw new Error('AI 服务返回中途断开，请重新生成')
+    if (completeResponse) return completeResponse
+    if (content) return { choices: [{ message: { content }, finish_reason: finishReason }] }
+  }
+
+  throw new Error(buildNonJsonAIResponseMessage(source, providerLabel, status))
 }
 
 function tryParseJson(text) {
@@ -3976,10 +4009,21 @@ function tryParseJson(text) {
 function extractFirstJsonObject(text) {
   const source = String(text || '')
   const start = source.indexOf('{')
-  const end = source.lastIndexOf('}')
-
-  if (start < 0 || end <= start) return ''
-  return source.slice(start, end + 1)
+  if (start < 0) return ''
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+    } else if (character === '"') inString = true
+    else if (character === '{') depth += 1
+    else if (character === '}' && --depth === 0) return source.slice(start, index + 1)
+  }
+  return ''
 }
 
 function repairJsonLatexBackslashes(text) {
@@ -3989,9 +4033,14 @@ function repairJsonLatexBackslashes(text) {
   )
 }
 
-function buildNonJsonAIResponseMessage(text, providerLabel) {
-  const preview = String(text || '').replace(/\s+/g, ' ').slice(0, 220)
-  return `${providerLabel || 'AI'} 返回内容无法解析，请稍后重试。返回片段：${preview}`
+function buildNonJsonAIResponseMessage(text, providerLabel, status = 200) {
+  const label = providerLabel || 'AI'
+  if ([401, 403].includes(Number(status))) return `${label} 服务认证失败，请联系管理员检查 API 配置`
+  if (Number(status) === 429) return `${label} 服务繁忙或额度不足，请稍后重试或联系管理员`
+  if (Number(status) >= 500 || /<html|<!doctype/i.test(String(text || ''))) {
+    return `${label} 服务网关暂时不可用，请稍后重试（HTTP ${status}）`
+  }
+  return `${label} 返回内容无法解析，请稍后重试（HTTP ${status}）`
 }
 
 function normalizeFeedbacks(feedbacks, students, payload = {}) {
@@ -4670,7 +4719,10 @@ function withProxy(options) {
 }
 
 async function fetchAI(url, options = {}) {
-  const requestOptions = applyAIModelCompatibility(options)
+  const requestOptions = applyAIModelCompatibility({
+    ...options,
+    signal: options.signal || AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS)
+  })
 
   for (let attempt = 0; attempt <= AI_REQUEST_RETRY_COUNT; attempt += 1) {
     try {
@@ -4786,6 +4838,10 @@ function sendJsonResult(res, payload, heartbeat = null, status = 200) {
 function getUserFacingError(error) {
   const message = error && error.message ? error.message : ''
   const causeCode = error && error.cause && error.cause.code ? error.cause.code : ''
+
+  if (error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return 'AI 处理超时，请减少材料或学生数量后重试'
+  }
 
   if (isRetryableAIError(error) || causeCode === 'UND_ERR_CONNECT_TIMEOUT') {
     return 'AI 服务连接暂时中断，系统已自动重试。请稍后再次生成。'
