@@ -116,7 +116,7 @@ test('the real feedback route preserves six successes, charges no partial attemp
     // package's fetch implementation.
     const form = new FormData()
     form.append('payload', JSON.stringify({
-      generationRequestId, students: selected, mode: 'class', feedbackScope: 'individual',
+      generationRequestId, supportsPartialFeedback: true, students: selected, mode: 'class', feedbackScope: 'individual',
       lessonTitle: '分数的意义', courseNote: '一份合成测试课件', template: ''
     }))
     form.append('courseware', new Blob(['分数表示整体的一部分，请保留该知识点。'], { type: 'text/plain' }), 'synthetic-courseware.txt')
@@ -138,6 +138,20 @@ test('the real feedback route preserves six successes, charges no partial attemp
   assert.ok(initial.feedbacks.every((item) => item.feedback.includes(`PROVIDER_VALID_${item.studentId}`)))
   assert.equal(requests.filter((request) => request.ids.includes('s1')).length, 1)
   assert.equal(requests.filter((request) => request.ids.includes('s7')).length, 1)
+
+  // An already-open old page must never receive a partial-success array that
+  // its legacy renderer would fill with invented rows.
+  const legacyForm = new FormData()
+  legacyForm.append('payload', JSON.stringify({
+    generationRequestId: 'synthetic-legacy-page', students: roster,
+    feedbackScope: 'individual', lessonTitle: '分数的意义', courseNote: '旧页面兼容检查'
+  }))
+  const legacyResponse = await globalThis.fetch(`${baseUrl}/api/generate-feedback`, {
+    method: 'POST', body: legacyForm, signal: AbortSignal.timeout(10000)
+  })
+  const legacyResult = JSON.parse(await legacyResponse.text())
+  assert.match(legacyResult.error, /页面版本过旧/)
+  assert.equal(legacyResult.feedbacks, undefined)
 
   providerRecovered = true
   const recovered = await generate(roster.filter((student) => ['s4', 's5', 's6'].includes(student.id)), 'synthetic-recover-missing')

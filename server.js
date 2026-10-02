@@ -694,6 +694,11 @@ async function generateFeedbackResult(input) {
 
   const preparedCourseware = await prepareFeedbackCourseware(courseware, aiConfig, payload, usageClientId)
   const generation = await requestFeedbacks(payload, preparedCourseware, aiConfig)
+  if (generation.partial && payload.supportsPartialFeedback !== true) {
+    // Older open tabs fabricate missing rows from partial arrays. Require the
+    // new client contract before returning a partial success to the browser.
+    throw new Error('当前页面版本过旧，无法显示部分完成结果。请先保存录入，再刷新页面后重新生成')
+  }
   const nextUsage = generation.partial ? usageInfo : await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
   const completedIds = new Set(generation.feedbacks.map((item) => item.studentId))
   const completedStudents = payload.students.filter((student) => completedIds.has(student.id))

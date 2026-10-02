@@ -6005,6 +6005,7 @@ async function generateFeedback() {
     setGenerationStatus('AI 正在生成反馈，内容较多时需要稍候，请勿重复提交。', 'busy')
 
     payload.generationRequestId = createGenerationRequestId()
+    payload.supportsPartialFeedback = true
     formData.append('payload', JSON.stringify(payload))
     if (exitTestFile && payload.exitTest) formData.append('exitTest', exitTestFile)
 
