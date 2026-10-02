@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+const { normalizeAIProviderError } = require('../lib/ai-provider-error')
 // Load the real pure functions without starting storage, network clients or the web server.
 const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8')
 const names = ['parseProviderResponseJson', 'parseFeedbackResponse', 'parsePaperAnalysisResponse', 'parsePaperScoreRecognitionResponse', 'extractAIResponseText', 'extractAIContentText', 'parseJsonText', 'applyAIModelCompatibility', 'tryParseJson', 'extractFirstJsonObject', 'repairJsonLatexBackslashes', 'buildNonJsonAIResponseMessage', 'assertCompleteFeedbacks', 'matchFeedbacksByStudent', 'trim']
@@ -15,7 +16,7 @@ const {
   parseJsonText,
   applyAIModelCompatibility,
   assertCompleteFeedbacks
-} = new Function(`${declarations}; return { ${names.join(',')} }`)()
+} = new Function('normalizeAIProviderError', `${declarations}; return { ${names.join(',')} }`)(normalizeAIProviderError)
 
 const feedback = { feedbacks: [{ studentId: 's1', name: '同学', feedback: '掌握了分数的基本概念。' }] }
 const chat = (content, finish_reason = 'stop') => ({ choices: [{ message: { content }, finish_reason }] })

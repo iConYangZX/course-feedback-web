@@ -3,12 +3,13 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { readAIResponseText } = require('../lib/ai-response-stream')
+const { normalizeAIProviderError } = require('../lib/ai-provider-error')
 
 // Exercise the existing production parser after the new stream reader.
 const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8')
 const names = ['parseProviderResponseJson', 'tryParseJson', 'extractAIContentText', 'buildNonJsonAIResponseMessage', 'extractAIResponseText']
 const declarations = names.map((name) => source.match(new RegExp(`^function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?^\\}`, 'm'))[0]).join('\n')
-const { parseProviderResponseJson, extractAIResponseText } = new Function(`${declarations}; return {${names.join(',')}}`)()
+const { parseProviderResponseJson, extractAIResponseText } = new Function('normalizeAIProviderError', `${declarations}; return {${names.join(',')}}`)(normalizeAIProviderError)
 const encoder = new TextEncoder()
 const frame = (event) => `data: ${JSON.stringify(event)}\n\n`
 
@@ -80,13 +81,13 @@ test('incomplete and failed terminal responses preserve their error semantics', 
   assert.equal(incomplete.cancelled(), true)
   const failed = makeResponse(frame({ type: 'response.failed', response: { status: 'failed', error: { message: 'provider failure' } } }), { close: false })
   const failedResult = await parse(failed.response)
-  assert.throws(() => extractAIResponseText(failedResult), /provider failure/)
+  assert.throws(() => extractAIResponseText(failedResult), (error) => error.code === 'AI_PROVIDER_ERROR' && error.cause.error.message === 'provider failure')
   assert.equal(failed.cancelled(), true)
 })
 
-test('a named error event stops reading and preserves the provider message', async () => {
+test('a named error event stops reading and preserves the provider error classification', async () => {
   const sample = makeResponse('event: error\ndata: {"message":"余额不足"}\n\n', { close: false })
-  await assert.rejects(parse(sample.response), /余额不足/)
+  await assert.rejects(parse(sample.response), (error) => error.code === 'AI_PROVIDER_QUOTA')
   assert.equal(sample.cancelled(), true)
 })
 

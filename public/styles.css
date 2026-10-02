@@ -2798,3 +2798,9 @@ button:disabled {
     transition-duration: 0.01ms !important;
   }
 }
+
+.generation-status[data-state="warning"] {
+  background: #fff7e8;
+  border-color: #e9ca8c;
+  color: #765015;
+}

@@ -4,10 +4,12 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { createCoursewareSummary } = require('../lib/courseware-summary')
 const { readAIResponseText } = require('../lib/ai-response-stream')
+const { normalizeAIProviderError } = require('../lib/ai-provider-error')
 
 // Exercise the production orchestration without starting the app or loading credentials.
 const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8')
 function load(names, dependencies = {}) {
+  dependencies = { normalizeAIProviderError, ...dependencies }
   const declarations = names.map((name) => {
     const match = source.match(new RegExp(`^(?:async )?function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?^\\}`, 'm'))
     assert.ok(match, `production function ${name} exists`)
@@ -139,7 +141,7 @@ test('a nonretryable failure after HTTP 524 propagates without a text-only fallb
       ? new Response('<html>Gateway timeout</html>', { status: 524 })
       : new Response('{"error":{"message":"image input rejected"}}', { status: 400, headers: { 'content-type': 'application/json' } })
   })
-  await assert.rejects(api.requestChatCompatible({}, courseware, aiConfig), /image input rejected/)
+  await assert.rejects(api.requestChatCompatible({}, courseware, aiConfig), (error) => error.code === 'AI_PROVIDER_BAD_REQUEST' && error.cause.error.message === 'image input rejected')
   assert.equal(bodies.length, 2)
   assert.equal(bodies[0], bodies[1])
   assert.notEqual(courseware.imageSendSucceeded, true)

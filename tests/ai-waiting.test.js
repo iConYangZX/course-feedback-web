@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { EventEmitter } = require('node:events')
+const { normalizeAIProviderError } = require('../lib/ai-provider-error')
 
 const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8')
 const functionNames = ['fetchAI', 'withProxy', 'applyAIModelCompatibility', 'isRetryableAIStatus', 'isRetryableAIError', 'waitForRetry', 'trim', 'startJsonHeartbeat', 'stopJsonHeartbeat', 'sendJsonResult']
@@ -15,6 +16,7 @@ const declarations = functionNames.map((name) => {
 function loadFunctions(fetchStub) {
   const dispatcher = { name: 'test-ai-dispatcher' }
   const dependencies = {
+    normalizeAIProviderError,
     fetch: fetchStub,
     aiDispatcher: dispatcher,
     AI_REQUEST_RETRY_COUNT: 2,

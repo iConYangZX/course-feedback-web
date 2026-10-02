@@ -79,6 +79,7 @@ const state = {
   feedbacks: [],
   generating: false,
   lastGeneratedPayload: null,
+  partialGeneration: null,
   debug: null,
   oneLesson: {
     performance: '表现良好',
@@ -343,6 +344,8 @@ function bindElements() {
     generationInstructionInput: document.querySelector('#generationInstructionInput'),
     generateBtn: document.querySelector('#generateBtn'),
     generationStatus: document.querySelector('#generationStatus'),
+    partialFeedbackNotice: document.querySelector('#partialFeedbackNotice'),
+    retryIncompleteBtn: document.querySelector('#retryIncompleteBtn'),
     copyAllBtn: document.querySelector('#copyAllBtn'),
     resultNote: document.querySelector('#resultNote'),
     debugSummary: document.querySelector('#debugSummary'),
@@ -405,6 +408,7 @@ function bindEvents() {
       state.mode = button.dataset.mode
       state.feedbacks = []
       state.lastGeneratedPayload = null
+      state.partialGeneration = null
       state.debug = null
       state.pendingTeachingApplication = null
       clearGenerationInstruction()
@@ -433,6 +437,7 @@ function bindEvents() {
   els.deleteClassBtn.addEventListener('click', deleteSelectedClass)
   els.deleteOneProfileBtn.addEventListener('click', deleteSelectedOneProfile)
   els.generateBtn.addEventListener('click', generateFeedback)
+  if (els.retryIncompleteBtn) els.retryIncompleteBtn.addEventListener('click', retryIncompleteFeedbacks)
   els.copyAllBtn.addEventListener('click', copyAllFeedbacks)
   if (els.applyTeachingDataBtn) els.applyTeachingDataBtn.addEventListener('click', applyFeedbackToTeachingData)
   els.coursewareInput.addEventListener('change', handleCoursewareChange)
@@ -456,6 +461,7 @@ function bindEvents() {
   if (els.feedbackScopeSelect) els.feedbackScopeSelect.addEventListener('change', () => {
     state.feedbacks = []
     state.lastGeneratedPayload = null
+    state.partialGeneration = null
     state.debug = null
     state.pendingTeachingApplication = null
     renderStudentTable()
@@ -528,6 +534,7 @@ function bindEvents() {
     state.selectedClassId = selectButton.dataset.id
     state.feedbacks = []
     state.lastGeneratedPayload = null
+    state.partialGeneration = null
     state.debug = null
     state.pendingTeachingApplication = null
     clearGenerationInstruction()
@@ -548,6 +555,7 @@ function bindEvents() {
     state.selectedOneProfileId = selectButton.dataset.id
     state.feedbacks = []
     state.lastGeneratedPayload = null
+    state.partialGeneration = null
     state.debug = null
     state.pendingTeachingApplication = null
     clearGenerationInstruction()
@@ -3789,6 +3797,7 @@ function resetAccountWorkspaceState() {
   state.editingOneProfileId = ''
   state.feedbacks = []
   state.lastGeneratedPayload = null
+  state.partialGeneration = null
   state.debug = null
   state.adminUsers = []
   state.pendingTeachingApplication = null
@@ -4313,9 +4322,13 @@ function handleExitTestAction(event) {
 }
 
 function renderResults() {
+  renderPartialFeedbackState()
+  const partial = getPartialGeneration()
   const imageMode = isImageFeedbackMode()
   els.copyAllBtn.disabled = !state.feedbacks.length
-  els.resultNote.textContent = state.feedbacks.length
+  els.resultNote.textContent = partial
+    ? `已完成 ${state.feedbacks.length} / ${partial.payload.students.length} · 未完成 ${partial.failedStudents.length} 人`
+    : state.feedbacks.length
     ? (imageMode ? `${state.feedbacks.length} 张图片反馈报告已生成 · 下方可逐张查看和导出` : `${state.feedbacks.length} 条反馈 · 全部已展开`)
     : '生成后会显示在这里'
   renderTeachingApplyBar()
@@ -4354,87 +4367,49 @@ function renderResults() {
 }
 
 function normalizeGeneratedFeedbacksForPayload(feedbacks, payload = {}) {
-  const source = Array.isArray(feedbacks) ? feedbacks : []
+  const source = (Array.isArray(feedbacks) ? feedbacks : [])
+    .filter((item) => item && typeof item.feedback === 'string' && item.feedback.trim())
   const students = Array.isArray(payload.students) ? payload.students : []
-  if (payload.feedbackScope === 'class' || !students.length) return source
+  if (!students.length) return source
 
   const usedIndexes = new Set()
-  const sharedFeedback = source.find((item) => item && item.templateFields)
-  const sharedFields = sharedFeedback ? sharedFeedback.templateFields : {}
-
-  return students.map((student, studentIndex) => {
+  return students.flatMap((student) => {
     let matchIndex = source.findIndex((item, index) => (
-      !usedIndexes.has(index)
-      && item
-      && item.studentId
-      && item.studentId === student.id
+      !usedIndexes.has(index) && item.studentId === student.id
     ))
-
-    if (matchIndex < 0) {
+    if (matchIndex < 0 && students.filter((item) => item.name === student.name).length === 1) {
       matchIndex = source.findIndex((item, index) => (
-        !usedIndexes.has(index)
-        && item
-        && item.name
-        && item.name === student.name
+        !usedIndexes.has(index) && !item.studentId && item.name === student.name
       ))
     }
-
-    if (matchIndex < 0 && source[studentIndex] && !usedIndexes.has(studentIndex)) {
-      matchIndex = studentIndex
-    }
-
-    if (matchIndex >= 0) {
-      usedIndexes.add(matchIndex)
-      const matched = source[matchIndex]
-      return {
-        ...matched,
-        studentId: student.id,
-        name: student.name
-      }
-    }
-
-    return buildMissingGeneratedFeedback(student, payload, sharedFields)
+    if (matchIndex < 0) return []
+    usedIndexes.add(matchIndex)
+    return [{ ...source[matchIndex], studentId: student.id, name: student.name }]
   })
 }
 
-function buildMissingGeneratedFeedback(student, payload = {}, sharedFields = {}) {
-  const courseContent = String(sharedFields.courseContent || payload.lessonTitle || '本节课围绕课件核心内容进行学习。').trim()
-  const courseKnowledgePoint = String(sharedFields.courseKnowledgePoint || '1、理解本节课的核心知识点。\n2、掌握重点方法并完成对应练习。').trim()
-  const performanceText = [
-    `${student.name}同学本节课${student.performance || '表现良好'}`,
-    student.remark || student.keywords || '',
-    student.exitTestScore === '请假'
-      ? '本次出门测请假，成绩不计入统计'
-      : (student.exitTestScore ? `出门测成绩为${student.exitTestScore}` : '')
-  ].filter(Boolean).join('，')
-  const learningSuggestion = student.performance === '表现较差'
-    ? '建议课后回顾基础概念和典型例题，完成订正后再进行同类题巩固。'
-    : (student.performance === '表现优秀'
-        ? '建议继续保持课堂参与度，并尝试更有挑战的变式题。'
-        : '建议课后及时整理课堂重点和错题，保持稳定练习节奏。')
-  const performanceSentence = /[。！？!?]$/.test(performanceText)
-    ? performanceText
-    : `${performanceText}。`
+function getPartialGeneration() {
+  const partial = state.partialGeneration
+  return partial && partial.payload === state.lastGeneratedPayload && state.feedbacks.length
+    ? partial
+    : null
+}
 
-  return {
-    studentId: student.id,
-    name: student.name,
-    feedback: [
-      '【课程内容】',
-      courseContent,
-      '【核心重点】',
-      courseKnowledgePoint,
-      '【课堂表现】',
-      `${performanceSentence}${learningSuggestion}`
-    ].join('\n'),
-    templateFields: {
-      courseContent,
-      courseKnowledgePoint,
-      performanceText,
-      personalizedRemark: student.remark || '本节课整体状态稳定',
-      learningSuggestion,
-      subject: String(sharedFields.subject || '').trim()
-    }
+function renderPartialFeedbackState() {
+  const partial = getPartialGeneration()
+  if (!partial) state.partialGeneration = null
+  if (els.partialFeedbackNotice) {
+    els.partialFeedbackNotice.classList.toggle('hidden', !partial)
+    els.partialFeedbackNotice.textContent = partial
+      ? `已完成 ${state.feedbacks.length} / ${partial.payload.students.length}。未完成：${partial.failedStudents.map((student) => `${student.name}${student.error ? `（${student.error}）` : ''}`).join('；')}。已完成的反馈可复制或导出；原课件和录入已保留。`
+      : ''
+  }
+  if (els.retryIncompleteBtn) {
+    els.retryIncompleteBtn.classList.toggle('hidden', !partial)
+    els.retryIncompleteBtn.disabled = state.generating || !partial
+    els.retryIncompleteBtn.textContent = state.generating
+      ? '正在补试未完成学生...'
+      : `仅重试未完成${partial ? `（${partial.failedStudents.length} 人）` : ''}`
   }
 }
 
@@ -6035,47 +6010,95 @@ async function generateFeedback() {
 
     const { response, data } = await requestFeedbackGeneration(formData)
 
-    if (response.status === 401) {
-      updateAccessState({ authenticated: false })
-      renderAccessState()
-      showAccessMessage(data.error || '请先登录账号')
-      throw new Error(data.error || '请先登录账号')
-    }
-
-    if (response.status === 429) {
-      updateAccessState({ usage: data.usage || state.access.usage })
-      renderAccessState()
-      throw new Error(data.error || '今天的生成次数已用完')
-    }
-
-    if (!response.ok || data.error) {
-      throw new Error(data.error || '生成失败')
-    }
-
-    if (data.usage) {
-      updateAccessState({ usage: data.usage })
-      renderAccessState()
-    }
-
-    state.feedbacks = normalizeGeneratedFeedbacksForPayload(data.feedbacks, payload)
-    state.lastGeneratedPayload = payload
-    state.debug = data.debug || null
-    state.pendingTeachingApplication = {
-      id: createId('pending-teaching'),
-      payload,
-      feedbacks: state.feedbacks,
-      createdAt: Date.now(),
-      applying: false,
-      applied: false
-    }
-    clearGenerationInstruction()
-    setGenerationStatus(data.demo ? '已生成演示反馈。' : '反馈已生成，可以查看、复制或导出。', 'success')
-    renderResults()
-    renderImageReport(payload)
-    showToast(data.demo ? (data.message || '已生成演示反馈，配置 API Key 后会调用 AI') : '反馈已生成')
+    validateGenerationResponse(response, data)
+    applyGenerationResult(data, payload, payload, formData)
     document.querySelector('#resultsPanel').scrollIntoView({ behavior: 'smooth', block: 'start' })
   } catch (error) {
     const message = getGenerationErrorMessage(error)
+    setGenerationStatus(message, 'error')
+    showToast(message)
+  } finally {
+    setGenerating(false)
+  }
+}
+
+function validateGenerationResponse(response, data) {
+  if (response.status === 401) {
+    updateAccessState({ authenticated: false })
+    renderAccessState()
+    showAccessMessage(data.error || '请先登录账号')
+    throw new Error(data.error || '请先登录账号')
+  }
+  if (response.status === 429) {
+    updateAccessState({ usage: data.usage || state.access.usage })
+    renderAccessState()
+    throw new Error(data.error || '今天的生成次数已用完')
+  }
+  if (!response.ok || data.error) throw new Error(data.error || '生成失败')
+  if (data.usage) {
+    updateAccessState({ usage: data.usage })
+    renderAccessState()
+  }
+}
+
+function applyGenerationResult(data, requestedPayload, fullPayload, originalFormData, previousFeedbacks = []) {
+  const incoming = normalizeGeneratedFeedbacksForPayload(data.feedbacks, requestedPayload)
+  if (!incoming.length) throw new Error(data.message || 'AI 未返回可用反馈，已保留原录入，请重试')
+  if (data.demo && previousFeedbacks.length) throw new Error('AI 配置暂不可用，已保留完成的反馈，请稍后补试')
+  const byId = new Map(previousFeedbacks.map((item) => [item.studentId, item]))
+  incoming.forEach((item) => { if (!byId.has(item.studentId)) byId.set(item.studentId, item) })
+  const feedbacks = normalizeGeneratedFeedbacksForPayload([...byId.values()], fullPayload)
+  const completedIds = new Set(feedbacks.map((item) => item.studentId))
+  const failureDetails = new Map((Array.isArray(data.failedStudents) ? data.failedStudents : [])
+    .map((item) => [item.studentId, item]))
+  const failedStudents = (fullPayload.students || []).filter((student) => !completedIds.has(student.id))
+    .map((student) => ({ studentId: student.id, name: student.name, error: String((failureDetails.get(student.id) || {}).error || '') }))
+
+  state.feedbacks = feedbacks
+  state.lastGeneratedPayload = fullPayload
+  state.debug = data.debug || state.debug || null
+  state.partialGeneration = failedStudents.length
+    ? { payload: fullPayload, formData: originalFormData, failedStudents }
+    : null
+  state.pendingTeachingApplication = failedStudents.length ? null : {
+    id: createId('pending-teaching'), payload: fullPayload, feedbacks,
+    createdAt: Date.now(), applying: false, applied: false
+  }
+  if (!failedStudents.length) clearGenerationInstruction()
+  const message = failedStudents.length
+    ? `已完成 ${feedbacks.length} / ${fullPayload.students.length}，还有 ${failedStudents.length} 人未完成。可点击“仅重试未完成”，已完成反馈会保留。`
+    : (data.demo ? '已生成演示反馈。' : `反馈已全部生成（${feedbacks.length} 人），可以查看、复制或导出。`)
+  setGenerationStatus(message, failedStudents.length ? 'warning' : 'success')
+  renderResults()
+  renderImageReport(fullPayload)
+  showToast(message)
+}
+
+async function retryIncompleteFeedbacks() {
+  if (state.generating) return
+  const partial = getPartialGeneration()
+  if (!partial) return
+  const missingIds = new Set(partial.failedStudents.map((student) => student.studentId))
+  const payload = {
+    ...partial.payload,
+    students: partial.payload.students.filter((student) => missingIds.has(student.id)),
+    generationRequestId: createGenerationRequestId()
+  }
+  const formData = new FormData()
+  for (const [name, value] of partial.formData.entries()) {
+    if (name !== 'payload') formData.append(name, value)
+  }
+  formData.append('payload', JSON.stringify(payload))
+  const previousFeedbacks = state.feedbacks.slice()
+  setGenerating(true)
+  setGenerationStatus(`正在补试 ${payload.students.length} 名未完成学生，已完成反馈保持不变。`, 'busy')
+  try {
+    const { response, data } = await requestFeedbackGeneration(formData)
+    validateGenerationResponse(response, data)
+    if (state.partialGeneration !== partial) return
+    applyGenerationResult(data, payload, partial.payload, partial.formData, previousFeedbacks)
+  } catch (error) {
+    const message = `${getGenerationErrorMessage(error)} 已完成的 ${previousFeedbacks.length} 条反馈仍保留，可再次补试。`
     setGenerationStatus(message, 'error')
     showToast(message)
   } finally {
@@ -6323,6 +6346,7 @@ function setGenerating(isGenerating) {
   els.generateBtn.setAttribute('aria-busy', String(isGenerating))
   els.generateBtn.disabled = isGenerating
   els.generateBtn.textContent = isGenerating ? 'AI 生成中...' : 'AI 生成反馈'
+  renderPartialFeedbackState()
 }
 
 function clearGenerationInstruction() {

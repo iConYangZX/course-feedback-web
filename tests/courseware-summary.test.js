@@ -263,3 +263,110 @@ test('unknown page numbers stay unknown after image subdivision and text is stil
   assert.equal(result.summaryStats.coveredImageCount, 4)
   assert.equal(result.summaryStats.coveredTextChars, original.extractedText.length)
 })
+
+test('HTTP/2 summary failures retry the same bounded chunk twice in streaming mode then once without streaming', async () => {
+  const original = paper(6)
+  const attempts = []
+  const result = await createCoursewareSummary(original, async (chunk) => {
+    attempts.push(chunk)
+    assert.equal(chunk.extractedText, original.extractedText)
+    assert.deepEqual(chunk.visionImages, original.visionImages)
+    if (chunk.stream !== false) {
+      const error = aiError('AI_RESPONSE_INTERRUPTED', 'AI 服务响应连接中断')
+      error.streamFallbackRecommended = true
+      throw error
+    }
+    return '保留六页完整资料后的摘要'
+  })
+  assert.deepEqual(attempts.map((chunk) => chunk.stream !== false), [true, true, false])
+  assert.equal(result.summaryStats.streamFallbackCount, 1)
+  assert.equal(result.summaryStats.coveredImageCount, 6)
+  assert.equal(result.summaryStats.coveredTextChars, original.extractedText.length)
+})
+
+test('persistent HTTP/2 summary failures stop after three attempts without a retry loop', async () => {
+  const streams = []
+  await assert.rejects(createCoursewareSummary(paper(6), async (chunk) => {
+    streams.push(chunk.stream !== false)
+    const error = aiError('AI_RESPONSE_INTERRUPTED')
+    error.streamFallbackRecommended = true
+    throw error
+  }), (error) => error.code === 'AI_RESPONSE_INTERRUPTED')
+  assert.deepEqual(streams, [true, true, false])
+})
+
+test('HTTP/2 summary compatibility recovery keeps concurrency at two and does not bypass permanent errors', async () => {
+  let active = 0
+  let peak = 0
+  const perChunk = new Map()
+  const result = await createCoursewareSummary(paper(18), async (chunk) => {
+    active += 1
+    peak = Math.max(peak, active)
+    try {
+      await new Promise(setImmediate)
+      perChunk.set(chunk.index, (perChunk.get(chunk.index) || 0) + 1)
+      if (chunk.stream !== false) {
+        const error = aiError('AI_RESPONSE_INTERRUPTED')
+        error.streamFallbackRecommended = true
+        throw error
+      }
+      return `第${chunk.index}段全部完成`
+    } finally { active -= 1 }
+  })
+  assert.equal(peak, 2)
+  assert.deepEqual([...perChunk.values()], [3, 3, 3])
+  assert.equal(result.summaryStats.coveredImageCount, 18)
+  let attempts = 0
+  await assert.rejects(createCoursewareSummary(paper(6), async () => {
+    attempts += 1
+    const error = aiError(attempts === 1 ? 'AI_RESPONSE_INTERRUPTED' : 'AI_PROVIDER_QUOTA')
+    error.streamFallbackRecommended = true
+    throw error
+  }), (error) => error.code === 'AI_PROVIDER_QUOTA')
+  assert.equal(attempts, 2)
+})
+
+test('exhausted HTTP retries never restart summary recovery or compatibility fallback', async () => {
+  for (const code of ['AI_RESPONSE_INTERRUPTED', 'AI_PROVIDER_BUSY', 'AI_OUTPUT_TRUNCATED']) {
+    let calls = 0
+    const exhausted = aiError(code)
+    exhausted.httpRetryExhausted = true
+    exhausted.streamFallbackRecommended = true
+    await assert.rejects(createCoursewareSummary(paper(6), async () => {
+      calls += 1
+      throw exhausted
+    }), (error) => error.code === code && error.httpRetryExhausted === true && error.cause === exhausted)
+    assert.equal(calls, 1, `${code} must not multiply the already exhausted HTTP attempts`)
+  }
+})
+
+test('HTTP-200 provider busy errors retry the identical chunk once after a short backoff without stream fallback', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  for (const succeeds of [true, false]) {
+    const attempts = []
+    const pending = createCoursewareSummary(paper(6), async (chunk) => {
+      attempts.push(chunk)
+      if (succeeds && attempts.length === 2) return '繁忙恢复后的完整六页摘要'
+      const error = aiError('AI_PROVIDER_BUSY', 'AI 服务繁忙')
+      error.status = 200
+      error.streamFallbackRecommended = true // A busy error must never use this hint.
+      throw error
+    })
+    const outcome = pending.then((result) => ({ result }), (error) => ({ error }))
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(attempts.length, 1)
+    t.mock.timers.tick(699)
+    await Promise.resolve()
+    assert.equal(attempts.length, 1)
+    t.mock.timers.tick(1)
+    const settled = await outcome
+    assert.equal(attempts.length, 2)
+    assert.equal(attempts[0], attempts[1])
+    assert.ok(attempts.every((chunk) => chunk.stream !== false))
+    if (succeeds) {
+      assert.equal(settled.result.summaryStats.coveredImageCount, 6)
+      assert.equal(settled.result.summaryStats.streamFallbackCount, 0)
+    } else assert.equal(settled.error.code, 'AI_PROVIDER_BUSY')
+  }
+})

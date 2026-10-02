@@ -12,6 +12,7 @@ const { fetch, Agent, ProxyAgent } = require('undici')
 const { readAIResponseText } = require('./lib/ai-response-stream')
 const { createCoursewareSummary } = require('./lib/courseware-summary')
 const { AIResultCache } = require('./lib/ai-result-cache')
+const { normalizeAIProviderError } = require('./lib/ai-provider-error')
 const coursewareSummaryCache = new AIResultCache()
 require('dotenv').config()
 
@@ -693,7 +694,10 @@ async function generateFeedbackResult(input) {
 
   const preparedCourseware = await prepareFeedbackCourseware(courseware, aiConfig, payload, usageClientId)
   const generation = await requestFeedbacks(payload, preparedCourseware, aiConfig)
-  const nextUsage = await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+  const nextUsage = generation.partial ? usageInfo : await incrementUsage(usageClientId, usageInfo.limit, usageInfo.unlimited)
+  const completedIds = new Set(generation.feedbacks.map((item) => item.studentId))
+  const completedStudents = payload.students.filter((student) => completedIds.has(student.id))
+  assertCompleteFeedbacks(generation.feedbacks, completedStudents)
   const debug = buildDebugSummary(payload, preparedCourseware)
   if (preparedCourseware && preparedCourseware.summaryStats) {
     debug.coursewareSummary = preparedCourseware.summaryStats
@@ -706,7 +710,10 @@ async function generateFeedbackResult(input) {
     model: aiConfig.model,
     debug,
     usage: nextUsage,
-    feedbacks: normalizeFeedbacks(generation.feedbacks, payload.students, payload)
+    partial: Boolean(generation.partial),
+    failedStudents: generation.failedStudents || [],
+    ...(generation.partial ? { message: `已完成 ${completedStudents.length}/${payload.students.length} 位学生的反馈，未完成的可单独补试` } : {}),
+    feedbacks: normalizeFeedbacks(generation.feedbacks, completedStudents, payload)
   }
 }
 
@@ -2251,7 +2258,7 @@ async function requestTeachingTextAI(prompt, aiConfig, options = {}) {
 async function requestOpenAIText(prompt, aiConfig, options = {}) {
   const body = {
     model: aiConfig.model,
-    stream: true,
+    stream: options.stream !== false,
     instructions: '你是一名专业、温和、具体的教学分析助手。请直接输出中文正文，不要使用 Markdown 表格。',
     input: options.images && options.images.length ? [{
       role: 'user',
@@ -2275,8 +2282,7 @@ async function requestOpenAIText(prompt, aiConfig, options = {}) {
   const text = await readAIResponseText(response)
   const parsed = parseProviderResponseJson(text, 'AI', response.status)
   if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`AI 请求失败：${message}`)
+    throw normalizeAIProviderError(parsed, { providerLabel: 'AI', status: response.status })
   }
 
   return extractAIResponseText(parsed)
@@ -2310,15 +2316,14 @@ async function requestChatText(prompt, aiConfig, options = {}) {
       ],
       temperature: 0.35,
       max_tokens: options.maxOutputTokens || 1200,
-      stream: true
+      stream: options.stream !== false
     })
   })
 
   const text = await readAIResponseText(response)
   const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI', response.status)
   if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
+    throw normalizeAIProviderError(parsed, { providerLabel: options.providerLabel || 'AI', status: response.status })
   }
 
   return extractAIResponseText(parsed)
@@ -2412,8 +2417,7 @@ async function requestOpenAIPaperAnalysis(payload, courseware, aiConfig) {
   const text = await readAIResponseText(response)
   const parsed = parseProviderResponseJson(text, 'AI', response.status)
   if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`AI 请求失败：${message}`)
+    throw normalizeAIProviderError(parsed, { providerLabel: 'AI', status: response.status })
   }
   return parsed
 }
@@ -2459,8 +2463,7 @@ async function requestChatPaperAnalysis(payload, courseware, aiConfig, options =
   const text = await readAIResponseText(response)
   const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI', response.status)
   if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
+    throw normalizeAIProviderError(parsed, { providerLabel: options.providerLabel || 'AI', status: response.status })
   }
   return parsed
 }
@@ -2713,8 +2716,7 @@ async function requestOpenAIPaperScoreRecognition(payload, courseware, aiConfig)
   const text = await readAIResponseText(response)
   const parsed = parseProviderResponseJson(text, 'AI', response.status)
   if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`AI 请求失败：${message}`)
+    throw normalizeAIProviderError(parsed, { providerLabel: 'AI', status: response.status })
   }
   return parsed
 }
@@ -2760,8 +2762,7 @@ async function requestChatPaperScoreRecognition(payload, courseware, aiConfig, o
   const text = await readAIResponseText(response)
   const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI', response.status)
   if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
+    throw normalizeAIProviderError(parsed, { providerLabel: options.providerLabel || 'AI', status: response.status })
   }
   return parsed
 }
@@ -3276,7 +3277,8 @@ async function prepareFeedbackCourseware(courseware, aiConfig, payload = {}, cac
     ].filter(Boolean).join('\n')
     const generate = () => requestTeachingTextAI(prompt, aiConfig, {
       images: chunk.visionImages,
-      maxOutputTokens: chunk.maxOutputTokens || 2400
+      maxOutputTokens: chunk.maxOutputTokens || 2400,
+      stream: chunk.stream !== false
     })
     if (!cacheScope) return generate()
     // Session-scoped and content-addressed; credentials only enter a one-way
@@ -3291,61 +3293,40 @@ async function prepareFeedbackCourseware(courseware, aiConfig, payload = {}, cac
 
 async function requestFeedbacks(payload, courseware, aiConfig) {
   const students = Array.isArray(payload.students) ? payload.students : []
-  const shouldBatch = payload.feedbackScope !== 'class' && students.length > FEEDBACK_BATCH_SIZE
-
-  if (!shouldBatch) {
-    const feedbacks = await requestFeedbackBatch(payload, courseware, aiConfig)
-    return {
-      feedbacks,
-      batchCount: 1,
-      failedBatchCount: 0
-    }
-  }
-
   const batches = []
-  for (let index = 0; index < students.length; index += FEEDBACK_BATCH_SIZE) {
-    batches.push(students.slice(index, index + FEEDBACK_BATCH_SIZE))
-  }
-
+  const batchSize = payload.feedbackScope === 'class' ? Math.max(1, students.length) : FEEDBACK_BATCH_SIZE
+  for (let index = 0; index < students.length; index += batchSize) batches.push(students.slice(index, index + batchSize))
   const results = new Array(batches.length)
   let nextBatchIndex = 0
-  const workerCount = Math.min(FEEDBACK_BATCH_CONCURRENCY, batches.length)
-
-  await Promise.all(Array.from({ length: workerCount }, async () => {
+  await Promise.all(Array.from({ length: Math.min(FEEDBACK_BATCH_CONCURRENCY, batches.length) }, async () => {
     while (nextBatchIndex < batches.length) {
-      const batchIndex = nextBatchIndex
-      nextBatchIndex += 1
-
+      const batchIndex = nextBatchIndex++
       try {
-        const batchPayload = buildFeedbackBatchPayload(payload, batches[batchIndex])
-        results[batchIndex] = {
-          status: 'fulfilled',
-          feedbacks: await requestFeedbackBatch(batchPayload, courseware, aiConfig)
-        }
+        results[batchIndex] = { feedbacks: await requestFeedbackBatch(buildFeedbackBatchPayload(payload, batches[batchIndex]), courseware, aiConfig) }
       } catch (error) {
         console.error(`AI feedback batch ${batchIndex + 1}/${batches.length} failed`, error)
-        results[batchIndex] = {
-          status: 'rejected',
-          error
-        }
+        results[batchIndex] = { feedbacks: error.completedFeedbacks || [], error }
       }
     }
   }))
-
-  const successfulFeedbacks = results.flatMap((result) => (
-    result && result.status === 'fulfilled' ? result.feedbacks : []
-  ))
-  const failedResults = results.filter((result) => !result || result.status !== 'fulfilled')
-
-  if (failedResults.length || !successfulFeedbacks.length) {
-    const firstError = failedResults.find((result) => result && result.error)
-    throw (firstError && firstError.error) || new Error('AI 未返回可用的反馈内容，请稍后重试')
+  const returned = results.flatMap((result) => result.feedbacks)
+  const matches = matchFeedbacksByStudent(students, returned)
+  const feedbacks = []
+  const failedStudents = []
+  for (const student of students) {
+    const item = matches.get(student.id)
+    if (item && trim(item.feedback)) feedbacks.push({ ...item, studentId: student.id, name: student.name })
+    else {
+      const batchIndex = batches.findIndex((batch) => batch.some((member) => member.id === student.id))
+      const error = results[batchIndex] && results[batchIndex].error
+      failedStudents.push({ studentId: student.id, name: student.name, error: error ? getUserFacingError(error) : 'AI 未返回完整反馈，请补试' })
+    }
   }
-
+  if (!feedbacks.length) throw results.find((result) => result.error)?.error || new Error('AI 未返回可用的反馈内容，请稍后重试')
   return {
-    feedbacks: successfulFeedbacks,
+    feedbacks, failedStudents, partial: failedStudents.length > 0,
     batchCount: batches.length,
-    failedBatchCount: failedResults.length
+    failedBatchCount: results.filter((result) => result.error).length
   }
 }
 
@@ -3362,12 +3343,16 @@ function assertCompleteFeedbacks(feedbacks, students = []) {
 async function requestFeedbackBatch(payload, courseware, aiConfig, options = {}) {
   const students = Array.isArray(payload.students) ? payload.students : []
   const canSplit = payload.feedbackScope !== 'class' && students.length > 1
-  const maxAttempts = canSplit ? 1 : 3
   let maxOutputTokens = options.maxOutputTokens || 8000
+  let stream = options.stream !== false
   let lastError = null
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  const retainCompleted = (error, completed) => {
+    error.completedFeedbacks = [...new Map([...completed, ...(error.completedFeedbacks || [])].map((item) => [item.studentId, item])).values()]
+    return error
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const response = await requestAI(payload, courseware, aiConfig, { ...options, maxOutputTokens })
+      const response = await requestAI(payload, courseware, aiConfig, { ...options, maxOutputTokens, stream })
       const parsed = parseFeedbackResponse(response, aiConfig.provider)
       const matches = matchFeedbacksByStudent(students, parsed.feedbacks)
       const complete = []
@@ -3379,31 +3364,39 @@ async function requestFeedbackBatch(payload, courseware, aiConfig, options = {})
       }
       if (!missing.length) return complete
       if (complete.length && payload.feedbackScope !== 'class') {
-        // Keep successful students. Re-request only missing identities, never
-        // regenerate a successful batch or substitute demo/fallback feedback.
-        const recovered = await requestFeedbackBatch(buildFeedbackBatchPayload(payload, missing), courseware, aiConfig, options)
-        const byId = new Map([...complete, ...recovered].map((item) => [item.studentId, item]))
-        return students.map((student) => byId.get(student.id))
+        try {
+          const recovered = await requestFeedbackBatch(buildFeedbackBatchPayload(payload, missing), courseware, aiConfig, options)
+          const byId = new Map([...complete, ...recovered].map((item) => [item.studentId, item]))
+          return students.map((student) => byId.get(student.id))
+        } catch (error) { throw retainCompleted(error, complete) }
       }
       throw Object.assign(new Error('AI 返回的学生反馈不完整'), { code: 'AI_FEEDBACK_INCOMPLETE' })
     } catch (error) {
       lastError = error
-      // HTTP/authentication/refusal errors must not fan out into more requests.
-      if (error.feedbackRecoveryExhausted || !['AI_OUTPUT_TRUNCATED', 'AI_INVALID_OUTPUT', 'AI_RESPONSE_INTERRUPTED', 'AI_FEEDBACK_INCOMPLETE'].includes(error.code)) throw error
+      if (error.feedbackRecoveryExhausted || error.httpRetryExhausted) throw error
+      if (['AI_RESPONSE_INTERRUPTED', 'AI_PROVIDER_BUSY'].includes(error.code)) {
+        // A transport interruption is retried with the same students and all
+        // original material; it is not evidence that the batch is too large.
+        if (attempt === 2) break
+        if (attempt === 1 && error.streamFallbackRecommended) stream = false
+        await waitForRetry(attempt)
+        continue
+      }
+      if (!['AI_OUTPUT_TRUNCATED', 'AI_INVALID_OUTPUT', 'AI_FEEDBACK_INCOMPLETE'].includes(error.code)) throw error
       if (canSplit) break
       if (error.code === 'AI_OUTPUT_TRUNCATED') maxOutputTokens = 16000
     }
   }
-  if (canSplit) {
+  if (canSplit && !['AI_RESPONSE_INTERRUPTED', 'AI_PROVIDER_BUSY'].includes(lastError && lastError.code)) {
     const midpoint = Math.ceil(students.length / 2)
     const recovered = []
-    // Sequential children keep the original worker concurrency bound in force.
     for (const group of [students.slice(0, midpoint), students.slice(midpoint)]) {
-      recovered.push(...await requestFeedbackBatch(buildFeedbackBatchPayload(payload, group), courseware, aiConfig, options))
+      try { recovered.push(...await requestFeedbackBatch(buildFeedbackBatchPayload(payload, group), courseware, aiConfig, options)) }
+      catch (error) { throw retainCompleted(error, recovered) }
     }
     return recovered
   }
-  const failure = new Error('AI 未能完整生成该份反馈，已自动补试；请稍后重试', { cause: lastError })
+  const failure = new Error('AI 未能完整生成该份反馈，已自动补试；请稍后仅重试未完成的学生', { cause: lastError })
   failure.code = lastError && lastError.code
   failure.feedbackRecoveryExhausted = true
   throw failure
@@ -3438,7 +3431,7 @@ async function requestOpenAI(payload, courseware, aiConfig, options = {}) {
 
   const body = {
     model: aiConfig.model,
-    stream: true,
+    stream: options.stream !== false,
     max_output_tokens: options.maxOutputTokens || 8000,
     instructions: buildSystemPrompt(),
     input: [
@@ -3509,8 +3502,7 @@ async function requestOpenAI(payload, courseware, aiConfig, options = {}) {
   const parsed = parseProviderResponseJson(text, 'AI', response.status)
 
   if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`AI 请求失败：${message}`)
+    throw normalizeAIProviderError(parsed, { providerLabel: 'AI', status: response.status })
   }
 
   if (hasCoursewareVisionImages(courseware)) {
@@ -3559,7 +3551,7 @@ async function sendChatCompatibleRequest(userContent, aiConfig, options = {}) {
     ],
     temperature: 0.2,
     max_tokens: options.maxOutputTokens || 8000,
-    stream: true
+    stream: options.stream !== false
   }
 
   if (options.responseFormat !== false) {
@@ -3587,8 +3579,7 @@ async function sendChatCompatibleRequest(userContent, aiConfig, options = {}) {
   const parsed = parseProviderResponseJson(text, options.providerLabel || 'AI', response.status)
 
   if (!response.ok) {
-    const message = parsed.error && parsed.error.message ? parsed.error.message : text
-    throw new Error(`${options.providerLabel || 'AI'} 请求失败：${message}`)
+    throw normalizeAIProviderError(parsed, { providerLabel: options.providerLabel || 'AI', status: response.status })
   }
 
   return parsed
@@ -3992,8 +3983,8 @@ function extractAIContentText(content) {
 
 function extractAIResponseText(response) {
   if (!response || typeof response !== 'object') throw new Error('AI 未返回有效内容，请重试')
-  if (response.error) throw new Error(`AI 请求失败：${response.error.message || '服务暂时不可用'}`)
-  if (response.status === 'failed') throw new Error('AI 服务生成失败，请稍后重试')
+  if (response.error) throw normalizeAIProviderError(response)
+  if (response.status === 'failed') throw normalizeAIProviderError(response)
   const choice = Array.isArray(response.choices) ? response.choices[0] : null
   if (response.status === 'incomplete' || (choice && choice.finish_reason === 'length')) {
     throw Object.assign(new Error('AI 返回内容被服务商截断'), { code: 'AI_OUTPUT_TRUNCATED' })
@@ -4028,7 +4019,7 @@ function parseProviderResponseJson(text, providerLabel, status = 200) {
       const event = tryParseJson(data)
       if (!event || typeof event !== 'object') throw Object.assign(new Error(buildNonJsonAIResponseMessage('', providerLabel, status)), { code: status >= 200 && status < 300 ? 'AI_INVALID_OUTPUT' : 'AI_HTTP_ERROR' })
       if (event.error || event.type === 'error') {
-        throw new Error(`${providerLabel || 'AI'} 请求失败：${(event.error && event.error.message) || event.message || '服务暂时不可用'}`)
+        throw normalizeAIProviderError(event, { providerLabel, status })
       }
       if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') {
         completeResponse = event.type === 'response.incomplete' || event.type === 'response.failed'
@@ -4784,8 +4775,13 @@ async function fetchAI(url, options = {}) {
     try {
       const response = await fetch(url, withProxy(requestOptions))
 
-      if (attempt < AI_REQUEST_RETRY_COUNT && isRetryableAIStatus(response.status)) {
-        await response.text().catch(() => '')
+      if (isRetryableAIStatus(response.status)) {
+        const errorText = await response.text().catch(() => '')
+        let errorPayload
+        try { errorPayload = JSON.parse(errorText) } catch { errorPayload = { message: errorText } }
+        const failure = normalizeAIProviderError(errorPayload, { status: response.status })
+        if (['AI_PROVIDER_AUTH', 'AI_PROVIDER_QUOTA', 'AI_PROVIDER_BAD_REQUEST', 'AI_PROVIDER_REFUSAL'].includes(failure.code)) throw failure
+        if (attempt >= AI_REQUEST_RETRY_COUNT) { failure.httpRetryExhausted = true; throw failure }
         await waitForRetry(attempt)
         continue
       }

@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+const { normalizeAIProviderError } = require('../lib/ai-provider-error')
 
 // Load real orchestration/parser functions while replacing the provider boundary.
 // No server startup, credentials, network, or invented fallback feedback is used.
@@ -25,7 +26,7 @@ function load(requestAI) {
   }
   requested.forEach(include)
   const code = `${constantDeclarations.join('\n')}\n${[...included].map((name) => declarations.get(name)).join('\n')}`
-  return new Function('requestAI', 'console', `${code}; return { ${requested.join(',')} }`)(requestAI, { error() {} })
+  return new Function('requestAI', 'console', 'normalizeAIProviderError', 'setTimeout', `${code}; return { ${requested.join(',')} }`)(requestAI, { error() {} }, normalizeAIProviderError, (callback) => setImmediate(callback))
 }
 
 const config = { provider: 'custom', model: 'gpt-5.6-sol' }
@@ -55,7 +56,7 @@ test('20 students use the production three-person default and all results come f
   }
 })
 
-for (const failure of ['truncated', 'invalid JSON', 'interrupted']) {
+for (const failure of ['truncated', 'invalid JSON']) {
   test(`a five-person batch recovers ${failure} by requesting smaller batches`, async () => {
     const calls = []
     const api = load(async (payload) => {
@@ -63,9 +64,6 @@ for (const failure of ['truncated', 'invalid JSON', 'interrupted']) {
       if (payload.students.length > 2) {
         if (failure === 'truncated') return chat('{"feedbacks":[', 'length')
         if (failure === 'invalid JSON') return chat('malformed provider output')
-        const error = new Error('AI 服务返回中途断开')
-        error.code = 'AI_RESPONSE_INTERRUPTED'
-        throw error
       }
       return completed(payload.students.map((student) => itemFor(student)))
     })
@@ -127,8 +125,10 @@ test('exhausted nested missing-student recovery never regenerates completed ance
     if (payload.students.length > 1) return completed([itemFor(payload.students[0])])
     return chat('{"feedbacks":', 'length')
   })
-  await assert.rejects(api.requestFeedbacks(payloadFor(3), material, config),
-    (error) => error.feedbackRecoveryExhausted === true)
+  const result = await api.requestFeedbacks(payloadFor(3), material, config)
+  assert.equal(result.partial, true)
+  assert.deepEqual(result.feedbacks.map((item) => item.studentId), ['s1', 's2'])
+  assert.deepEqual(result.failedStudents.map((item) => item.studentId), ['s3'])
   assert.deepEqual(calls.slice(0, 2), [['s1', 's2', 's3'], ['s2', 's3']])
   assert.ok(calls.length >= 4 && calls.length <= 5, `no ancestor retries: ${calls.length}`)
   assert.ok(calls.slice(2).every((batch) => batch.length === 1 && batch[0] === 's3'))
